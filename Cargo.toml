@@ -16,8 +16,10 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = "1.0"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-dynamodb = "1"
 aws-sdk-ec2 = "1"
 aws-sdk-iam = "1"
+aws-sdk-lambda = "1"
 aws-sdk-rds = "1"
 aws-sdk-s3 = "1"
 aws-sdk-sts = "1"

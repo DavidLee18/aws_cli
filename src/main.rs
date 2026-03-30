@@ -197,6 +197,30 @@ enum IamCommands {
 enum StsCommands {
     /// Returns details about the IAM identity used to call the operation.
     GetCallerIdentity,
+    /// Assume an IAM role and return temporary security credentials.
+    AssumeRole {
+        /// ARN of the role to assume.
+        #[arg(long, required = true)]
+        role_arn: String,
+        /// Session name for the assumed role.
+        #[arg(long, required = true)]
+        role_session_name: String,
+        /// Duration in seconds (default: 3600, max: 43200).
+        #[arg(long)]
+        duration_seconds: Option<i32>,
+    },
+    /// Get temporary security credentials for the AWS account or IAM user.
+    GetSessionToken {
+        /// Duration in seconds (default: 3600, max: 129600).
+        #[arg(long)]
+        duration_seconds: Option<i32>,
+    },
+    /// Decode an authorization message returned when a request is denied.
+    DecodeAuthorizationMessage {
+        /// The encoded authorization message.
+        #[arg(long, required = true)]
+        encoded_message: String,
+    },
 }
 
 // ── RDS sub-commands ──────────────────────────────────────────────────────────
@@ -434,6 +458,26 @@ async fn main() -> Result<()> {
                     match subcommand {
                         StsCommands::GetCallerIdentity => {
                             sts_cmd::cmd_get_caller_identity(&client).await?
+                        }
+                        StsCommands::AssumeRole {
+                            role_arn,
+                            role_session_name,
+                            duration_seconds,
+                        } => {
+                            sts_cmd::cmd_assume_role(
+                                &client,
+                                &role_arn,
+                                &role_session_name,
+                                duration_seconds,
+                            )
+                            .await?
+                        }
+                        StsCommands::GetSessionToken { duration_seconds } => {
+                            sts_cmd::cmd_get_session_token(&client, duration_seconds).await?
+                        }
+                        StsCommands::DecodeAuthorizationMessage { encoded_message } => {
+                            sts_cmd::cmd_decode_authorization_message(&client, &encoded_message)
+                                .await?
                         }
                     }
                 }
