@@ -366,6 +366,18 @@ pub async fn cmd_put_function_event_invoke_config(
     maximum_retry_attempts: Option<i32>,
     maximum_event_age_in_seconds: Option<i32>,
 ) -> Result<()> {
+    if let Some(retries) = maximum_retry_attempts {
+        if !(0..=2).contains(&retries) {
+            anyhow::bail!("--maximum-retry-attempts must be between 0 and 2");
+        }
+    }
+
+    if let Some(max_age) = maximum_event_age_in_seconds {
+        if !(60..=21600).contains(&max_age) {
+            anyhow::bail!("--maximum-event-age-in-seconds must be between 60 and 21600");
+        }
+    }
+
     let mut req = client
         .put_function_event_invoke_config()
         .function_name(function_name);
