@@ -23,15 +23,15 @@ This is an **active implementation** of core AWS CLI functionality in Rust. Curr
 - [ ] `mv` - Move objects
 - [ ] `presign` - Generate presigned URLs
 
-#### ✓ EC2 (6/40 core commands - 15%)
+#### ✓ EC2 (7/40 core commands - 17.5%)
 - [x] `describe-instances` - List instances
 - [x] `describe-regions` - List regions
 - [x] `start-instances` - Start instances
 - [x] `stop-instances` - Stop instances
 - [x] `reboot-instances` - Reboot instances
+- [x] `terminate-instances` - Terminate instances
 - [x] `describe-instance-types` - List instance types
 - [ ] `run-instances` - Launch instances
-- [ ] `terminate-instances` - Terminate instances
 - [ ] Security group commands (4)
 - [ ] Key pair commands (4)
 - [ ] Volume & snapshot commands

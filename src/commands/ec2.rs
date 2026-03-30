@@ -139,6 +139,37 @@ pub async fn cmd_reboot_instances(client: &Client, instance_ids: &[String]) -> R
     Ok(())
 }
 
+/// Terminate one or more EC2 instances.
+pub async fn cmd_terminate_instances(client: &Client, instance_ids: &[String]) -> Result<()> {
+    if instance_ids.is_empty() {
+        anyhow::bail!("At least one instance ID is required");
+    }
+    let mut req = client.terminate_instances();
+    for id in instance_ids {
+        req = req.instance_ids(id);
+    }
+    let resp = req
+        .send()
+        .await
+        .context("Failed to terminate EC2 instances")?;
+
+    for change in resp.terminating_instances() {
+        let id = change.instance_id().unwrap_or("<unknown>");
+        let prev = change
+            .previous_state()
+            .and_then(|s| s.name())
+            .map(|n| n.as_str())
+            .unwrap_or("unknown");
+        let curr = change
+            .current_state()
+            .and_then(|s| s.name())
+            .map(|n| n.as_str())
+            .unwrap_or("unknown");
+        println!("TerminateInstances: {id}  {prev} → {curr}");
+    }
+    Ok(())
+}
+
 /// Describe available EC2 instance types.
 pub async fn cmd_describe_instance_types(
     client: &Client,

@@ -161,6 +161,12 @@ enum Ec2Commands {
         #[arg(value_name = "INSTANCE_ID", required = true)]
         instance_ids: Vec<String>,
     },
+    /// Terminate one or more EC2 instances.
+    TerminateInstances {
+        /// Instance IDs to terminate.
+        #[arg(value_name = "INSTANCE_ID", required = true)]
+        instance_ids: Vec<String>,
+    },
     /// Describe EC2 instance types.
     DescribeInstanceTypes {
         /// Specific instance types to describe (omit for all).
@@ -592,6 +598,9 @@ async fn main() -> Result<()> {
                         } => ec2_cmd::cmd_stop_instances(&client, &instance_ids, force).await?,
                         Ec2Commands::RebootInstances { instance_ids } => {
                             ec2_cmd::cmd_reboot_instances(&client, &instance_ids).await?
+                        }
+                        Ec2Commands::TerminateInstances { instance_ids } => {
+                            ec2_cmd::cmd_terminate_instances(&client, &instance_ids).await?
                         }
                         Ec2Commands::DescribeInstanceTypes { instance_types } => {
                             ec2_cmd::cmd_describe_instance_types(&client, &instance_types).await?
