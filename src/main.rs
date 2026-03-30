@@ -241,6 +241,12 @@ enum IamCommands {
         #[arg(long, required = true)]
         role_name: String,
     },
+    /// Delete an IAM policy.
+    DeletePolicy {
+        /// ARN of the IAM policy to delete.
+        #[arg(long, required = true)]
+        policy_arn: String,
+    },
     /// Get details for an IAM policy.
     GetPolicy {
         /// ARN of the IAM policy to retrieve.
@@ -787,6 +793,9 @@ async fn main() -> Result<()> {
                         }
                         IamCommands::DeleteRole { role_name } => {
                             iam_cmd::cmd_delete_role(&client, &role_name).await?
+                        }
+                        IamCommands::DeletePolicy { policy_arn } => {
+                            iam_cmd::cmd_delete_policy(&client, &policy_arn).await?
                         }
                         IamCommands::GetPolicy { policy_arn } => {
                             iam_cmd::cmd_get_policy(&client, &policy_arn).await?

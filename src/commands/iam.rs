@@ -152,6 +152,19 @@ pub async fn cmd_get_policy(client: &Client, policy_arn: &str) -> Result<()> {
     Ok(())
 }
 
+/// Delete an IAM policy.
+pub async fn cmd_delete_policy(client: &Client, policy_arn: &str) -> Result<()> {
+    client
+        .delete_policy()
+        .policy_arn(policy_arn)
+        .send()
+        .await
+        .context("Failed to delete IAM policy")?;
+
+    println!("Deleted policy: {policy_arn}");
+    Ok(())
+}
+
 /// List all IAM users.
 pub async fn cmd_list_users(client: &Client, path_prefix: Option<&str>) -> Result<()> {
     let mut marker: Option<String> = None;
