@@ -1,6 +1,27 @@
 use anyhow::{Context, Result};
 use aws_sdk_iam::Client;
 
+/// Create an IAM user.
+pub async fn cmd_create_user(client: &Client, user_name: &str, path: Option<&str>) -> Result<()> {
+    let mut req = client.create_user().user_name(user_name);
+    if let Some(p) = path {
+        req = req.path(p);
+    }
+
+    let resp = req.send().await.context("Failed to create IAM user")?;
+    let user = resp.user();
+
+    println!(
+        "Created user: {}",
+        user.map(|u| u.user_name()).unwrap_or(user_name)
+    );
+    println!("User ID: {}", user.map(|u| u.user_id()).unwrap_or("N/A"));
+    println!("ARN: {}", user.map(|u| u.arn()).unwrap_or("N/A"));
+    println!("Path: {}", user.map(|u| u.path()).unwrap_or("N/A"));
+
+    Ok(())
+}
+
 /// List all IAM users.
 pub async fn cmd_list_users(client: &Client, path_prefix: Option<&str>) -> Result<()> {
     let mut marker: Option<String> = None;

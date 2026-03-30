@@ -179,6 +179,15 @@ enum Ec2Commands {
 
 #[derive(Subcommand)]
 enum IamCommands {
+    /// Create an IAM user.
+    CreateUser {
+        /// IAM user name to create.
+        #[arg(long, required = true)]
+        user_name: String,
+        /// Optional path for the user (e.g. /division_abc/).
+        #[arg(long)]
+        path: Option<String>,
+    },
     /// List IAM users.
     ListUsers {
         /// Path prefix filter (e.g. /division_abc/).
@@ -641,6 +650,9 @@ async fn main() -> Result<()> {
                 Commands::Iam { subcommand } => {
                     let client = aws_sdk_iam::Client::new(&aws_cfg);
                     match subcommand {
+                        IamCommands::CreateUser { user_name, path } => {
+                            iam_cmd::cmd_create_user(&client, &user_name, path.as_deref()).await?
+                        }
                         IamCommands::ListUsers { path_prefix } => {
                             iam_cmd::cmd_list_users(&client, path_prefix.as_deref()).await?
                         }
