@@ -395,6 +395,12 @@ enum LambdaCommands {
         #[arg(long, required = true)]
         function_name: String,
     },
+    /// Publish a new version of a Lambda function.
+    PublishVersion {
+        /// Name of the Lambda function.
+        #[arg(long, required = true)]
+        function_name: String,
+    },
     /// Invoke a Lambda function.
     Invoke {
         /// Name of the Lambda function.
@@ -823,6 +829,9 @@ async fn main() -> Result<()> {
                         }
                         LambdaCommands::DeleteFunction { function_name } => {
                             lambda_cmd::cmd_delete_function(&client, &function_name).await?
+                        }
+                        LambdaCommands::PublishVersion { function_name } => {
+                            lambda_cmd::cmd_publish_version(&client, &function_name).await?
                         }
                         LambdaCommands::Invoke {
                             function_name,

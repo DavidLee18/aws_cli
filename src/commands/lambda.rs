@@ -195,6 +195,22 @@ pub async fn cmd_delete_function(client: &Client, function_name: &str) -> Result
     Ok(())
 }
 
+/// Publish a new numbered version of a Lambda function.
+pub async fn cmd_publish_version(client: &Client, function_name: &str) -> Result<()> {
+    let resp = client
+        .publish_version()
+        .function_name(function_name)
+        .send()
+        .await
+        .context("Failed to publish Lambda function version")?;
+
+    println!("Published version for: {}", resp.function_name().unwrap_or("N/A"));
+    println!("Version: {}", resp.version().unwrap_or("N/A"));
+    println!("Function ARN: {}", resp.function_arn().unwrap_or("N/A"));
+
+    Ok(())
+}
+
 /// Invoke a Lambda function synchronously.
 pub async fn cmd_invoke(
     client: &Client,

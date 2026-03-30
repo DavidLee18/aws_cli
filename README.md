@@ -6,7 +6,7 @@ A Rust port of the official AWS CLI, providing a fast, single-binary alternative
 
 This is an **active implementation** of core AWS CLI functionality in Rust. Currently at ~30% feature parity with the Python AWS CLI.
 
-### Currently Implemented (8 services, ~69 commands)
+### Currently Implemented (8 services, ~70 commands)
 
 #### ✓ Configure
 - [x] `configure` - Interactive configuration
@@ -67,11 +67,12 @@ This is an **active implementation** of core AWS CLI functionality in Rust. Curr
 - [x] `delete-db-snapshot`
 - [x] `restore-db-instance-from-db-snapshot`
 
-#### ✓ Lambda (8/10 core commands - 80%)
+#### ✓ Lambda (9/10 core commands - 90%)
 - [x] `create-function`
 - [x] `list-functions`
 - [x] `get-function`
 - [x] `delete-function`
+- [x] `publish-version`
 - [x] `invoke`
 - [x] `list-event-source-mappings`
 - [x] `update-function-code`
