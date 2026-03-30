@@ -2,7 +2,7 @@ use anyhow::Result;
 use aws_config::meta::region::RegionProviderChain;
 use clap::{Parser, Subcommand};
 
-use aws_cli::commands::{ec2 as ec2_cmd, iam as iam_cmd, s3 as s3_cmd, sts as sts_cmd};
+use aws_cli::commands::{ec2 as ec2_cmd, iam as iam_cmd, rds as rds_cmd, s3 as s3_cmd, sts as sts_cmd};
 use aws_cli::config as cfg;
 
 // ── Top-level CLI ─────────────────────────────────────────────────────────────
@@ -43,6 +43,11 @@ enum Commands {
     Iam {
         #[command(subcommand)]
         subcommand: IamCommands,
+    },
+    /// AWS RDS commands.
+    Rds {
+        #[command(subcommand)]
+        subcommand: RdsCommands,
     },
     /// AWS STS commands.
     Sts {
@@ -194,6 +199,117 @@ enum StsCommands {
     GetCallerIdentity,
 }
 
+// ── RDS sub-commands ──────────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+enum RdsCommands {
+    /// Describe one or more RDS database instances.
+    DescribeDbInstances {
+        /// DB instance IDs to describe (omit for all).
+        #[arg(value_name = "DB_INSTANCE_ID")]
+        db_instance_ids: Vec<String>,
+    },
+    /// Create a new RDS database instance.
+    CreateDbInstance {
+        /// DB instance identifier.
+        #[arg(long, required = true)]
+        db_instance_identifier: String,
+        /// DB instance class (e.g., db.t3.micro).
+        #[arg(long, required = true)]
+        db_instance_class: String,
+        /// Database engine (e.g., postgres, mysql).
+        #[arg(long, required = true)]
+        engine: String,
+        /// Master username.
+        #[arg(long, required = true)]
+        master_username: String,
+        /// Master user password.
+        #[arg(long, required = true)]
+        master_user_password: String,
+        /// Allocated storage in GB.
+        #[arg(long, default_value = "20")]
+        allocated_storage: i32,
+    },
+    /// Delete an RDS database instance.
+    DeleteDbInstance {
+        /// DB instance identifier.
+        #[arg(long, required = true)]
+        db_instance_identifier: String,
+        /// Skip final snapshot before deletion.
+        #[arg(long)]
+        skip_final_snapshot: bool,
+        /// Final snapshot identifier (required unless skip-final-snapshot is true).
+        #[arg(long)]
+        final_db_snapshot_identifier: Option<String>,
+    },
+    /// Modify an RDS database instance.
+    ModifyDbInstance {
+        /// DB instance identifier.
+        #[arg(long, required = true)]
+        db_instance_identifier: String,
+        /// New DB instance class.
+        #[arg(long)]
+        db_instance_class: Option<String>,
+        /// New allocated storage in GB.
+        #[arg(long)]
+        allocated_storage: Option<i32>,
+        /// Apply changes immediately.
+        #[arg(long)]
+        apply_immediately: bool,
+    },
+    /// Start an RDS database instance.
+    StartDbInstance {
+        /// DB instance identifier.
+        #[arg(long, required = true)]
+        db_instance_identifier: String,
+    },
+    /// Stop an RDS database instance.
+    StopDbInstance {
+        /// DB instance identifier.
+        #[arg(long, required = true)]
+        db_instance_identifier: String,
+    },
+    /// Reboot an RDS database instance.
+    RebootDbInstance {
+        /// DB instance identifier.
+        #[arg(long, required = true)]
+        db_instance_identifier: String,
+    },
+    /// Describe RDS database snapshots.
+    DescribeDbSnapshots {
+        /// Filter by DB instance identifier.
+        #[arg(long)]
+        db_instance_identifier: Option<String>,
+        /// Filter by DB snapshot identifier.
+        #[arg(long)]
+        db_snapshot_identifier: Option<String>,
+    },
+    /// Create an RDS database snapshot.
+    CreateDbSnapshot {
+        /// DB snapshot identifier.
+        #[arg(long, required = true)]
+        db_snapshot_identifier: String,
+        /// DB instance identifier to snapshot.
+        #[arg(long, required = true)]
+        db_instance_identifier: String,
+    },
+    /// Delete an RDS database snapshot.
+    DeleteDbSnapshot {
+        /// DB snapshot identifier.
+        #[arg(long, required = true)]
+        db_snapshot_identifier: String,
+    },
+    /// Restore an RDS database instance from a snapshot.
+    RestoreDbInstanceFromDbSnapshot {
+        /// New DB instance identifier.
+        #[arg(long, required = true)]
+        db_instance_identifier: String,
+        /// Source DB snapshot identifier.
+        #[arg(long, required = true)]
+        db_snapshot_identifier: String,
+    },
+}
+
 // ── Configure sub-commands ────────────────────────────────────────────────────
 
 #[derive(Subcommand)]
@@ -318,6 +434,115 @@ async fn main() -> Result<()> {
                     match subcommand {
                         StsCommands::GetCallerIdentity => {
                             sts_cmd::cmd_get_caller_identity(&client).await?
+                        }
+                    }
+                }
+
+                Commands::Rds { subcommand } => {
+                    let client = aws_sdk_rds::Client::new(&aws_cfg);
+                    match subcommand {
+                        RdsCommands::DescribeDbInstances { db_instance_ids } => {
+                            rds_cmd::cmd_describe_db_instances(&client, &db_instance_ids).await?
+                        }
+                        RdsCommands::CreateDbInstance {
+                            db_instance_identifier,
+                            db_instance_class,
+                            engine,
+                            master_username,
+                            master_user_password,
+                            allocated_storage,
+                        } => {
+                            rds_cmd::cmd_create_db_instance(
+                                &client,
+                                &db_instance_identifier,
+                                &db_instance_class,
+                                &engine,
+                                &master_username,
+                                &master_user_password,
+                                allocated_storage,
+                            )
+                            .await?
+                        }
+                        RdsCommands::DeleteDbInstance {
+                            db_instance_identifier,
+                            skip_final_snapshot,
+                            final_db_snapshot_identifier,
+                        } => {
+                            rds_cmd::cmd_delete_db_instance(
+                                &client,
+                                &db_instance_identifier,
+                                skip_final_snapshot,
+                                final_db_snapshot_identifier.as_deref(),
+                            )
+                            .await?
+                        }
+                        RdsCommands::ModifyDbInstance {
+                            db_instance_identifier,
+                            db_instance_class,
+                            allocated_storage,
+                            apply_immediately,
+                        } => {
+                            rds_cmd::cmd_modify_db_instance(
+                                &client,
+                                &db_instance_identifier,
+                                db_instance_class.as_deref(),
+                                allocated_storage,
+                                apply_immediately,
+                            )
+                            .await?
+                        }
+                        RdsCommands::StartDbInstance {
+                            db_instance_identifier,
+                        } => {
+                            rds_cmd::cmd_start_db_instance(&client, &db_instance_identifier).await?
+                        }
+                        RdsCommands::StopDbInstance {
+                            db_instance_identifier,
+                        } => {
+                            rds_cmd::cmd_stop_db_instance(&client, &db_instance_identifier).await?
+                        }
+                        RdsCommands::RebootDbInstance {
+                            db_instance_identifier,
+                        } => {
+                            rds_cmd::cmd_reboot_db_instance(&client, &db_instance_identifier).await?
+                        }
+                        RdsCommands::DescribeDbSnapshots {
+                            db_instance_identifier,
+                            db_snapshot_identifier,
+                        } => {
+                            rds_cmd::cmd_describe_db_snapshots(
+                                &client,
+                                db_instance_identifier.as_deref(),
+                                db_snapshot_identifier.as_deref(),
+                            )
+                            .await?
+                        }
+                        RdsCommands::CreateDbSnapshot {
+                            db_snapshot_identifier,
+                            db_instance_identifier,
+                        } => {
+                            rds_cmd::cmd_create_db_snapshot(
+                                &client,
+                                &db_snapshot_identifier,
+                                &db_instance_identifier,
+                            )
+                            .await?
+                        }
+                        RdsCommands::DeleteDbSnapshot {
+                            db_snapshot_identifier,
+                        } => {
+                            rds_cmd::cmd_delete_db_snapshot(&client, &db_snapshot_identifier).await?
+                        }
+                        RdsCommands::RestoreDbInstanceFromDbSnapshot {
+                            db_instance_identifier,
+                            db_snapshot_identifier,
+                        } => {
+                            rds_cmd::cmd_restore_db_instance_from_snapshot(
+                                &client,
+                                &db_instance_identifier,
+                                &db_snapshot_identifier,
+                            )
+                            .await?
                         }
                     }
                 }

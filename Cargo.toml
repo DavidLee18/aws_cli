@@ -18,6 +18,7 @@ anyhow = "1.0"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-ec2 = "1"
 aws-sdk-iam = "1"
+aws-sdk-rds = "1"
 aws-sdk-s3 = "1"
 aws-sdk-sts = "1"
 clap = { version = "4.4", features = ["derive"] }
