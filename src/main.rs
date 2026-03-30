@@ -2,7 +2,10 @@ use anyhow::Result;
 use aws_config::meta::region::RegionProviderChain;
 use clap::{Parser, Subcommand};
 
-use aws_cli::commands::{ec2 as ec2_cmd, iam as iam_cmd, rds as rds_cmd, s3 as s3_cmd, sts as sts_cmd};
+use aws_cli::commands::{
+    ec2 as ec2_cmd, iam as iam_cmd, lambda as lambda_cmd, rds as rds_cmd, s3 as s3_cmd,
+    sts as sts_cmd,
+};
 use aws_cli::config as cfg;
 
 // ── Top-level CLI ─────────────────────────────────────────────────────────────
@@ -53,6 +56,11 @@ enum Commands {
     Sts {
         #[command(subcommand)]
         subcommand: StsCommands,
+    },
+    /// AWS Lambda commands.
+    Lambda {
+        #[command(subcommand)]
+        subcommand: LambdaCommands,
     },
     /// Configure AWS credentials and settings.
     Configure {
@@ -334,6 +342,74 @@ enum RdsCommands {
     },
 }
 
+// ── Lambda sub-commands ───────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+enum LambdaCommands {
+    /// List Lambda functions.
+    ListFunctions,
+    /// Get details about a specific Lambda function.
+    GetFunction {
+        /// Name of the Lambda function.
+        #[arg(long, required = true)]
+        function_name: String,
+    },
+    /// Delete a Lambda function.
+    DeleteFunction {
+        /// Name of the Lambda function to delete.
+        #[arg(long, required = true)]
+        function_name: String,
+    },
+    /// Invoke a Lambda function.
+    Invoke {
+        /// Name of the Lambda function.
+        #[arg(long, required = true)]
+        function_name: String,
+        /// JSON payload to send to the function.
+        #[arg(long)]
+        payload: Option<String>,
+        /// Log type (None or Tail).
+        #[arg(long)]
+        log_type: Option<String>,
+    },
+    /// List event source mappings.
+    ListEventSourceMappings {
+        /// Filter by function name.
+        #[arg(long)]
+        function_name: Option<String>,
+    },
+    /// Update Lambda function code.
+    UpdateFunctionCode {
+        /// Name of the Lambda function.
+        #[arg(long, required = true)]
+        function_name: String,
+        /// Path to ZIP file containing the function code.
+        #[arg(long)]
+        zip_file: Option<String>,
+        /// S3 bucket containing the function code.
+        #[arg(long)]
+        s3_bucket: Option<String>,
+        /// S3 key for the function code.
+        #[arg(long)]
+        s3_key: Option<String>,
+    },
+    /// Update Lambda function configuration.
+    UpdateFunctionConfiguration {
+        /// Name of the Lambda function.
+        #[arg(long, required = true)]
+        function_name: String,
+        /// Memory size in MB.
+        #[arg(long)]
+        memory_size: Option<i32>,
+        /// Function timeout in seconds.
+        #[arg(long)]
+        timeout: Option<i32>,
+        /// Function handler.
+        #[arg(long)]
+        handler: Option<String>,
+    },
+}
+
 // ── Configure sub-commands ────────────────────────────────────────────────────
 
 #[derive(Subcommand)]
@@ -585,6 +661,71 @@ async fn main() -> Result<()> {
                                 &client,
                                 &db_instance_identifier,
                                 &db_snapshot_identifier,
+                            )
+                            .await?
+                        }
+                    }
+                }
+
+                Commands::Lambda { subcommand } => {
+                    let client = aws_sdk_lambda::Client::new(&aws_cfg);
+                    match subcommand {
+                        LambdaCommands::ListFunctions => {
+                            lambda_cmd::cmd_list_functions(&client).await?
+                        }
+                        LambdaCommands::GetFunction { function_name } => {
+                            lambda_cmd::cmd_get_function(&client, &function_name).await?
+                        }
+                        LambdaCommands::DeleteFunction { function_name } => {
+                            lambda_cmd::cmd_delete_function(&client, &function_name).await?
+                        }
+                        LambdaCommands::Invoke {
+                            function_name,
+                            payload,
+                            log_type,
+                        } => {
+                            lambda_cmd::cmd_invoke(
+                                &client,
+                                &function_name,
+                                payload.as_deref(),
+                                log_type.as_deref(),
+                            )
+                            .await?
+                        }
+                        LambdaCommands::ListEventSourceMappings { function_name } => {
+                            lambda_cmd::cmd_list_event_source_mappings(
+                                &client,
+                                function_name.as_deref(),
+                            )
+                            .await?
+                        }
+                        LambdaCommands::UpdateFunctionCode {
+                            function_name,
+                            zip_file,
+                            s3_bucket,
+                            s3_key,
+                        } => {
+                            lambda_cmd::cmd_update_function_code(
+                                &client,
+                                &function_name,
+                                zip_file.as_deref(),
+                                s3_bucket.as_deref(),
+                                s3_key.as_deref(),
+                            )
+                            .await?
+                        }
+                        LambdaCommands::UpdateFunctionConfiguration {
+                            function_name,
+                            memory_size,
+                            timeout,
+                            handler,
+                        } => {
+                            lambda_cmd::cmd_update_function_configuration(
+                                &client,
+                                &function_name,
+                                memory_size,
+                                timeout,
+                                handler.as_deref(),
                             )
                             .await?
                         }

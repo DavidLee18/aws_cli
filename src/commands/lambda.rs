@@ -94,7 +94,7 @@ pub async fn cmd_invoke(
         .await
         .context("Failed to invoke Lambda function")?;
 
-    println!("Status Code: {}", resp.status_code().unwrap_or(0));
+    println!("Status Code: {}", resp.status_code());
 
     if let Some(payload) = resp.payload() {
         let payload_str = String::from_utf8_lossy(payload.as_ref());
@@ -102,10 +102,12 @@ pub async fn cmd_invoke(
     }
 
     if let Some(log_result) = resp.log_result() {
-        let decoded = String::from_utf8(
-            base64::decode(log_result)
-                .unwrap_or_else(|_| log_result.as_bytes().to_vec())
-        ).unwrap_or_else(|_| "Unable to decode logs".to_string());
+        // Use base64 engine
+        use base64::{Engine as _, engine::general_purpose};
+        let decoded = match general_purpose::STANDARD.decode(log_result) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+            Err(_) => "Unable to decode logs".to_string(),
+        };
         println!("\nLogs:\n{}", decoded);
     }
 
