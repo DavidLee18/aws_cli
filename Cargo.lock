@@ -656,6 +656,7 @@ dependencies = [
  "aws-sdk-lambda",
  "aws-sdk-rds",
  "aws-sdk-s3",
+ "aws-sdk-sso",
  "aws-sdk-sts",
  "base64 0.21.7",
  "clap",

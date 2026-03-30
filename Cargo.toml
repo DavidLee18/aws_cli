@@ -22,6 +22,7 @@ aws-sdk-iam = "1"
 aws-sdk-lambda = "1"
 aws-sdk-rds = "1"
 aws-sdk-s3 = "1"
+aws-sdk-sso = "1"
 aws-sdk-sts = "1"
 base64 = "0.21"
 clap = { version = "4.4", features = ["derive"] }

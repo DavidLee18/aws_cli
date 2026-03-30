@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 
 use aws_cli::commands::{
     dynamodb as dynamodb_cmd, ec2 as ec2_cmd, iam as iam_cmd, lambda as lambda_cmd,
-    rds as rds_cmd, s3 as s3_cmd, sts as sts_cmd,
+    rds as rds_cmd, s3 as s3_cmd, sso as sso_cmd, sts as sts_cmd,
 };
 use aws_cli::config as cfg;
 
@@ -56,6 +56,11 @@ enum Commands {
     Sts {
         #[command(subcommand)]
         subcommand: StsCommands,
+    },
+    /// AWS SSO commands.
+    Sso {
+        #[command(subcommand)]
+        subcommand: SsoCommands,
     },
     /// AWS Lambda commands.
     Lambda {
@@ -248,6 +253,39 @@ enum StsCommands {
         /// The encoded authorization message.
         #[arg(long, required = true)]
         encoded_message: String,
+    },
+}
+
+// ── SSO sub-commands ──────────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+enum SsoCommands {
+    /// List AWS accounts available via SSO.
+    ListAccounts {
+        /// SSO access token.
+        #[arg(long, required = true)]
+        access_token: String,
+    },
+    /// List SSO roles for an AWS account.
+    ListAccountRoles {
+        /// SSO access token.
+        #[arg(long, required = true)]
+        access_token: String,
+        /// AWS account ID.
+        #[arg(long, required = true)]
+        account_id: String,
+    },
+    /// Get role credentials for an SSO account/role.
+    GetRoleCredentials {
+        /// SSO access token.
+        #[arg(long, required = true)]
+        access_token: String,
+        /// AWS account ID.
+        #[arg(long, required = true)]
+        account_id: String,
+        /// SSO role name.
+        #[arg(long, required = true)]
+        role_name: String,
     },
 }
 
@@ -711,6 +749,34 @@ async fn main() -> Result<()> {
                         StsCommands::DecodeAuthorizationMessage { encoded_message } => {
                             sts_cmd::cmd_decode_authorization_message(&client, &encoded_message)
                                 .await?
+                        }
+                    }
+                }
+                Commands::Sso { subcommand } => {
+                    let client = aws_sdk_sso::Client::new(&aws_cfg);
+                    match subcommand {
+                        SsoCommands::ListAccounts { access_token } => {
+                            sso_cmd::cmd_list_accounts(&client, &access_token).await?
+                        }
+                        SsoCommands::ListAccountRoles {
+                            access_token,
+                            account_id,
+                        } => {
+                            sso_cmd::cmd_list_account_roles(&client, &access_token, &account_id)
+                                .await?
+                        }
+                        SsoCommands::GetRoleCredentials {
+                            access_token,
+                            account_id,
+                            role_name,
+                        } => {
+                            sso_cmd::cmd_get_role_credentials(
+                                &client,
+                                &access_token,
+                                &account_id,
+                                &role_name,
+                            )
+                            .await?
                         }
                     }
                 }

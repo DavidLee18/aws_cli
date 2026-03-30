@@ -4,4 +4,5 @@ pub mod iam;
 pub mod lambda;
 pub mod rds;
 pub mod s3;
+pub mod sso;
 pub mod sts;
