@@ -217,6 +217,12 @@ enum IamCommands {
         #[arg(long)]
         path_prefix: Option<String>,
     },
+    /// Get details for an IAM role.
+    GetRole {
+        /// IAM role name to get.
+        #[arg(long, required = true)]
+        role_name: String,
+    },
     /// List IAM policies.
     ListPolicies {
         /// Scope: local (default), aws, or all.
@@ -738,6 +744,9 @@ async fn main() -> Result<()> {
                         }
                         IamCommands::ListRoles { path_prefix } => {
                             iam_cmd::cmd_list_roles(&client, path_prefix.as_deref()).await?
+                        }
+                        IamCommands::GetRole { role_name } => {
+                            iam_cmd::cmd_get_role(&client, &role_name).await?
                         }
                         IamCommands::ListPolicies {
                             scope,

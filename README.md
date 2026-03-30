@@ -4,9 +4,9 @@ A Rust port of the official AWS CLI, providing a fast, single-binary alternative
 
 ## Project Status
 
-This is an **active implementation** of core AWS CLI functionality in Rust. Currently at ~30% feature parity with the Python AWS CLI.
+This is an **active implementation** of core AWS CLI functionality in Rust. Currently at **30.98%** feature parity with the Python AWS CLI.
 
-### Currently Implemented (9 services, ~78 commands)
+### Currently Implemented (9 services, ~79 commands)
 
 #### ✓ Configure
 - [x] `configure` - Interactive configuration
@@ -36,12 +36,13 @@ This is an **active implementation** of core AWS CLI functionality in Rust. Curr
 - [ ] Key pair commands (4)
 - [ ] Volume & snapshot commands
 
-#### ✓ IAM (8/50 core commands - 16%)
+#### ✓ IAM (9/50 core commands - 18%)
 - [x] `create-user` - Create IAM users
 - [x] `delete-user` - Delete IAM users
 - [x] `get-user` - Get IAM user details
 - [x] `list-users` - List users
 - [x] `list-roles` - List roles
+- [x] `get-role` - Get IAM role details
 - [x] `list-policies` - List policies
 - [x] `list-groups` - List groups
 - [x] `list-account-aliases` - List account aliases

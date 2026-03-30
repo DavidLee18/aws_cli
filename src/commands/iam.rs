@@ -57,6 +57,28 @@ pub async fn cmd_get_user(client: &Client, user_name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Get details for a single IAM role.
+pub async fn cmd_get_role(client: &Client, role_name: &str) -> Result<()> {
+    let resp = client
+        .get_role()
+        .role_name(role_name)
+        .send()
+        .await
+        .context("Failed to get IAM role")?;
+
+    if let Some(role) = resp.role() {
+        println!("RoleName: {}", role.role_name());
+        println!("RoleId: {}", role.role_id());
+        println!("ARN: {}", role.arn());
+        println!("Path: {}", role.path());
+        println!("CreateDate: {}", role.create_date());
+    } else {
+        println!("No role data returned for: {role_name}");
+    }
+
+    Ok(())
+}
+
 /// List all IAM users.
 pub async fn cmd_list_users(client: &Client, path_prefix: Option<&str>) -> Result<()> {
     let mut marker: Option<String> = None;
