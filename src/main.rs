@@ -193,6 +193,12 @@ enum IamCommands {
         #[arg(long)]
         path: Option<String>,
     },
+    /// Delete an IAM user.
+    DeleteUser {
+        /// IAM user name to delete.
+        #[arg(long, required = true)]
+        user_name: String,
+    },
     /// List IAM users.
     ListUsers {
         /// Path prefix filter (e.g. /division_abc/).
@@ -260,6 +266,15 @@ enum StsCommands {
 
 #[derive(Subcommand)]
 enum SsoCommands {
+    /// Start AWS SSO device authorization login.
+    Login {
+        /// AWS SSO start URL.
+        #[arg(long, required = true)]
+        start_url: String,
+        /// AWS region hosting the SSO directory.
+        #[arg(long, required = true)]
+        sso_region: String,
+    },
     /// List AWS accounts available via SSO.
     ListAccounts {
         /// SSO access token.
@@ -709,6 +724,9 @@ async fn main() -> Result<()> {
                         IamCommands::ListUsers { path_prefix } => {
                             iam_cmd::cmd_list_users(&client, path_prefix.as_deref()).await?
                         }
+                        IamCommands::DeleteUser { user_name } => {
+                            iam_cmd::cmd_delete_user(&client, &user_name).await?
+                        }
                         IamCommands::ListRoles { path_prefix } => {
                             iam_cmd::cmd_list_roles(&client, path_prefix.as_deref()).await?
                         }
@@ -755,6 +773,20 @@ async fn main() -> Result<()> {
                 Commands::Sso { subcommand } => {
                     let client = aws_sdk_sso::Client::new(&aws_cfg);
                     match subcommand {
+                        SsoCommands::Login {
+                            start_url,
+                            sso_region,
+                        } => {
+                            let region_cfg = aws_config::defaults(
+                                aws_config::BehaviorVersion::latest(),
+                            )
+                            .region(aws_config::Region::new(sso_region.clone()))
+                            .profile_name(cli.profile.clone())
+                            .load()
+                            .await;
+                            let oidc_client = aws_sdk_ssooidc::Client::new(&region_cfg);
+                            sso_cmd::cmd_login(&oidc_client, &start_url, &sso_region).await?
+                        }
                         SsoCommands::ListAccounts { access_token } => {
                             sso_cmd::cmd_list_accounts(&client, &access_token).await?
                         }

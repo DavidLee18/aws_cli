@@ -22,6 +22,19 @@ pub async fn cmd_create_user(client: &Client, user_name: &str, path: Option<&str
     Ok(())
 }
 
+/// Delete an IAM user.
+pub async fn cmd_delete_user(client: &Client, user_name: &str) -> Result<()> {
+    client
+        .delete_user()
+        .user_name(user_name)
+        .send()
+        .await
+        .context("Failed to delete IAM user")?;
+
+    println!("Deleted user: {user_name}");
+    Ok(())
+}
+
 /// List all IAM users.
 pub async fn cmd_list_users(client: &Client, path_prefix: Option<&str>) -> Result<()> {
     let mut marker: Option<String> = None;
