@@ -3,8 +3,8 @@ use aws_config::meta::region::RegionProviderChain;
 use clap::{Parser, Subcommand};
 
 use aws_cli::commands::{
-    ec2 as ec2_cmd, iam as iam_cmd, lambda as lambda_cmd, rds as rds_cmd, s3 as s3_cmd,
-    sts as sts_cmd,
+    dynamodb as dynamodb_cmd, ec2 as ec2_cmd, iam as iam_cmd, lambda as lambda_cmd,
+    rds as rds_cmd, s3 as s3_cmd, sts as sts_cmd,
 };
 use aws_cli::config as cfg;
 
@@ -61,6 +61,11 @@ enum Commands {
     Lambda {
         #[command(subcommand)]
         subcommand: LambdaCommands,
+    },
+    /// AWS DynamoDB commands.
+    Dynamodb {
+        #[command(subcommand)]
+        subcommand: DynamodbCommands,
     },
     /// Configure AWS credentials and settings.
     Configure {
@@ -407,6 +412,92 @@ enum LambdaCommands {
         /// Function handler.
         #[arg(long)]
         handler: Option<String>,
+    },
+}
+
+// ── DynamoDB sub-commands ─────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+enum DynamodbCommands {
+    /// List all DynamoDB tables.
+    ListTables,
+    /// Describe a DynamoDB table.
+    DescribeTable {
+        /// Name of the table.
+        #[arg(long, required = true)]
+        table_name: String,
+    },
+    /// Create a DynamoDB table.
+    CreateTable {
+        /// Name of the table.
+        #[arg(long, required = true)]
+        table_name: String,
+        /// Partition key name.
+        #[arg(long, required = true)]
+        partition_key: String,
+        /// Partition key type (S, N, or B).
+        #[arg(long, required = true)]
+        partition_key_type: String,
+        /// Sort key name (optional).
+        #[arg(long)]
+        sort_key: Option<String>,
+        /// Sort key type (S, N, or B).
+        #[arg(long)]
+        sort_key_type: Option<String>,
+    },
+    /// Delete a DynamoDB table.
+    DeleteTable {
+        /// Name of the table.
+        #[arg(long, required = true)]
+        table_name: String,
+    },
+    /// Update a DynamoDB table.
+    UpdateTable {
+        /// Name of the table.
+        #[arg(long, required = true)]
+        table_name: String,
+        /// Read capacity units.
+        #[arg(long)]
+        read_capacity: Option<i64>,
+        /// Write capacity units.
+        #[arg(long)]
+        write_capacity: Option<i64>,
+    },
+    /// Get an item from a table.
+    GetItem {
+        /// Name of the table.
+        #[arg(long, required = true)]
+        table_name: String,
+        /// Key as JSON (e.g., '{"id":{"S":"123"}}').
+        #[arg(long, required = true)]
+        key: String,
+    },
+    /// Put an item into a table.
+    PutItem {
+        /// Name of the table.
+        #[arg(long, required = true)]
+        table_name: String,
+        /// Item as JSON (e.g., '{"id":{"S":"123"},"name":{"S":"John"}}').
+        #[arg(long, required = true)]
+        item: String,
+    },
+    /// Delete an item from a table.
+    DeleteItem {
+        /// Name of the table.
+        #[arg(long, required = true)]
+        table_name: String,
+        /// Key as JSON (e.g., '{"id":{"S":"123"}}').
+        #[arg(long, required = true)]
+        key: String,
+    },
+    /// Scan a DynamoDB table.
+    Scan {
+        /// Name of the table.
+        #[arg(long, required = true)]
+        table_name: String,
+        /// Maximum number of items to return.
+        #[arg(long)]
+        limit: Option<i32>,
     },
 }
 
