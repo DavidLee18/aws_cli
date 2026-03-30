@@ -2,7 +2,7 @@ use anyhow::Result;
 use aws_config::meta::region::RegionProviderChain;
 use clap::{Parser, Subcommand};
 
-use aws_cli::commands::{ec2 as ec2_cmd, iam as iam_cmd, s3 as s3_cmd};
+use aws_cli::commands::{ec2 as ec2_cmd, iam as iam_cmd, s3 as s3_cmd, sts as sts_cmd};
 use aws_cli::config as cfg;
 
 // ── Top-level CLI ─────────────────────────────────────────────────────────────
@@ -43,6 +43,11 @@ enum Commands {
     Iam {
         #[command(subcommand)]
         subcommand: IamCommands,
+    },
+    /// AWS STS commands.
+    Sts {
+        #[command(subcommand)]
+        subcommand: StsCommands,
     },
     /// Configure AWS credentials and settings.
     Configure {
@@ -181,6 +186,14 @@ enum IamCommands {
     ListAccountAliases,
 }
 
+// ── STS sub-commands ──────────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+enum StsCommands {
+    /// Returns details about the IAM identity used to call the operation.
+    GetCallerIdentity,
+}
+
 // ── Configure sub-commands ────────────────────────────────────────────────────
 
 #[derive(Subcommand)]
@@ -297,6 +310,14 @@ async fn main() -> Result<()> {
                         }
                         IamCommands::ListAccountAliases => {
                             iam_cmd::cmd_list_account_aliases(&client).await?
+                        }
+                    }
+                }
+                Commands::Sts { subcommand } => {
+                    let client = aws_sdk_sts::Client::new(&aws_cfg);
+                    match subcommand {
+                        StsCommands::GetCallerIdentity => {
+                            sts_cmd::cmd_get_caller_identity(&client).await?
                         }
                     }
                 }
