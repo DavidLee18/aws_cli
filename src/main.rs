@@ -199,6 +199,12 @@ enum IamCommands {
         #[arg(long, required = true)]
         user_name: String,
     },
+    /// Get details for an IAM user.
+    GetUser {
+        /// IAM user name to get.
+        #[arg(long, required = true)]
+        user_name: String,
+    },
     /// List IAM users.
     ListUsers {
         /// Path prefix filter (e.g. /division_abc/).
@@ -726,6 +732,9 @@ async fn main() -> Result<()> {
                         }
                         IamCommands::DeleteUser { user_name } => {
                             iam_cmd::cmd_delete_user(&client, &user_name).await?
+                        }
+                        IamCommands::GetUser { user_name } => {
+                            iam_cmd::cmd_get_user(&client, &user_name).await?
                         }
                         IamCommands::ListRoles { path_prefix } => {
                             iam_cmd::cmd_list_roles(&client, path_prefix.as_deref()).await?

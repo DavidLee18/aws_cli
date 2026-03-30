@@ -35,6 +35,28 @@ pub async fn cmd_delete_user(client: &Client, user_name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Get details for a single IAM user.
+pub async fn cmd_get_user(client: &Client, user_name: &str) -> Result<()> {
+    let resp = client
+        .get_user()
+        .user_name(user_name)
+        .send()
+        .await
+        .context("Failed to get IAM user")?;
+
+    if let Some(user) = resp.user() {
+        println!("UserName: {}", user.user_name());
+        println!("UserId: {}", user.user_id());
+        println!("ARN: {}", user.arn());
+        println!("Path: {}", user.path());
+        println!("CreateDate: {}", user.create_date());
+    } else {
+        println!("No user data returned for: {user_name}");
+    }
+
+    Ok(())
+}
+
 /// List all IAM users.
 pub async fn cmd_list_users(client: &Client, path_prefix: Option<&str>) -> Result<()> {
     let mut marker: Option<String> = None;
