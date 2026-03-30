@@ -1,6 +1,65 @@
 use anyhow::{Context, Result};
 use aws_sdk_lambda::Client;
 
+fn parse_runtime(runtime: &str) -> Result<aws_sdk_lambda::types::Runtime> {
+    let is_supported = matches!(
+        runtime,
+        "nodejs"
+            | "nodejs4.3"
+            | "nodejs4.3-edge"
+            | "nodejs6.10"
+            | "nodejs8.10"
+            | "nodejs10.x"
+            | "nodejs12.x"
+            | "nodejs14.x"
+            | "nodejs16.x"
+            | "nodejs18.x"
+            | "nodejs20.x"
+            | "nodejs22.x"
+            | "java8"
+            | "java8.al2"
+            | "java11"
+            | "java17"
+            | "java21"
+            | "python2.7"
+            | "python3.6"
+            | "python3.7"
+            | "python3.8"
+            | "python3.9"
+            | "python3.10"
+            | "python3.11"
+            | "python3.12"
+            | "python3.13"
+            | "dotnetcore1.0"
+            | "dotnetcore2.0"
+            | "dotnetcore2.1"
+            | "dotnetcore3.1"
+            | "dotnet6"
+            | "dotnet8"
+            | "ruby2.5"
+            | "ruby2.7"
+            | "ruby3.2"
+            | "ruby3.3"
+            | "go1.x"
+            | "provided"
+            | "provided.al2"
+            | "provided.al2023"
+    );
+
+    if !is_supported {
+        anyhow::bail!(
+            "Unsupported Lambda runtime '{}'. Example valid values: nodejs20.x, python3.12, provided.al2",
+            runtime
+        );
+    }
+
+    Ok(aws_sdk_lambda::types::Runtime::from(runtime))
+}
+
+fn read_zip_file(zip_file: &str) -> Result<Vec<u8>> {
+    std::fs::read(zip_file).with_context(|| format!("Failed to read ZIP file: {}", zip_file))
+}
+
 /// Create a Lambda function from a ZIP file.
 pub async fn cmd_create_function(
     client: &Client,
@@ -12,13 +71,13 @@ pub async fn cmd_create_function(
     timeout: Option<i32>,
     memory_size: Option<i32>,
 ) -> Result<()> {
-    let contents = std::fs::read(zip_file)
-        .with_context(|| format!("Failed to read ZIP file: {}", zip_file))?;
+    let contents = read_zip_file(zip_file)?;
+    let runtime = parse_runtime(runtime)?;
 
     let mut req = client
         .create_function()
         .function_name(function_name)
-        .runtime(aws_sdk_lambda::types::Runtime::from(runtime))
+        .runtime(runtime)
         .role(role)
         .handler(handler)
         .code(
@@ -49,6 +108,23 @@ pub async fn cmd_create_function(
     println!("Version: {}", resp.version().unwrap_or("N/A"));
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_invalid_runtime() {
+        let err = parse_runtime("invalid-runtime").unwrap_err();
+        assert!(err.to_string().contains("Unsupported Lambda runtime"));
+    }
+
+    #[test]
+    fn missing_zip_file_returns_error() {
+        let err = read_zip_file("/tmp/aws-cli-does-not-exist.zip").unwrap_err();
+        assert!(err.to_string().contains("Failed to read ZIP file"));
+    }
 }
 
 /// List Lambda functions.
