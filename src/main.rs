@@ -822,6 +822,62 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+                Commands::Dynamodb { subcommand } => {
+                    let client = aws_sdk_dynamodb::Client::new(&aws_cfg);
+                    match subcommand {
+                        DynamodbCommands::ListTables => {
+                            dynamodb_cmd::cmd_list_tables(&client).await?
+                        }
+                        DynamodbCommands::DescribeTable { table_name } => {
+                            dynamodb_cmd::cmd_describe_table(&client, &table_name).await?
+                        }
+                        DynamodbCommands::CreateTable {
+                            table_name,
+                            partition_key,
+                            partition_key_type,
+                            sort_key,
+                            sort_key_type,
+                        } => {
+                            dynamodb_cmd::cmd_create_table(
+                                &client,
+                                &table_name,
+                                &partition_key,
+                                &partition_key_type,
+                                sort_key.as_deref(),
+                                sort_key_type.as_deref(),
+                            )
+                            .await?
+                        }
+                        DynamodbCommands::DeleteTable { table_name } => {
+                            dynamodb_cmd::cmd_delete_table(&client, &table_name).await?
+                        }
+                        DynamodbCommands::UpdateTable {
+                            table_name,
+                            read_capacity,
+                            write_capacity,
+                        } => {
+                            dynamodb_cmd::cmd_update_table(
+                                &client,
+                                &table_name,
+                                read_capacity,
+                                write_capacity,
+                            )
+                            .await?
+                        }
+                        DynamodbCommands::GetItem { table_name, key } => {
+                            dynamodb_cmd::cmd_get_item(&client, &table_name, &key).await?
+                        }
+                        DynamodbCommands::PutItem { table_name, item } => {
+                            dynamodb_cmd::cmd_put_item(&client, &table_name, &item).await?
+                        }
+                        DynamodbCommands::DeleteItem { table_name, key } => {
+                            dynamodb_cmd::cmd_delete_item(&client, &table_name, &key).await?
+                        }
+                        DynamodbCommands::Scan { table_name, limit } => {
+                            dynamodb_cmd::cmd_scan(&client, &table_name, limit).await?
+                        }
+                    }
+                }
 
                 // Already matched above; this branch satisfies the exhaustiveness check.
                 Commands::Configure { .. } => unreachable!(),

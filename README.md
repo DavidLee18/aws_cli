@@ -4,9 +4,9 @@ A Rust port of the official AWS CLI, providing a fast, single-binary alternative
 
 ## Project Status
 
-This is an **active implementation** of core AWS CLI functionality in Rust. Currently at ~15% feature parity with the Python AWS CLI.
+This is an **active implementation** of core AWS CLI functionality in Rust. Currently at ~30% feature parity with the Python AWS CLI.
 
-### Currently Implemented (5 services, ~40 commands)
+### Currently Implemented (8 services, ~69 commands)
 
 #### ✓ Configure
 - [x] `configure` - Interactive configuration
@@ -48,13 +48,46 @@ This is an **active implementation** of core AWS CLI functionality in Rust. Curr
 - [ ] Policy attachment commands (4)
 - [ ] Access key management (3)
 
-#### ✓ STS (1/5 core commands - 20%)
+#### ✓ STS (4/4 core commands - 100%)
 - [x] `get-caller-identity` - Get caller identity
-- [ ] `assume-role` - Assume role
-- [ ] `get-session-token` - Get session token
-- [ ] `decode-authorization-message` - Decode error message
+- [x] `assume-role` - Assume role
+- [x] `get-session-token` - Get session token
+- [x] `decode-authorization-message` - Decode error message
 
-### Not Yet Implemented (45+ services)
+#### ✓ RDS (10/10 core commands - 100%)
+- [x] `describe-db-instances`
+- [x] `create-db-instance`
+- [x] `delete-db-instance`
+- [x] `modify-db-instance`
+- [x] `start-db-instance`
+- [x] `stop-db-instance`
+- [x] `reboot-db-instance`
+- [x] `describe-db-snapshots`
+- [x] `create-db-snapshot`
+- [x] `delete-db-snapshot`
+- [x] `restore-db-instance-from-db-snapshot`
+
+#### ✓ Lambda (7/10 core commands - 70%)
+- [x] `list-functions`
+- [x] `get-function`
+- [x] `delete-function`
+- [x] `invoke`
+- [x] `list-event-source-mappings`
+- [x] `update-function-code`
+- [x] `update-function-configuration`
+
+#### ✓ DynamoDB (9/12 core commands - 75%)
+- [x] `list-tables`
+- [x] `describe-table`
+- [x] `create-table`
+- [x] `delete-table`
+- [x] `update-table`
+- [x] `get-item`
+- [x] `put-item`
+- [x] `delete-item`
+- [x] `scan`
+
+### Not Yet Implemented (42+ services)
 
 **Critical Priority (Phase 1 - 4-5 weeks)**
 - [ ] RDS - Relational Database Service (10+ commands)
@@ -157,7 +190,10 @@ src/
     ├── s3.rs         # S3 command handlers
     ├── ec2.rs        # EC2 command handlers
     ├── iam.rs        # IAM command handlers
-    └── sts.rs        # STS command handlers
+    ├── sts.rs        # STS command handlers
+    ├── rds.rs        # RDS command handlers
+    ├── lambda.rs     # Lambda command handlers
+    └── dynamodb.rs   # DynamoDB command handlers
 ```
 
 ## Development Status

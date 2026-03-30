@@ -9,12 +9,13 @@ pub async fn cmd_list_tables(client: &Client) -> Result<()> {
         .await
         .context("Failed to list DynamoDB tables")?;
 
-    if let Some(table_names) = resp.table_names() {
+    let table_names = resp.table_names();
+    if table_names.is_empty() {
+        println!("No tables found.");
+    } else {
         for table_name in table_names {
             println!("{}", table_name);
         }
-    } else {
-        println!("No tables found.");
     }
 
     Ok(())
@@ -40,17 +41,19 @@ pub async fn cmd_describe_table(client: &Client, table_name: &str) -> Result<()>
             println!("Created:           {}", created);
         }
 
-        if let Some(key_schema) = table.key_schema() {
+        let key_schema = table.key_schema();
+        if !key_schema.is_empty() {
             println!("\nKey Schema:");
             for key in key_schema {
                 println!("  {} ({})",
                     key.attribute_name(),
-                    key.key_type().map(|t| t.as_str()).unwrap_or("N/A")
+                    key.key_type().as_str()
                 );
             }
         }
 
-        if let Some(attrs) = table.attribute_definitions() {
+        let attrs = table.attribute_definitions();
+        if !attrs.is_empty() {
             println!("\nAttribute Definitions:");
             for attr in attrs {
                 println!("  {} ({})",
@@ -289,14 +292,15 @@ pub async fn cmd_scan(
         .await
         .context("Failed to scan DynamoDB table")?;
 
-    if let Some(items) = resp.items() {
+    let items = resp.items();
+    if items.is_empty() {
+        println!("No items found.");
+    } else {
         println!("Found {} items:", items.len());
         for item in items {
             let json_item = attribute_map_to_json(item)?;
             println!("{}", serde_json::to_string_pretty(&json_item)?);
         }
-    } else {
-        println!("No items found.");
     }
 
     Ok(())

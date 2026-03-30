@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use aws_sdk_lambda::Client;
-use std::path::Path;
 
 /// List Lambda functions.
 pub async fn cmd_list_functions(client: &Client) -> Result<()> {
