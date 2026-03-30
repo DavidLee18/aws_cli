@@ -673,6 +673,7 @@ dependencies = [
  "clap",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tokio-test",
 ]
