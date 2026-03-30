@@ -357,6 +357,30 @@ enum RdsCommands {
 
 #[derive(Subcommand)]
 enum LambdaCommands {
+    /// Create a Lambda function.
+    CreateFunction {
+        /// Name of the Lambda function.
+        #[arg(long, required = true)]
+        function_name: String,
+        /// Lambda runtime (e.g. nodejs20.x, python3.12, provided.al2).
+        #[arg(long, required = true)]
+        runtime: String,
+        /// IAM role ARN assumed by the function.
+        #[arg(long, required = true)]
+        role: String,
+        /// Function entry point handler.
+        #[arg(long, required = true)]
+        handler: String,
+        /// Path to deployment ZIP file.
+        #[arg(long, required = true)]
+        zip_file: String,
+        /// Function timeout in seconds.
+        #[arg(long)]
+        timeout: Option<i32>,
+        /// Function memory size in MB.
+        #[arg(long)]
+        memory_size: Option<i32>,
+    },
     /// List Lambda functions.
     ListFunctions,
     /// Get details about a specific Lambda function.
@@ -770,6 +794,27 @@ async fn main() -> Result<()> {
                 Commands::Lambda { subcommand } => {
                     let client = aws_sdk_lambda::Client::new(&aws_cfg);
                     match subcommand {
+                        LambdaCommands::CreateFunction {
+                            function_name,
+                            runtime,
+                            role,
+                            handler,
+                            zip_file,
+                            timeout,
+                            memory_size,
+                        } => {
+                            lambda_cmd::cmd_create_function(
+                                &client,
+                                &function_name,
+                                &runtime,
+                                &role,
+                                &handler,
+                                &zip_file,
+                                timeout,
+                                memory_size,
+                            )
+                            .await?
+                        }
                         LambdaCommands::ListFunctions => {
                             lambda_cmd::cmd_list_functions(&client).await?
                         }

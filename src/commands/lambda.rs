@@ -1,6 +1,56 @@
 use anyhow::{Context, Result};
 use aws_sdk_lambda::Client;
 
+/// Create a Lambda function from a ZIP file.
+pub async fn cmd_create_function(
+    client: &Client,
+    function_name: &str,
+    runtime: &str,
+    role: &str,
+    handler: &str,
+    zip_file: &str,
+    timeout: Option<i32>,
+    memory_size: Option<i32>,
+) -> Result<()> {
+    let contents = std::fs::read(zip_file)
+        .with_context(|| format!("Failed to read ZIP file: {}", zip_file))?;
+
+    let mut req = client
+        .create_function()
+        .function_name(function_name)
+        .runtime(aws_sdk_lambda::types::Runtime::from(runtime))
+        .role(role)
+        .handler(handler)
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(aws_sdk_lambda::primitives::Blob::new(contents))
+                .build(),
+        );
+
+    if let Some(t) = timeout {
+        req = req.timeout(t);
+    }
+
+    if let Some(m) = memory_size {
+        req = req.memory_size(m);
+    }
+
+    let resp = req
+        .send()
+        .await
+        .context("Failed to create Lambda function")?;
+
+    println!("Created function: {}", resp.function_name().unwrap_or("N/A"));
+    println!("Function ARN: {}", resp.function_arn().unwrap_or("N/A"));
+    println!(
+        "Runtime: {}",
+        resp.runtime().map(|r| r.as_str()).unwrap_or("N/A")
+    );
+    println!("Version: {}", resp.version().unwrap_or("N/A"));
+
+    Ok(())
+}
+
 /// List Lambda functions.
 pub async fn cmd_list_functions(client: &Client) -> Result<()> {
     let resp = client

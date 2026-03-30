@@ -67,7 +67,8 @@ This is an **active implementation** of core AWS CLI functionality in Rust. Curr
 - [x] `delete-db-snapshot`
 - [x] `restore-db-instance-from-db-snapshot`
 
-#### ✓ Lambda (7/10 core commands - 70%)
+#### ✓ Lambda (8/10 core commands - 80%)
+- [x] `create-function`
 - [x] `list-functions`
 - [x] `get-function`
 - [x] `delete-function`
