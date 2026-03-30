@@ -81,6 +81,19 @@ pub async fn cmd_get_role(client: &Client, role_name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Delete an IAM role.
+pub async fn cmd_delete_role(client: &Client, role_name: &str) -> Result<()> {
+    client
+        .delete_role()
+        .role_name(role_name)
+        .send()
+        .await
+        .context("Failed to delete IAM role")?;
+
+    println!("Deleted role: {role_name}");
+    Ok(())
+}
+
 /// Get details for a single IAM policy.
 pub async fn cmd_get_policy(client: &Client, policy_arn: &str) -> Result<()> {
     let resp = client
