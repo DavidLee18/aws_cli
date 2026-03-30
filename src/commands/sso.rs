@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use aws_sdk_sso::Client;
+use chrono::{TimeZone, Utc};
 
 /// List AWS accounts available to the current SSO access token.
 pub async fn cmd_list_accounts(client: &Client, access_token: &str) -> Result<()> {
@@ -75,7 +76,11 @@ pub async fn cmd_get_role_credentials(
             "SessionToken",
             credentials.session_token().unwrap_or("N/A")
         );
-        println!("{:<20} {}", "Expiration", credentials.expiration());
+        let expiration = match Utc.timestamp_millis_opt(credentials.expiration()).single() {
+            Some(ts) => ts.to_rfc3339(),
+            None => credentials.expiration().to_string(),
+        };
+        println!("{:<20} {}", "Expiration", expiration);
     }
 
     Ok(())

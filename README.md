@@ -55,7 +55,7 @@ This is an **active implementation** of core AWS CLI functionality in Rust. Curr
 - [x] `get-session-token` - Get session token
 - [x] `decode-authorization-message` - Decode error message
 
-#### ✓ SSO (3 core commands - initial Phase 1 support)
+#### ✓ SSO (3/3 core commands - 100%)
 - [x] `list-accounts`
 - [x] `list-account-roles`
 - [x] `get-role-credentials`
