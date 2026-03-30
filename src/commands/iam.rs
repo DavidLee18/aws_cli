@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use aws_sdk_iam::Client;
 
+const UNKNOWN: &str = "<unknown>";
+
 /// Create an IAM user.
 pub async fn cmd_create_user(client: &Client, user_name: &str, path: Option<&str>) -> Result<()> {
     let mut req = client.create_user().user_name(user_name);
@@ -74,6 +76,35 @@ pub async fn cmd_get_role(client: &Client, role_name: &str) -> Result<()> {
         println!("CreateDate: {}", role.create_date());
     } else {
         println!("No role data returned for: {role_name}");
+    }
+
+    Ok(())
+}
+
+/// Get details for a single IAM policy.
+pub async fn cmd_get_policy(client: &Client, policy_arn: &str) -> Result<()> {
+    let resp = client
+        .get_policy()
+        .policy_arn(policy_arn)
+        .send()
+        .await
+        .context("Failed to get IAM policy")?;
+
+    if let Some(policy) = resp.policy() {
+        println!("PolicyName: {}", policy.policy_name().unwrap_or(UNKNOWN));
+        println!("PolicyId: {}", policy.policy_id().unwrap_or(UNKNOWN));
+        println!("ARN: {}", policy.arn().unwrap_or(UNKNOWN));
+        println!("Path: {}", policy.path().unwrap_or("/"));
+        println!(
+            "DefaultVersionId: {}",
+            policy.default_version_id().unwrap_or(UNKNOWN)
+        );
+        match policy.attachment_count() {
+            Some(count) => println!("AttachmentCount: {count}"),
+            None => println!("AttachmentCount: {UNKNOWN}"),
+        }
+    } else {
+        println!("No policy data returned for: {policy_arn}");
     }
 
     Ok(())
