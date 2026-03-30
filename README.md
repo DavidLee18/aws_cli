@@ -4,9 +4,9 @@ A Rust port of the official AWS CLI, providing a fast, single-binary alternative
 
 ## Project Status
 
-This is an **active implementation** of core AWS CLI functionality in Rust. Currently at **31.61%** feature parity with the Python AWS CLI.
+This is an **active implementation** of core AWS CLI functionality in Rust. Currently at **31.92%** feature parity with the Python AWS CLI.
 
-### Currently Implemented (9 services, ~81 commands)
+### Currently Implemented (9 services, ~82 commands)
 
 #### ✓ Configure
 - [x] `configure` - Interactive configuration
@@ -36,7 +36,8 @@ This is an **active implementation** of core AWS CLI functionality in Rust. Curr
 - [ ] Key pair commands (4)
 - [ ] Volume & snapshot commands
 
-#### ✓ IAM (11/50 core commands - 22%)
+#### ✓ IAM (12/50 core commands - 24%)
+- [x] `create-role` - Create IAM roles
 - [x] `create-user` - Create IAM users
 - [x] `delete-user` - Delete IAM users
 - [x] `get-user` - Get IAM user details
@@ -135,6 +136,13 @@ This is an **active implementation** of core AWS CLI functionality in Rust. Curr
 - Include AWS SSO core account/role commands
 - Implement RDS basic operations
 - ~40 new commands, ~100-150 hours
+
+**Phase 1 progress snapshot (current):**
+- S3: 5/15 (remaining 10)
+- EC2: 7/40 (remaining 33)
+- IAM: 12/50 (remaining 38)
+- STS: 4/4 (remaining 0)
+- SSO: 4/4 (remaining 0)
 
 ### Phase 2: Serverless & Data (Weeks 5-8)
 **Target:** 70% of typical workflows

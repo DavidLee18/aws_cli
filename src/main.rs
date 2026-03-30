@@ -184,6 +184,18 @@ enum Ec2Commands {
 
 #[derive(Subcommand)]
 enum IamCommands {
+    /// Create an IAM role.
+    CreateRole {
+        /// IAM role name to create.
+        #[arg(long, required = true)]
+        role_name: String,
+        /// Trust policy JSON document.
+        #[arg(long, required = true)]
+        assume_role_policy_document: String,
+        /// Optional path for the role (e.g. /service-role/).
+        #[arg(long)]
+        path: Option<String>,
+    },
     /// Create an IAM user.
     CreateUser {
         /// IAM user name to create.
@@ -742,6 +754,19 @@ async fn main() -> Result<()> {
                 Commands::Iam { subcommand } => {
                     let client = aws_sdk_iam::Client::new(&aws_cfg);
                     match subcommand {
+                        IamCommands::CreateRole {
+                            role_name,
+                            assume_role_policy_document,
+                            path,
+                        } => {
+                            iam_cmd::cmd_create_role(
+                                &client,
+                                &role_name,
+                                &assume_role_policy_document,
+                                path.as_deref(),
+                            )
+                            .await?
+                        }
                         IamCommands::CreateUser { user_name, path } => {
                             iam_cmd::cmd_create_user(&client, &user_name, path.as_deref()).await?
                         }

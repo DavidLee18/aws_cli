@@ -24,6 +24,35 @@ pub async fn cmd_create_user(client: &Client, user_name: &str, path: Option<&str
     Ok(())
 }
 
+/// Create an IAM role.
+pub async fn cmd_create_role(
+    client: &Client,
+    role_name: &str,
+    assume_role_policy_document: &str,
+    path: Option<&str>,
+) -> Result<()> {
+    let mut req = client
+        .create_role()
+        .role_name(role_name)
+        .assume_role_policy_document(assume_role_policy_document);
+    if let Some(p) = path {
+        req = req.path(p);
+    }
+
+    let resp = req.send().await.context("Failed to create IAM role")?;
+    let role = resp.role();
+
+    println!(
+        "Created role: {}",
+        role.map(|r| r.role_name()).unwrap_or(role_name)
+    );
+    println!("Role ID: {}", role.map(|r| r.role_id()).unwrap_or("N/A"));
+    println!("ARN: {}", role.map(|r| r.arn()).unwrap_or("N/A"));
+    println!("Path: {}", role.map(|r| r.path()).unwrap_or("N/A"));
+
+    Ok(())
+}
+
 /// Delete an IAM user.
 pub async fn cmd_delete_user(client: &Client, user_name: &str) -> Result<()> {
     client
