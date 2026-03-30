@@ -357,3 +357,48 @@ pub async fn cmd_update_function_configuration(
 
     Ok(())
 }
+
+/// Configure asynchronous invocation behavior for a Lambda function.
+pub async fn cmd_put_function_event_invoke_config(
+    client: &Client,
+    function_name: &str,
+    qualifier: Option<&str>,
+    maximum_retry_attempts: Option<i32>,
+    maximum_event_age_in_seconds: Option<i32>,
+) -> Result<()> {
+    let mut req = client
+        .put_function_event_invoke_config()
+        .function_name(function_name);
+
+    if let Some(q) = qualifier {
+        req = req.qualifier(q);
+    }
+
+    if let Some(retries) = maximum_retry_attempts {
+        req = req.maximum_retry_attempts(retries);
+    }
+
+    if let Some(max_age) = maximum_event_age_in_seconds {
+        req = req.maximum_event_age_in_seconds(max_age);
+    }
+
+    let resp = req
+        .send()
+        .await
+        .context("Failed to put Lambda function event invoke config")?;
+
+    println!(
+        "Updated async invoke config for: {}",
+        resp.function_arn().unwrap_or("N/A")
+    );
+    println!(
+        "Maximum Retry Attempts: {}",
+        resp.maximum_retry_attempts().unwrap_or(0)
+    );
+    println!(
+        "Maximum Event Age (seconds): {}",
+        resp.maximum_event_age_in_seconds().unwrap_or(0)
+    );
+
+    Ok(())
+}

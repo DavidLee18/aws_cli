@@ -458,6 +458,21 @@ enum LambdaCommands {
         #[arg(long)]
         handler: Option<String>,
     },
+    /// Configure asynchronous invocation behavior for a Lambda function.
+    PutFunctionEventInvokeConfig {
+        /// Name of the Lambda function.
+        #[arg(long, required = true)]
+        function_name: String,
+        /// Optional version or alias.
+        #[arg(long)]
+        qualifier: Option<String>,
+        /// Maximum retry attempts for failed async invokes (0-2).
+        #[arg(long)]
+        maximum_retry_attempts: Option<i32>,
+        /// Maximum event age in seconds (60-21600).
+        #[arg(long)]
+        maximum_event_age_in_seconds: Option<i32>,
+    },
 }
 
 // ── DynamoDB sub-commands ─────────────────────────────────────────────────────
@@ -892,6 +907,21 @@ async fn main() -> Result<()> {
                                 memory_size,
                                 timeout,
                                 handler.as_deref(),
+                            )
+                            .await?
+                        }
+                        LambdaCommands::PutFunctionEventInvokeConfig {
+                            function_name,
+                            qualifier,
+                            maximum_retry_attempts,
+                            maximum_event_age_in_seconds,
+                        } => {
+                            lambda_cmd::cmd_put_function_event_invoke_config(
+                                &client,
+                                &function_name,
+                                qualifier.as_deref(),
+                                maximum_retry_attempts,
+                                maximum_event_age_in_seconds,
                             )
                             .await?
                         }
