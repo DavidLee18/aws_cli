@@ -579,7 +579,7 @@ pub async fn cmd_delete_security_group(
         .await
         .context("Failed to delete security group")?;
     println!(
-        "security group deleted: {}",
+        "Security group deleted: {}",
         group_id.unwrap_or_else(|| group_name.unwrap_or("<unknown>"))
     );
     Ok(())
