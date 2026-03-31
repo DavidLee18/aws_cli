@@ -48,7 +48,7 @@ jobs:
       - name: Build
         if: github.event_name != 'pull_request'
         run: cargo build --release --verbose
-      - run: ls -la target/**/*
+      - run: ls target/**/*
       - run: mv target/release/aws aws-${{ matrix.os }}
       - name: Upload Artifact
         if: github.event_name != 'pull_request'
