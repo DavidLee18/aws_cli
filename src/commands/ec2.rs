@@ -1,5 +1,9 @@
 use anyhow::{Context, Result};
+use aws_sdk_ec2::types::{
+    InstanceNetworkInterfaceSpecification, InstanceType, IpPermission, IpRange, VolumeType,
+};
 use aws_sdk_ec2::Client;
+use std::fs;
 
 /// Describe EC2 instances, optionally filtered by instance IDs.
 pub async fn cmd_describe_instances(client: &Client, instance_ids: &[String]) -> Result<()> {
@@ -200,6 +204,198 @@ pub async fn cmd_describe_instance_types(client: &Client, instance_types: &[Stri
             .collect();
         println!("{name:<20} {vcpus:>8} {mem:>8}  {}", arches.join(", "));
     }
+    Ok(())
+}
+
+/// Launch one or more EC2 instances.
+pub async fn cmd_run_instances(
+    client: &Client,
+    image_id: &str,
+    instance_type: &str,
+    count: u32,
+    key_name: Option<&str>,
+    subnet_id: Option<&str>,
+    security_group_ids: &[String],
+    associate_public_ip: bool,
+) -> Result<()> {
+    let mut req = client
+        .run_instances()
+        .image_id(image_id)
+        .instance_type(InstanceType::from(instance_type))
+        .min_count(1)
+        .max_count(count as i32);
+
+    if !associate_public_ip {
+        if let Some(kn) = key_name {
+            req = req.key_name(kn);
+        }
+        if let Some(sub) = subnet_id {
+            req = req.subnet_id(sub);
+        }
+        for sg in security_group_ids {
+            req = req.security_group_ids(sg);
+        }
+    } else {
+        let mut ni = InstanceNetworkInterfaceSpecification::builder()
+            .device_index(0)
+            .associate_public_ip_address(true);
+        if let Some(sub) = subnet_id {
+            ni = ni.subnet_id(sub);
+        }
+        for sg in security_group_ids {
+            ni = ni.groups(sg);
+        }
+        req = req.network_interfaces(ni.build());
+        if let Some(kn) = key_name {
+            req = req.key_name(kn);
+        }
+    }
+
+    let resp = req.send().await.context("Failed to run instances")?;
+
+    for inst in resp.instances() {
+        let id = inst.instance_id().unwrap_or("<unknown>");
+        let type_str = inst
+            .instance_type()
+            .map(|t| t.as_str())
+            .unwrap_or("unknown");
+        println!("launched: {id} ({type_str})");
+    }
+
+    Ok(())
+}
+
+fn build_ip_permission(protocol: &str, from_port: i32, to_port: i32, cidr: &str) -> IpPermission {
+    IpPermission::builder()
+        .ip_protocol(protocol)
+        .from_port(from_port)
+        .to_port(to_port)
+        .ip_ranges(IpRange::builder().cidr_ip(cidr).build())
+        .build()
+}
+
+/// Authorize ingress on a security group.
+pub async fn cmd_authorize_security_group_ingress(
+    client: &Client,
+    group_id: &str,
+    protocol: &str,
+    from_port: i32,
+    to_port: i32,
+    cidr: &str,
+) -> Result<()> {
+    let perm = build_ip_permission(protocol, from_port, to_port, cidr);
+    client
+        .authorize_security_group_ingress()
+        .group_id(group_id)
+        .ip_permissions(perm)
+        .send()
+        .await
+        .with_context(|| format!("Failed to authorize ingress on {group_id}"))?;
+    println!("ingress authorized: {group_id} {protocol} {from_port}-{to_port} {cidr}");
+    Ok(())
+}
+
+/// Authorize egress on a security group.
+pub async fn cmd_authorize_security_group_egress(
+    client: &Client,
+    group_id: &str,
+    protocol: &str,
+    from_port: i32,
+    to_port: i32,
+    cidr: &str,
+) -> Result<()> {
+    let perm = build_ip_permission(protocol, from_port, to_port, cidr);
+    client
+        .authorize_security_group_egress()
+        .group_id(group_id)
+        .ip_permissions(perm)
+        .send()
+        .await
+        .with_context(|| format!("Failed to authorize egress on {group_id}"))?;
+    println!("egress authorized: {group_id} {protocol} {from_port}-{to_port} {cidr}");
+    Ok(())
+}
+
+/// Import a public key as a key pair.
+pub async fn cmd_import_key_pair(
+    client: &Client,
+    key_name: &str,
+    public_key_file: &str,
+) -> Result<()> {
+    let material = fs::read_to_string(public_key_file)
+        .with_context(|| format!("Failed to read public key file {public_key_file}"))?;
+    let resp = client
+        .import_key_pair()
+        .key_name(key_name)
+        .public_key_material(material.into_bytes().into())
+        .send()
+        .await
+        .with_context(|| format!("Failed to import key pair {key_name}"))?;
+    let fp = resp.key_fingerprint().unwrap_or("<unknown>");
+    println!("key pair imported: {key_name} (fingerprint: {fp})");
+    Ok(())
+}
+
+/// Create an EBS volume.
+pub async fn cmd_create_volume(
+    client: &Client,
+    availability_zone: &str,
+    size: i32,
+    volume_type: &str,
+) -> Result<()> {
+    let resp = client
+        .create_volume()
+        .availability_zone(availability_zone)
+        .size(size)
+        .volume_type(VolumeType::from(volume_type))
+        .send()
+        .await
+        .with_context(|| format!("Failed to create volume in {availability_zone}"))?;
+    let vid = resp.volume_id().unwrap_or("<unknown>");
+    println!("volume created: {vid} ({size} GiB {volume_type})");
+    Ok(())
+}
+
+/// Delete an EBS volume.
+pub async fn cmd_delete_volume(client: &Client, volume_id: &str) -> Result<()> {
+    client
+        .delete_volume()
+        .volume_id(volume_id)
+        .send()
+        .await
+        .with_context(|| format!("Failed to delete volume {volume_id}"))?;
+    println!("volume deleted: {volume_id}");
+    Ok(())
+}
+
+/// Create an EBS snapshot.
+pub async fn cmd_create_snapshot(
+    client: &Client,
+    volume_id: &str,
+    description: Option<&str>,
+) -> Result<()> {
+    let mut req = client.create_snapshot().volume_id(volume_id);
+    if let Some(desc) = description {
+        req = req.description(desc);
+    }
+    let resp = req
+        .send()
+        .await
+        .with_context(|| format!("Failed to create snapshot from {volume_id}"))?;
+    let sid = resp.snapshot_id().unwrap_or("<unknown>");
+    println!("snapshot created: {sid} from {volume_id}");
+    Ok(())
+}
+
+/// Delete an EBS snapshot.
+pub async fn cmd_delete_snapshot(client: &Client, snapshot_id: &str) -> Result<()> {
+    client
+        .delete_snapshot()
+        .snapshot_id(snapshot_id)
+        .send()
+        .await
+        .with_context(|| format!("Failed to delete snapshot {snapshot_id}"))?;
+    println!("snapshot deleted: {snapshot_id}");
     Ok(())
 }
 

@@ -4,17 +4,17 @@ A Rust port of the official AWS CLI, providing a fast, single-binary alternative
 
 ## Project Status
 
-This is an **active implementation** of core AWS CLI functionality in Rust. Currently at **50.53%** feature parity with the Python AWS CLI.
-Current **Phase 1 progress** is **69.78%**. Phase 1 focuses on a smaller core subset of commands, which is why its progress percentage is higher than overall parity.
+This is an **active implementation** of core AWS CLI functionality in Rust. Currently at **56.43%** feature parity with the Python AWS CLI.
+Current **Phase 1 progress** is **84.07%**. Phase 1 focuses on a smaller core subset of commands, which is why its progress percentage is higher than overall parity.
 
-### Currently Implemented (9 services, ~130 commands)
+### Currently Implemented (9 services, ~145 commands)
 
 #### ✓ Configure
 - [x] `configure` - Interactive configuration
 - [x] `configure get` - Get configuration value
 - [x] `configure list` - List all configuration
 
-#### ✓ S3 (8/15 core commands - 53%)
+#### ✓ S3 (15/15 core commands - 100%)
 - [x] `ls` - List buckets/objects
 - [x] `cp` - Copy files
 - [x] `sync` - Sync directories
@@ -23,10 +23,15 @@ Current **Phase 1 progress** is **69.78%**. Phase 1 focuses on a smaller core su
 - [x] `rm` - Remove objects
 - [x] `mb` - Make bucket
 - [x] `rb` - Remove bucket
-- [ ] `website` - Bucket website configuration
-- [ ] `acl` - ACL management
+- [x] `website` - Bucket website configuration (set/disable)
+- [x] `get-acl` - Get bucket/object ACL
+- [x] `put-acl` - Set bucket/object ACL (canned)
+- [x] `get-bucket-policy` - Get bucket policy JSON
+- [x] `put-bucket-policy` - Set bucket policy JSON
+- [x] `delete-bucket-policy` - Remove bucket policy
+- [x] `list-object-versions` - List object versions for a prefix
 
-#### ✓ EC2 (14/40 core commands - 35%)
+#### ✓ EC2 (22/40 core commands - 55%)
 - [x] `describe-instances` - List instances
 - [x] `describe-regions` - List regions
 - [x] `start-instances` - Start instances
@@ -41,10 +46,15 @@ Current **Phase 1 progress** is **69.78%**. Phase 1 focuses on a smaller core su
 - [x] `delete-key-pair` - Delete a key pair
 - [x] `describe-volumes` - List EBS volumes
 - [x] `describe-snapshots` - List EBS snapshots
-- [ ] `run-instances` - Launch instances
-- [ ] Security group ingress/egress management
-- [ ] Key pair import
-- [ ] Volume & snapshot lifecycle
+- [x] `run-instances` - Launch instances
+- [x] `authorize-security-group-ingress` - Add ingress rule
+- [x] `authorize-security-group-egress` - Add egress rule
+- [x] `import-key-pair` - Import a public key
+- [x] `create-volume` - Create an EBS volume
+- [x] `delete-volume` - Delete an EBS volume
+- [x] `create-snapshot` - Create an EBS snapshot
+- [x] `delete-snapshot` - Delete an EBS snapshot
+- [ ] Additional volume & snapshot lifecycle (attach/detach, copy, etc.)
 
 #### ✓ IAM (50/50 core commands - 100%)
 - [x] `create-role` - Create IAM roles
@@ -181,8 +191,8 @@ Current **Phase 1 progress** is **69.78%**. Phase 1 focuses on a smaller core su
 - ~40 new commands, ~100-150 hours
 
 **Phase 1 progress snapshot (current):**
-- S3: 8/15 (remaining 7)
-- EC2: 14/40 (remaining 26)
+- S3: 15/15 (remaining 0)
+- EC2: 22/40 (remaining 18)
 - IAM: 50/50 (remaining 0)
 - STS: 4/4 (remaining 0)
 - SSO: 4/4 (remaining 0)

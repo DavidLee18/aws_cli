@@ -153,6 +153,54 @@ enum S3Commands {
         #[arg(long)]
         force: bool,
     },
+    /// Configure or disable static website hosting for a bucket.
+    Website {
+        /// S3 URI of the bucket (s3://bucket-name).
+        uri: String,
+        /// Index document key (e.g., index.html).
+        #[arg(long)]
+        index_document: Option<String>,
+        /// Error document key (e.g., error.html).
+        #[arg(long)]
+        error_document: Option<String>,
+        /// Disable website hosting (delete the website configuration).
+        #[arg(long)]
+        disable: bool,
+    },
+    /// Get the ACL for a bucket or object.
+    GetAcl {
+        /// S3 URI of the bucket or object.
+        uri: String,
+    },
+    /// Set a canned ACL for a bucket or object (e.g., private, public-read).
+    PutAcl {
+        /// S3 URI of the bucket or object.
+        uri: String,
+        /// Canned ACL to apply (private, public-read, public-read-write, authenticated-read, bucket-owner-read, bucket-owner-full-control).
+        acl: String,
+    },
+    /// Get the bucket policy JSON for a bucket.
+    GetBucketPolicy {
+        /// S3 URI of the bucket.
+        uri: String,
+    },
+    /// Set (or replace) the bucket policy for a bucket.
+    PutBucketPolicy {
+        /// S3 URI of the bucket.
+        uri: String,
+        /// Policy document JSON (string). If this points to a local file, the file will be read.
+        policy: String,
+    },
+    /// Delete the bucket policy for a bucket.
+    DeleteBucketPolicy {
+        /// S3 URI of the bucket.
+        uri: String,
+    },
+    /// List object versions for a bucket/prefix.
+    ListObjectVersions {
+        /// S3 URI of the bucket or prefix (s3://bucket[/prefix]).
+        uri: String,
+    },
 }
 
 // ── EC2 sub-commands ──────────────────────────────────────────────────────────
@@ -241,6 +289,108 @@ enum Ec2Commands {
         /// Snapshot IDs to filter (omit for all).
         #[arg(value_name = "SNAPSHOT_ID")]
         snapshot_ids: Vec<String>,
+    },
+    /// Launch one or more EC2 instances.
+    RunInstances {
+        /// AMI ID.
+        #[arg(long, required = true)]
+        image_id: String,
+        /// Instance type (e.g., t3.micro).
+        #[arg(long, required = true)]
+        instance_type: String,
+        /// Number of instances to launch.
+        #[arg(long, default_value_t = 1)]
+        count: u32,
+        /// Key pair name to associate.
+        #[arg(long)]
+        key_name: Option<String>,
+        /// Subnet ID to launch into.
+        #[arg(long)]
+        subnet_id: Option<String>,
+        /// Security group IDs to associate.
+        #[arg(long = "security-group-id")]
+        security_group_ids: Vec<String>,
+        /// Associate a public IP address.
+        #[arg(long)]
+        associate_public_ip: bool,
+    },
+    /// Authorize an ingress rule on a security group.
+    AuthorizeSecurityGroupIngress {
+        /// Security group ID.
+        #[arg(long, required = true)]
+        group_id: String,
+        /// Protocol (tcp, udp, icmp).
+        #[arg(long, default_value = "tcp")]
+        protocol: String,
+        /// From port.
+        #[arg(long, required = true)]
+        from_port: i32,
+        /// To port.
+        #[arg(long, required = true)]
+        to_port: i32,
+        /// CIDR IP range (e.g., 0.0.0.0/0).
+        #[arg(long, default_value = "0.0.0.0/0")]
+        cidr: String,
+    },
+    /// Authorize an egress rule on a security group.
+    AuthorizeSecurityGroupEgress {
+        /// Security group ID.
+        #[arg(long, required = true)]
+        group_id: String,
+        /// Protocol (tcp, udp, icmp).
+        #[arg(long, default_value = "tcp")]
+        protocol: String,
+        /// From port.
+        #[arg(long, required = true)]
+        from_port: i32,
+        /// To port.
+        #[arg(long, required = true)]
+        to_port: i32,
+        /// CIDR IP range (e.g., 0.0.0.0/0).
+        #[arg(long, default_value = "0.0.0.0/0")]
+        cidr: String,
+    },
+    /// Import a public key as a new key pair.
+    ImportKeyPair {
+        /// Key pair name.
+        #[arg(long, required = true)]
+        key_name: String,
+        /// Path to the public key file.
+        #[arg(long, required = true)]
+        public_key_file: String,
+    },
+    /// Create a new EBS volume.
+    CreateVolume {
+        /// Availability Zone (e.g., us-east-1a).
+        #[arg(long, required = true)]
+        availability_zone: String,
+        /// Size in GiB.
+        #[arg(long, required = true)]
+        size: i32,
+        /// Volume type (gp2, gp3, io1, etc.).
+        #[arg(long, default_value = "gp3")]
+        volume_type: String,
+    },
+    /// Delete an EBS volume.
+    DeleteVolume {
+        /// Volume ID.
+        #[arg(long, required = true)]
+        volume_id: String,
+    },
+    /// Create an EBS snapshot.
+    CreateSnapshot {
+        /// Source volume ID.
+        #[arg(long, required = true)]
+        volume_id: String,
+        /// Description for the snapshot.
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// Delete an EBS snapshot.
+    DeleteSnapshot {
+        /// Snapshot ID.
+        #[arg(long, required = true)]
+        snapshot_id: String,
     },
     /// Describe EC2 instance types.
     DescribeInstanceTypes {
@@ -1115,6 +1265,37 @@ async fn main() -> Result<()> {
                         S3Commands::Rb { uri, force } => {
                             s3_cmd::cmd_rb(&client, &uri, force).await?
                         }
+                        S3Commands::Website {
+                            uri,
+                            index_document,
+                            error_document,
+                            disable,
+                        } => {
+                            s3_cmd::cmd_website(
+                                &client,
+                                &uri,
+                                &index_document,
+                                &error_document,
+                                disable,
+                            )
+                            .await?
+                        }
+                        S3Commands::GetAcl { uri } => s3_cmd::cmd_get_acl(&client, &uri).await?,
+                        S3Commands::PutAcl { uri, acl } => {
+                            s3_cmd::cmd_put_acl(&client, &uri, &acl).await?
+                        }
+                        S3Commands::GetBucketPolicy { uri } => {
+                            s3_cmd::cmd_get_bucket_policy(&client, &uri).await?
+                        }
+                        S3Commands::PutBucketPolicy { uri, policy } => {
+                            s3_cmd::cmd_put_bucket_policy(&client, &uri, &policy).await?
+                        }
+                        S3Commands::DeleteBucketPolicy { uri } => {
+                            s3_cmd::cmd_delete_bucket_policy(&client, &uri).await?
+                        }
+                        S3Commands::ListObjectVersions { uri } => {
+                            s3_cmd::cmd_list_object_versions(&client, &uri).await?
+                        }
                     }
                 }
 
@@ -1172,6 +1353,88 @@ async fn main() -> Result<()> {
                         }
                         Ec2Commands::DescribeSnapshots { snapshot_ids } => {
                             ec2_cmd::cmd_describe_snapshots(&client, &snapshot_ids).await?
+                        }
+                        Ec2Commands::RunInstances {
+                            image_id,
+                            instance_type,
+                            count,
+                            key_name,
+                            subnet_id,
+                            security_group_ids,
+                            associate_public_ip,
+                        } => {
+                            ec2_cmd::cmd_run_instances(
+                                &client,
+                                &image_id,
+                                &instance_type,
+                                count,
+                                key_name.as_deref(),
+                                subnet_id.as_deref(),
+                                &security_group_ids,
+                                associate_public_ip,
+                            )
+                            .await?
+                        }
+                        Ec2Commands::AuthorizeSecurityGroupIngress {
+                            group_id,
+                            protocol,
+                            from_port,
+                            to_port,
+                            cidr,
+                        } => {
+                            ec2_cmd::cmd_authorize_security_group_ingress(
+                                &client, &group_id, &protocol, from_port, to_port, &cidr,
+                            )
+                            .await?
+                        }
+                        Ec2Commands::AuthorizeSecurityGroupEgress {
+                            group_id,
+                            protocol,
+                            from_port,
+                            to_port,
+                            cidr,
+                        } => {
+                            ec2_cmd::cmd_authorize_security_group_egress(
+                                &client, &group_id, &protocol, from_port, to_port, &cidr,
+                            )
+                            .await?
+                        }
+                        Ec2Commands::ImportKeyPair {
+                            key_name,
+                            public_key_file,
+                        } => {
+                            ec2_cmd::cmd_import_key_pair(&client, &key_name, &public_key_file)
+                                .await?
+                        }
+                        Ec2Commands::CreateVolume {
+                            availability_zone,
+                            size,
+                            volume_type,
+                        } => {
+                            ec2_cmd::cmd_create_volume(
+                                &client,
+                                &availability_zone,
+                                size,
+                                &volume_type,
+                            )
+                            .await?
+                        }
+                        Ec2Commands::DeleteVolume { volume_id } => {
+                            ec2_cmd::cmd_delete_volume(&client, &volume_id).await?
+                        }
+                        Ec2Commands::CreateSnapshot {
+                            volume_id,
+                            description,
+                        } => {
+                            ec2_cmd::cmd_create_snapshot(
+                                &client,
+                                &volume_id,
+                                description.as_deref(),
+                            )
+                            .await?
+                        }
+                        Ec2Commands::DeleteSnapshot { snapshot_id } => {
+                            ec2_cmd::cmd_delete_snapshot(&client, &snapshot_id).await?
                         }
                         Ec2Commands::DescribeInstanceTypes { instance_types } => {
                             ec2_cmd::cmd_describe_instance_types(&client, &instance_types).await?

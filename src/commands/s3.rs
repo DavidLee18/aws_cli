@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
 use aws_sdk_s3::presigning::PresigningConfig;
+use aws_sdk_s3::types::{BucketCannedAcl, ObjectCannedAcl, WebsiteConfiguration};
 use aws_sdk_s3::Client;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use std::{fs, path::Path as StdPath};
 
 /// List S3 buckets, or objects within a bucket.
 ///
@@ -186,6 +188,184 @@ pub async fn cmd_rb(client: &Client, uri: &str, force: bool) -> Result<()> {
         .await
         .with_context(|| format!("Failed to remove bucket {bucket}"))?;
     println!("remove_bucket: s3://{bucket}");
+    Ok(())
+}
+
+/// Configure (or disable) static website hosting on a bucket.
+pub async fn cmd_website(
+    client: &Client,
+    uri: &str,
+    index_document: &Option<String>,
+    error_document: &Option<String>,
+    disable: bool,
+) -> Result<()> {
+    let (bucket, _) = parse_s3_uri(uri)?;
+    if disable {
+        client
+            .delete_bucket_website()
+            .bucket(&bucket)
+            .send()
+            .await
+            .with_context(|| format!("Failed to delete website config for {bucket}"))?;
+        println!("website disabled: s3://{bucket}");
+        return Ok(());
+    }
+
+    let index = index_document
+        .as_deref()
+        .context("index-document is required unless --disable is used")?;
+    let mut cfg = WebsiteConfiguration::builder().index_document(
+        aws_sdk_s3::types::IndexDocument::builder()
+            .suffix(index)
+            .build()?,
+    );
+    if let Some(err) = error_document {
+        cfg = cfg.error_document(
+            aws_sdk_s3::types::ErrorDocument::builder()
+                .key(err)
+                .build()?,
+        );
+    }
+    client
+        .put_bucket_website()
+        .bucket(&bucket)
+        .website_configuration(cfg.build())
+        .send()
+        .await
+        .with_context(|| format!("Failed to set website config for {bucket}"))?;
+    println!("website enabled: s3://{bucket} (index: {index})");
+    Ok(())
+}
+
+/// Get the ACL for a bucket or object.
+pub async fn cmd_get_acl(client: &Client, uri: &str) -> Result<()> {
+    let (bucket, key_opt) = parse_s3_uri(uri)?;
+    if let Some(key) = key_opt.filter(|k| !k.is_empty()) {
+        let resp = client
+            .get_object_acl()
+            .bucket(&bucket)
+            .key(&key)
+            .send()
+            .await
+            .with_context(|| format!("Failed to get ACL for s3://{bucket}/{key}"))?;
+        print_acl(resp.owner(), Some(resp.grants()), Some(&key));
+    } else {
+        let resp = client
+            .get_bucket_acl()
+            .bucket(&bucket)
+            .send()
+            .await
+            .with_context(|| format!("Failed to get ACL for bucket {bucket}"))?;
+        print_acl(resp.owner(), Some(resp.grants()), None);
+    }
+    Ok(())
+}
+
+/// Set a canned ACL for a bucket or object.
+pub async fn cmd_put_acl(client: &Client, uri: &str, acl: &str) -> Result<()> {
+    let (bucket, key_opt) = parse_s3_uri(uri)?;
+    if let Some(key) = key_opt.filter(|k| !k.is_empty()) {
+        let canned = ObjectCannedAcl::from(acl);
+        client
+            .put_object_acl()
+            .bucket(&bucket)
+            .key(&key)
+            .acl(canned)
+            .send()
+            .await
+            .with_context(|| format!("Failed to set ACL for s3://{bucket}/{key}"))?;
+        println!("acl set: s3://{bucket}/{key} ({acl})");
+    } else {
+        let canned = BucketCannedAcl::from(acl);
+        client
+            .put_bucket_acl()
+            .bucket(&bucket)
+            .acl(canned)
+            .send()
+            .await
+            .with_context(|| format!("Failed to set ACL for bucket {bucket}"))?;
+        println!("acl set: s3://{bucket} ({acl})");
+    }
+    Ok(())
+}
+
+/// Get the bucket policy JSON for a bucket.
+pub async fn cmd_get_bucket_policy(client: &Client, uri: &str) -> Result<()> {
+    let (bucket, _) = parse_s3_uri(uri)?;
+    let resp = client
+        .get_bucket_policy()
+        .bucket(&bucket)
+        .send()
+        .await
+        .with_context(|| format!("Failed to get bucket policy for {bucket}"))?;
+    if let Some(pol) = resp.policy() {
+        println!("{pol}");
+    } else {
+        println!("(no policy)");
+    }
+    Ok(())
+}
+
+/// Set or replace the bucket policy for a bucket.
+pub async fn cmd_put_bucket_policy(client: &Client, uri: &str, policy: &str) -> Result<()> {
+    let (bucket, _) = parse_s3_uri(uri)?;
+    let policy_str = if StdPath::new(policy).exists() {
+        fs::read_to_string(policy)
+            .with_context(|| format!("Failed to read policy file {policy}"))?
+    } else {
+        policy.to_string()
+    };
+    client
+        .put_bucket_policy()
+        .bucket(&bucket)
+        .policy(policy_str.clone())
+        .send()
+        .await
+        .with_context(|| format!("Failed to put bucket policy for {bucket}"))?;
+    println!("bucket policy applied: s3://{bucket}");
+    Ok(())
+}
+
+/// Delete the bucket policy for a bucket.
+pub async fn cmd_delete_bucket_policy(client: &Client, uri: &str) -> Result<()> {
+    let (bucket, _) = parse_s3_uri(uri)?;
+    client
+        .delete_bucket_policy()
+        .bucket(&bucket)
+        .send()
+        .await
+        .with_context(|| format!("Failed to delete bucket policy for {bucket}"))?;
+    println!("bucket policy deleted: s3://{bucket}");
+    Ok(())
+}
+
+/// List object versions for a bucket/prefix.
+pub async fn cmd_list_object_versions(client: &Client, uri: &str) -> Result<()> {
+    let (bucket, prefix) = parse_s3_uri(uri)?;
+    let mut req = client.list_object_versions().bucket(&bucket);
+    if let Some(p) = prefix {
+        if !p.is_empty() {
+            req = req.prefix(p);
+        }
+    }
+    let resp = req
+        .send()
+        .await
+        .with_context(|| format!("Failed to list object versions for {bucket}"))?;
+
+    for ver in resp.versions() {
+        let key = ver.key().unwrap_or("<unknown>");
+        let vid = ver.version_id().unwrap_or("<null>");
+        let is_latest = ver.is_latest().unwrap_or(false);
+        let size = ver.size().unwrap_or(0);
+        println!(
+            "{:<8} {:<36} {:>10} {}",
+            if is_latest { "LATEST" } else { "" },
+            vid,
+            size,
+            key
+        );
+    }
     Ok(())
 }
 
@@ -483,6 +663,36 @@ fn collect_local_files(root: &Path) -> Result<Vec<PathBuf>> {
 
 fn normalize_path_for_s3(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+fn print_acl(
+    owner: Option<&aws_sdk_s3::types::Owner>,
+    grants: Option<&[aws_sdk_s3::types::Grant]>,
+    key: Option<&str>,
+) {
+    if let Some(o) = owner {
+        let id = o.id().unwrap_or("");
+        let display_name = o.display_name().unwrap_or("");
+        if let Some(k) = key {
+            println!("Owner (object): {display_name} {id}  key={k}");
+        } else {
+            println!("Owner (bucket): {display_name} {id}");
+        }
+    }
+    if let Some(gs) = grants {
+        for g in gs {
+            let grantee = g.grantee();
+            let name = grantee.and_then(|gr| gr.display_name()).unwrap_or("");
+            let typ = grantee
+                .map(|gr| gr.r#type().as_str())
+                .unwrap_or("");
+            let perm = g
+                .permission()
+                .map(|p| p.as_str().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            println!("Grant: {:<18} {:<10} {}", perm, typ, name);
+        }
+    }
 }
 
 /// Parse `s3://bucket/optional/key` into `(bucket, Option<key>)`.
