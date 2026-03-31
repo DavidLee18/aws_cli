@@ -400,6 +400,51 @@ enum IamCommands {
         #[arg(long, required = true)]
         role_name: String,
     },
+    /// List inline policy names for an IAM user.
+    ListUserPolicies {
+        /// IAM user name to query.
+        #[arg(long, required = true)]
+        user_name: String,
+    },
+    /// List inline policy names for an IAM role.
+    ListRolePolicies {
+        /// IAM role name to query.
+        #[arg(long, required = true)]
+        role_name: String,
+    },
+    /// List inline policy names for an IAM group.
+    ListGroupPolicies {
+        /// IAM group name to query.
+        #[arg(long, required = true)]
+        group_name: String,
+    },
+    /// Get an inline policy embedded in an IAM user.
+    GetUserPolicy {
+        /// IAM user name to query.
+        #[arg(long, required = true)]
+        user_name: String,
+        /// Inline policy name to fetch.
+        #[arg(long, required = true)]
+        policy_name: String,
+    },
+    /// Get an inline policy embedded in an IAM role.
+    GetRolePolicy {
+        /// IAM role name to query.
+        #[arg(long, required = true)]
+        role_name: String,
+        /// Inline policy name to fetch.
+        #[arg(long, required = true)]
+        policy_name: String,
+    },
+    /// Get an inline policy embedded in an IAM group.
+    GetGroupPolicy {
+        /// IAM group name to query.
+        #[arg(long, required = true)]
+        group_name: String,
+        /// Inline policy name to fetch.
+        #[arg(long, required = true)]
+        policy_name: String,
+    },
     /// List account aliases.
     ListAccountAliases,
 }
@@ -1010,6 +1055,27 @@ async fn main() -> Result<()> {
                         IamCommands::ListAttachedRolePolicies { role_name } => {
                             iam_cmd::cmd_list_attached_role_policies(&client, &role_name).await?
                         }
+                        IamCommands::ListUserPolicies { user_name } => {
+                            iam_cmd::cmd_list_user_policies(&client, &user_name).await?
+                        }
+                        IamCommands::ListRolePolicies { role_name } => {
+                            iam_cmd::cmd_list_role_policies(&client, &role_name).await?
+                        }
+                        IamCommands::ListGroupPolicies { group_name } => {
+                            iam_cmd::cmd_list_group_policies(&client, &group_name).await?
+                        }
+                        IamCommands::GetUserPolicy {
+                            user_name,
+                            policy_name,
+                        } => iam_cmd::cmd_get_user_policy(&client, &user_name, &policy_name).await?,
+                        IamCommands::GetRolePolicy {
+                            role_name,
+                            policy_name,
+                        } => iam_cmd::cmd_get_role_policy(&client, &role_name, &policy_name).await?,
+                        IamCommands::GetGroupPolicy {
+                            group_name,
+                            policy_name,
+                        } => iam_cmd::cmd_get_group_policy(&client, &group_name, &policy_name).await?,
                         IamCommands::ListAccountAliases => {
                             iam_cmd::cmd_list_account_aliases(&client).await?
                         }

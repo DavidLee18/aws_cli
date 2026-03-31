@@ -656,6 +656,142 @@ pub async fn cmd_list_attached_role_policies(client: &Client, role_name: &str) -
     Ok(())
 }
 
+/// List inline policy names embedded in an IAM user.
+pub async fn cmd_list_user_policies(client: &Client, user_name: &str) -> Result<()> {
+    let mut marker: Option<String> = None;
+    println!("PolicyName");
+    println!("----------");
+
+    loop {
+        let mut req = client.list_user_policies().user_name(user_name);
+        if let Some(ref m) = marker {
+            req = req.marker(m);
+        }
+        let resp = req.send().await.context("Failed to list user policies")?;
+
+        for policy_name in resp.policy_names() {
+            println!("{policy_name}");
+        }
+
+        if resp.is_truncated() {
+            marker = resp.marker().map(str::to_string);
+        } else {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+/// List inline policy names embedded in an IAM role.
+pub async fn cmd_list_role_policies(client: &Client, role_name: &str) -> Result<()> {
+    let mut marker: Option<String> = None;
+    println!("PolicyName");
+    println!("----------");
+
+    loop {
+        let mut req = client.list_role_policies().role_name(role_name);
+        if let Some(ref m) = marker {
+            req = req.marker(m);
+        }
+        let resp = req.send().await.context("Failed to list role policies")?;
+
+        for policy_name in resp.policy_names() {
+            println!("{policy_name}");
+        }
+
+        if resp.is_truncated() {
+            marker = resp.marker().map(str::to_string);
+        } else {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+/// List inline policy names embedded in an IAM group.
+pub async fn cmd_list_group_policies(client: &Client, group_name: &str) -> Result<()> {
+    let mut marker: Option<String> = None;
+    println!("PolicyName");
+    println!("----------");
+
+    loop {
+        let mut req = client.list_group_policies().group_name(group_name);
+        if let Some(ref m) = marker {
+            req = req.marker(m);
+        }
+        let resp = req.send().await.context("Failed to list group policies")?;
+
+        for policy_name in resp.policy_names() {
+            println!("{policy_name}");
+        }
+
+        if resp.is_truncated() {
+            marker = resp.marker().map(str::to_string);
+        } else {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+/// Get an inline policy document embedded in an IAM user.
+pub async fn cmd_get_user_policy(client: &Client, user_name: &str, policy_name: &str) -> Result<()> {
+    let resp = client
+        .get_user_policy()
+        .user_name(user_name)
+        .policy_name(policy_name)
+        .send()
+        .await
+        .context("Failed to get user policy")?;
+
+    println!("UserName: {}", resp.user_name());
+    println!("PolicyName: {}", resp.policy_name());
+    println!("PolicyDocument: {}", resp.policy_document());
+
+    Ok(())
+}
+
+/// Get an inline policy document embedded in an IAM role.
+pub async fn cmd_get_role_policy(client: &Client, role_name: &str, policy_name: &str) -> Result<()> {
+    let resp = client
+        .get_role_policy()
+        .role_name(role_name)
+        .policy_name(policy_name)
+        .send()
+        .await
+        .context("Failed to get role policy")?;
+
+    println!("RoleName: {}", resp.role_name());
+    println!("PolicyName: {}", resp.policy_name());
+    println!("PolicyDocument: {}", resp.policy_document());
+
+    Ok(())
+}
+
+/// Get an inline policy document embedded in an IAM group.
+pub async fn cmd_get_group_policy(
+    client: &Client,
+    group_name: &str,
+    policy_name: &str,
+) -> Result<()> {
+    let resp = client
+        .get_group_policy()
+        .group_name(group_name)
+        .policy_name(policy_name)
+        .send()
+        .await
+        .context("Failed to get group policy")?;
+
+    println!("GroupName: {}", resp.group_name());
+    println!("PolicyName: {}", resp.policy_name());
+    println!("PolicyDocument: {}", resp.policy_document());
+
+    Ok(())
+}
+
 /// Get details about the current IAM account alias(es).
 pub async fn cmd_list_account_aliases(client: &Client) -> Result<()> {
     let resp = client

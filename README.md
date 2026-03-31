@@ -4,10 +4,10 @@ A Rust port of the official AWS CLI, providing a fast, single-binary alternative
 
 ## Project Status
 
-This is an **active implementation** of core AWS CLI functionality in Rust. Currently at **38.52%** feature parity with the Python AWS CLI.
-Current **Phase 1 progress** is **43.36%**.
+This is an **active implementation** of core AWS CLI functionality in Rust. Currently at **40.86%** feature parity with the Python AWS CLI.
+Current **Phase 1 progress** is **48.67%**.
 
-### Currently Implemented (9 services, ~99 commands)
+### Currently Implemented (9 services, ~105 commands)
 
 #### ✓ Configure
 - [x] `configure` - Interactive configuration
@@ -37,7 +37,7 @@ Current **Phase 1 progress** is **43.36%**.
 - [ ] Key pair commands (4)
 - [ ] Volume & snapshot commands
 
-#### ✓ IAM (29/50 core commands - 58%)
+#### ✓ IAM (35/50 core commands - 70%)
 - [x] `create-role` - Create IAM roles
 - [x] `create-user` - Create IAM users
 - [x] `delete-user` - Delete IAM users
@@ -66,6 +66,12 @@ Current **Phase 1 progress** is **43.36%**.
 - [x] `detach-role-policy` - Detach managed policy from role
 - [x] `list-attached-user-policies` - List attached policies for user
 - [x] `list-attached-role-policies` - List attached policies for role
+- [x] `list-user-policies` - List inline policy names for user
+- [x] `list-role-policies` - List inline policy names for role
+- [x] `list-group-policies` - List inline policy names for group
+- [x] `get-user-policy` - Get inline policy document for user
+- [x] `get-role-policy` - Get inline policy document for role
+- [x] `get-group-policy` - Get inline policy document for group
 - [x] `list-account-aliases` - List account aliases
 - [ ] User CRUD operations (4)
 - [ ] Role CRUD operations (4)
@@ -157,7 +163,7 @@ Current **Phase 1 progress** is **43.36%**.
 **Phase 1 progress snapshot (current):**
 - S3: 5/15 (remaining 10)
 - EC2: 7/40 (remaining 33)
-- IAM: 29/50 (remaining 21)
+- IAM: 35/50 (remaining 15)
 - STS: 4/4 (remaining 0)
 - SSO: 4/4 (remaining 0)
 
