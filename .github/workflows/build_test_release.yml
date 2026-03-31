@@ -48,10 +48,18 @@ jobs:
       - name: Build
         if: github.event_name != 'pull_request'
         run: cargo build --release --verbose
-      - run: ls target/**/*
+      - run: mv target/release/aws.exe aws-${{ matrix.os }}.exe
+        if: contains(matrix.os, 'windows')
       - run: mv target/release/aws aws-${{ matrix.os }}
+        if: contains(matrix.os, 'windows') == false
       - name: Upload Artifact
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && contains(matrix.os, 'windows')
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: ${{ matrix.os }}
+          path: aws-${{ matrix.os }}.exe
+      - name: Upload Artifact
+        if: github.event_name != 'pull_request' && contains(matrix.os, 'windows') == false
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
         with:
           name: ${{ matrix.os }}
