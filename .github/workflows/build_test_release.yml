@@ -48,13 +48,13 @@ jobs:
       - name: Build
         if: github.event_name != 'pull_request'
         run: cargo build --release --verbose
-      - run: mv target/release/discord_obs_livebot discord_obs_livebot-${{ matrix.os }}
+      - run: mv target/release/aws aws-${{ matrix.os }}
       - name: Upload Artifact
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
         with:
           name: ${{ matrix.os }}
-          path: discord_obs_livebot-${{ matrix.os }}
+          path: aws-${{ matrix.os }}
   release:
     needs: [update_version, build-and-test]
     if: github.event_name != 'pull_request'
@@ -74,4 +74,4 @@ jobs:
           previous_tag: ${{ needs.update_version.outputs.previous_tag }}
           body: ${{ needs.update_version.outputs.changelog }}
           files: |
-            discord_obs_livebot-*
+            aws-*
