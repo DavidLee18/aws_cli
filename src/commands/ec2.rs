@@ -401,6 +401,32 @@ pub async fn cmd_delete_snapshot(client: &Client, snapshot_id: &str) -> Result<(
     Ok(())
 }
 
+/// Copy an EBS snapshot from another region into the current region.
+pub async fn cmd_copy_snapshot(
+    client: &Client,
+    source_region: &str,
+    source_snapshot_id: &str,
+    description: Option<&str>,
+) -> Result<()> {
+    let mut req = client
+        .copy_snapshot()
+        .source_region(source_region)
+        .source_snapshot_id(source_snapshot_id);
+
+    if let Some(desc) = description {
+        req = req.description(desc);
+    }
+
+    let resp = req.send().await.with_context(|| {
+        format!("Failed to copy snapshot {source_snapshot_id} from {source_region}")
+    })?;
+    let sid = resp.snapshot_id().unwrap_or("<unknown>");
+    println!(
+        "snapshot copy started: {sid} from {source_snapshot_id} ({source_region} -> current region)"
+    );
+    Ok(())
+}
+
 /// Describe EC2 availability zones.
 pub async fn cmd_describe_availability_zones(client: &Client) -> Result<()> {
     let resp = client
@@ -446,6 +472,33 @@ pub async fn cmd_describe_images(
         let name = img.name().unwrap_or("");
         println!("{id:<20} {state:<12} {name}");
     }
+    Ok(())
+}
+
+/// Create an AMI from an existing instance.
+pub async fn cmd_create_image(
+    client: &Client,
+    instance_id: &str,
+    name: &str,
+    no_reboot: bool,
+    description: Option<&str>,
+) -> Result<()> {
+    let mut req = client
+        .create_image()
+        .instance_id(instance_id)
+        .name(name)
+        .no_reboot(no_reboot);
+
+    if let Some(desc) = description {
+        req = req.description(desc);
+    }
+
+    let resp = req
+        .send()
+        .await
+        .with_context(|| format!("Failed to create image from {instance_id}"))?;
+    let image_id = resp.image_id().unwrap_or("<unknown>");
+    println!("image created: {image_id} from {instance_id} (name: {name})");
     Ok(())
 }
 

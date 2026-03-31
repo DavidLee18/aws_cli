@@ -4,10 +4,10 @@ A Rust port of the official AWS CLI, providing a fast, single-binary alternative
 
 ## Project Status
 
-This is an **active implementation** of core AWS CLI functionality in Rust. Currently at **62.65%** feature parity with the Python AWS CLI.
-Current **Phase 1 progress** is **98.23%**. Phase 1 focuses on a smaller core subset of commands, which is why its progress percentage is higher than overall parity.
+This is an **active implementation** of core AWS CLI functionality in Rust. Currently at **63.60%** feature parity with the Python AWS CLI.
+Current **Phase 1 progress** is **100.00%**. Phase 1 focuses on a smaller core subset of commands, which is why its progress percentage is higher than overall parity.
 
-### Currently Implemented (9 services, ~161 commands)
+### Currently Implemented (9 services, ~163 commands)
 
 #### ✓ Configure
 - [x] `configure` - Interactive configuration
@@ -31,7 +31,7 @@ Current **Phase 1 progress** is **98.23%**. Phase 1 focuses on a smaller core su
 - [x] `delete-bucket-policy` - Remove bucket policy
 - [x] `list-object-versions` - List object versions for a prefix
 
-#### ✓ EC2 (38/40 core commands - 95%)
+#### ✓ EC2 (40/40 core commands - 100%)
 - [x] `describe-instances` - List instances
 - [x] `describe-regions` - List regions
 - [x] `describe-availability-zones` - List AZs
@@ -51,6 +51,7 @@ Current **Phase 1 progress** is **98.23%**. Phase 1 focuses on a smaller core su
 - [x] `describe-images` - List AMIs
 - [x] `describe-volumes` - List EBS volumes
 - [x] `describe-snapshots` - List EBS snapshots
+- [x] `create-image` - Create an AMI from an instance
 - [x] `describe-addresses` - List Elastic IPs
 - [x] `allocate-address` - Allocate Elastic IP
 - [x] `associate-address` - Associate Elastic IP
@@ -67,12 +68,12 @@ Current **Phase 1 progress** is **98.23%**. Phase 1 focuses on a smaller core su
 - [x] `detach-volume` - Detach an EBS volume
 - [x] `create-snapshot` - Create an EBS snapshot
 - [x] `delete-snapshot` - Delete an EBS snapshot
+- [x] `copy-snapshot` - Copy an EBS snapshot across regions
 - [x] `describe-subnets` - List subnets
 - [x] `describe-vpcs` - List VPCs
 - [x] `describe-route-tables` - List route tables
 - [x] `create-tags` - Add resource tags
 - [x] `delete-tags` - Remove resource tags
-- [ ] Remaining Phase 1 EC2: image creation and snapshot copy
 
 #### ✓ IAM (50/50 core commands - 100%)
 - [x] `create-role` - Create IAM roles
@@ -210,7 +211,7 @@ Current **Phase 1 progress** is **98.23%**. Phase 1 focuses on a smaller core su
 
 **Phase 1 progress snapshot (current):**
 - S3: 15/15 (remaining 0)
-- EC2: 22/40 (remaining 18)
+- EC2: 40/40 (remaining 0)
 - IAM: 50/50 (remaining 0)
 - STS: 4/4 (remaining 0)
 - SSO: 4/4 (remaining 0)

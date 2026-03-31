@@ -253,6 +253,21 @@ enum Ec2Commands {
         #[arg(long = "owner", value_name = "OWNER")]
         owners: Vec<String>,
     },
+    /// Create an AMI from an instance.
+    CreateImage {
+        /// Source instance ID.
+        #[arg(long, required = true)]
+        instance_id: String,
+        /// Name for the new AMI.
+        #[arg(long, required = true)]
+        name: String,
+        /// Optional description.
+        #[arg(long)]
+        description: Option<String>,
+        /// Do not reboot the instance.
+        #[arg(long)]
+        no_reboot: bool,
+    },
     /// Describe the status of EC2 instances.
     DescribeInstanceStatus {
         /// Instance IDs to query (omit for all).
@@ -510,6 +525,18 @@ enum Ec2Commands {
         #[arg(long, required = true)]
         volume_id: String,
         /// Description for the snapshot.
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// Copy an EBS snapshot from another region.
+    CopySnapshot {
+        /// Source region of the snapshot.
+        #[arg(long, required = true)]
+        source_region: String,
+        /// Source snapshot ID.
+        #[arg(long, required = true)]
+        source_snapshot_id: String,
+        /// Optional description for the copied snapshot.
         #[arg(long)]
         description: Option<String>,
     },
@@ -1506,6 +1533,21 @@ async fn main() -> Result<()> {
                         Ec2Commands::DescribeImages { image_ids, owners } => {
                             ec2_cmd::cmd_describe_images(&client, &image_ids, &owners).await?
                         }
+                        Ec2Commands::CreateImage {
+                            instance_id,
+                            name,
+                            description,
+                            no_reboot,
+                        } => {
+                            ec2_cmd::cmd_create_image(
+                                &client,
+                                &instance_id,
+                                &name,
+                                no_reboot,
+                                description.as_deref(),
+                            )
+                            .await?
+                        }
                         Ec2Commands::StartInstances { instance_ids } => {
                             ec2_cmd::cmd_start_instances(&client, &instance_ids).await?
                         }
@@ -1723,6 +1765,19 @@ async fn main() -> Result<()> {
                             ec2_cmd::cmd_create_snapshot(
                                 &client,
                                 &volume_id,
+                                description.as_deref(),
+                            )
+                            .await?
+                        }
+                        Ec2Commands::CopySnapshot {
+                            source_region,
+                            source_snapshot_id,
+                            description,
+                        } => {
+                            ec2_cmd::cmd_copy_snapshot(
+                                &client,
+                                &source_region,
+                                &source_snapshot_id,
                                 description.as_deref(),
                             )
                             .await?
