@@ -6,12 +6,13 @@ use aws_sdk_ssooidc::Client as SsoOidcClient;
 use chrono::{Duration as ChronoDuration, TimeZone, Utc};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use tokio::time::{sleep, Duration, Instant};
+
 use std::fs;
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
-use tokio::time::{sleep, Duration, Instant};
 
 const MAX_BACKOFF_SECS: u64 = 10;
 const HASH_START_URL_PREFIX: &str = "start_url=";

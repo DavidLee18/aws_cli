@@ -1384,7 +1384,7 @@ fn parse_tag_kv_pairs(raw: &[String]) -> Result<Vec<(String, String)>> {
         }
 
         let mut parts = entry.splitn(2, '=');
-        // Safe unwrap: splitn always yields at least one part after contains('=') check.
+        // Safe unwrap: contains('=') above guarantees splitn(2, '=') yields at least two parts.
         let key = parts.next().unwrap();
         let value = parts.next().unwrap_or("");
 
