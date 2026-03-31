@@ -21,9 +21,8 @@ pub struct AwsConfig {
 }
 
 fn aws_dir() -> Result<PathBuf, CliError> {
-    let home = dirs_next_home().ok_or_else(|| {
-        CliError::Config("Could not determine home directory".to_string())
-    })?;
+    let home = dirs_next_home()
+        .ok_or_else(|| CliError::Config("Could not determine home directory".to_string()))?;
     Ok(home.join(".aws"))
 }
 
@@ -45,8 +44,7 @@ pub fn run_configure(
     output: Option<&str>,
 ) -> Result<(), CliError> {
     let dir = aws_dir()?;
-    fs::create_dir_all(&dir)
-        .map_err(|e| CliError::Config(format!("Cannot create ~/.aws: {e}")))?;
+    fs::create_dir_all(&dir).map_err(|e| CliError::Config(format!("Cannot create ~/.aws: {e}")))?;
 
     let access_key_id = match access_key {
         Some(k) => k.to_string(),
@@ -68,10 +66,14 @@ pub fn run_configure(
     // Write credentials file
     let creds_path = dir.join("credentials");
     let mut creds_content = read_ini_file(&creds_path)?;
-    set_ini_section(&mut creds_content, profile, &[
-        ("aws_access_key_id", &access_key_id),
-        ("aws_secret_access_key", &secret_access_key),
-    ]);
+    set_ini_section(
+        &mut creds_content,
+        profile,
+        &[
+            ("aws_access_key_id", &access_key_id),
+            ("aws_secret_access_key", &secret_access_key),
+        ],
+    );
     write_ini_file(&creds_path, &creds_content)?;
 
     // Write config file
@@ -82,10 +84,11 @@ pub fn run_configure(
         format!("profile {profile}")
     };
     let mut config_content = read_ini_file(&config_path)?;
-    set_ini_section(&mut config_content, &config_section, &[
-        ("region", &region_val),
-        ("output", &output_val),
-    ]);
+    set_ini_section(
+        &mut config_content,
+        &config_section,
+        &[("region", &region_val), ("output", &output_val)],
+    );
     write_ini_file(&config_path, &config_content)?;
 
     println!("Configuration saved.");
@@ -292,10 +295,14 @@ mod tests {
     #[test]
     fn test_ini_round_trip() {
         let mut content = Vec::new();
-        set_ini_section(&mut content, "default", &[
-            ("aws_access_key_id", "AKID"),
-            ("aws_secret_access_key", "SECRET"),
-        ]);
+        set_ini_section(
+            &mut content,
+            "default",
+            &[
+                ("aws_access_key_id", "AKID"),
+                ("aws_secret_access_key", "SECRET"),
+            ],
+        );
         assert_eq!(
             get_ini_value(&content, "default", "aws_access_key_id"),
             Some("AKID".to_string())

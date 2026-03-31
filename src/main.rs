@@ -242,6 +242,17 @@ enum Ec2Commands {
         #[arg(value_name = "INSTANCE_ID", required = true)]
         instance_ids: Vec<String>,
     },
+    /// Describe EC2 availability zones.
+    DescribeAvailabilityZones,
+    /// Describe EC2 AMIs.
+    DescribeImages {
+        /// Image IDs to filter.
+        #[arg(long = "image-id", value_name = "IMAGE_ID")]
+        image_ids: Vec<String>,
+        /// Owners (self, amazon, or account IDs).
+        #[arg(long = "owner", value_name = "OWNER")]
+        owners: Vec<String>,
+    },
     /// Describe the status of EC2 instances.
     DescribeInstanceStatus {
         /// Instance IDs to query (omit for all).
@@ -283,6 +294,38 @@ enum Ec2Commands {
         /// Volume IDs to filter (omit for all).
         #[arg(value_name = "VOLUME_ID")]
         volume_ids: Vec<String>,
+    },
+    /// Describe Elastic IP addresses.
+    DescribeAddresses,
+    /// Allocate a new Elastic IP address.
+    AllocateAddress {
+        /// Address domain (standard | vpc).
+        #[arg(long, default_value = "vpc")]
+        domain: String,
+    },
+    /// Associate an Elastic IP with an instance or network interface.
+    AssociateAddress {
+        /// Allocation ID of the address.
+        #[arg(long, required = true)]
+        allocation_id: String,
+        /// Instance ID to associate with.
+        #[arg(long)]
+        instance_id: Option<String>,
+        /// Network interface ID to associate with.
+        #[arg(long)]
+        network_interface_id: Option<String>,
+    },
+    /// Disassociate an Elastic IP address.
+    DisassociateAddress {
+        /// Association ID.
+        #[arg(long, required = true)]
+        association_id: String,
+    },
+    /// Release an Elastic IP address.
+    ReleaseAddress {
+        /// Allocation ID.
+        #[arg(long, required = true)]
+        allocation_id: String,
     },
     /// Describe EBS snapshots.
     DescribeSnapshots {
@@ -350,6 +393,63 @@ enum Ec2Commands {
         #[arg(long, default_value = "0.0.0.0/0")]
         cidr: String,
     },
+    /// Revoke an ingress rule on a security group.
+    RevokeSecurityGroupIngress {
+        /// Security group ID.
+        #[arg(long, required = true)]
+        group_id: String,
+        /// Protocol (tcp, udp, icmp).
+        #[arg(long, default_value = "tcp")]
+        protocol: String,
+        /// From port.
+        #[arg(long, required = true)]
+        from_port: i32,
+        /// To port.
+        #[arg(long, required = true)]
+        to_port: i32,
+        /// CIDR IP range (e.g., 0.0.0.0/0).
+        #[arg(long, default_value = "0.0.0.0/0")]
+        cidr: String,
+    },
+    /// Revoke an egress rule on a security group.
+    RevokeSecurityGroupEgress {
+        /// Security group ID.
+        #[arg(long, required = true)]
+        group_id: String,
+        /// Protocol (tcp, udp, icmp).
+        #[arg(long, default_value = "tcp")]
+        protocol: String,
+        /// From port.
+        #[arg(long, required = true)]
+        from_port: i32,
+        /// To port.
+        #[arg(long, required = true)]
+        to_port: i32,
+        /// CIDR IP range (e.g., 0.0.0.0/0).
+        #[arg(long, default_value = "0.0.0.0/0")]
+        cidr: String,
+    },
+    /// Create a new security group.
+    CreateSecurityGroup {
+        /// Security group name.
+        #[arg(long, required = true)]
+        group_name: String,
+        /// Description for the security group.
+        #[arg(long, required = true)]
+        description: String,
+        /// VPC ID (optional).
+        #[arg(long)]
+        vpc_id: Option<String>,
+    },
+    /// Delete a security group by ID or name.
+    DeleteSecurityGroup {
+        /// Security group ID.
+        #[arg(long)]
+        group_id: Option<String>,
+        /// Security group name.
+        #[arg(long)]
+        group_name: Option<String>,
+    },
     /// Import a public key as a new key pair.
     ImportKeyPair {
         /// Key pair name.
@@ -377,6 +477,33 @@ enum Ec2Commands {
         #[arg(long, required = true)]
         volume_id: String,
     },
+    /// Attach an EBS volume.
+    AttachVolume {
+        /// Volume ID.
+        #[arg(long, required = true)]
+        volume_id: String,
+        /// Instance ID.
+        #[arg(long, required = true)]
+        instance_id: String,
+        /// Device name (e.g., /dev/sdf).
+        #[arg(long, required = true)]
+        device: String,
+    },
+    /// Detach an EBS volume.
+    DetachVolume {
+        /// Volume ID.
+        #[arg(long, required = true)]
+        volume_id: String,
+        /// Instance ID.
+        #[arg(long)]
+        instance_id: Option<String>,
+        /// Device name (e.g., /dev/sdf).
+        #[arg(long)]
+        device: Option<String>,
+        /// Force detachment.
+        #[arg(long)]
+        force: bool,
+    },
     /// Create an EBS snapshot.
     CreateSnapshot {
         /// Source volume ID.
@@ -391,6 +518,42 @@ enum Ec2Commands {
         /// Snapshot ID.
         #[arg(long, required = true)]
         snapshot_id: String,
+    },
+    /// Describe subnets.
+    DescribeSubnets {
+        /// Subnet IDs to filter (omit for all).
+        #[arg(value_name = "SUBNET_ID")]
+        subnet_ids: Vec<String>,
+    },
+    /// Describe VPCs.
+    DescribeVpcs {
+        /// VPC IDs to filter (omit for all).
+        #[arg(value_name = "VPC_ID")]
+        vpc_ids: Vec<String>,
+    },
+    /// Describe route tables.
+    DescribeRouteTables {
+        /// Route table IDs to filter (omit for all).
+        #[arg(value_name = "ROUTE_TABLE_ID")]
+        route_table_ids: Vec<String>,
+    },
+    /// Create tags on resources (key=value).
+    CreateTags {
+        /// Resource IDs.
+        #[arg(value_name = "RESOURCE_ID", required = true)]
+        resource_ids: Vec<String>,
+        /// Tags in key=value form.
+        #[arg(long = "tag", required = true, value_name = "KEY=VALUE")]
+        tags: Vec<String>,
+    },
+    /// Delete tags from resources (key=value).
+    DeleteTags {
+        /// Resource IDs.
+        #[arg(value_name = "RESOURCE_ID", required = true)]
+        resource_ids: Vec<String>,
+        /// Tags in key=value form.
+        #[arg(long = "tag", required = true, value_name = "KEY=VALUE")]
+        tags: Vec<String>,
     },
     /// Describe EC2 instance types.
     DescribeInstanceTypes {
@@ -1207,6 +1370,24 @@ enum ConfigureCommands {
     List,
 }
 
+fn parse_tag_kv_pairs(raw: &[String]) -> Result<Vec<(String, String)>> {
+    let mut out = Vec::with_capacity(raw.len());
+    for entry in raw {
+        let mut parts = entry.splitn(2, '=');
+        let key = parts
+            .next()
+            .map(str::to_owned)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Tag is missing key: {entry}"))?;
+        let value = parts
+            .next()
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow::anyhow!("Tag is missing value (expected key=value): {entry}"))?;
+        out.push((key, value));
+    }
+    Ok(out)
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -1308,6 +1489,12 @@ async fn main() -> Result<()> {
                         Ec2Commands::DescribeRegions => {
                             ec2_cmd::cmd_describe_regions(&client).await?
                         }
+                        Ec2Commands::DescribeAvailabilityZones => {
+                            ec2_cmd::cmd_describe_availability_zones(&client).await?
+                        }
+                        Ec2Commands::DescribeImages { image_ids, owners } => {
+                            ec2_cmd::cmd_describe_images(&client, &image_ids, &owners).await?
+                        }
                         Ec2Commands::StartInstances { instance_ids } => {
                             ec2_cmd::cmd_start_instances(&client, &instance_ids).await?
                         }
@@ -1350,6 +1537,31 @@ async fn main() -> Result<()> {
                         }
                         Ec2Commands::DescribeVolumes { volume_ids } => {
                             ec2_cmd::cmd_describe_volumes(&client, &volume_ids).await?
+                        }
+                        Ec2Commands::DescribeAddresses => {
+                            ec2_cmd::cmd_describe_addresses(&client).await?
+                        }
+                        Ec2Commands::AllocateAddress { domain } => {
+                            ec2_cmd::cmd_allocate_address(&client, &domain).await?
+                        }
+                        Ec2Commands::AssociateAddress {
+                            allocation_id,
+                            instance_id,
+                            network_interface_id,
+                        } => {
+                            ec2_cmd::cmd_associate_address(
+                                &client,
+                                &allocation_id,
+                                instance_id.as_deref(),
+                                network_interface_id.as_deref(),
+                            )
+                            .await?
+                        }
+                        Ec2Commands::DisassociateAddress { association_id } => {
+                            ec2_cmd::cmd_disassociate_address(&client, &association_id).await?
+                        }
+                        Ec2Commands::ReleaseAddress { allocation_id } => {
+                            ec2_cmd::cmd_release_address(&client, &allocation_id).await?
                         }
                         Ec2Commands::DescribeSnapshots { snapshot_ids } => {
                             ec2_cmd::cmd_describe_snapshots(&client, &snapshot_ids).await?
@@ -1399,6 +1611,54 @@ async fn main() -> Result<()> {
                             )
                             .await?
                         }
+                        Ec2Commands::RevokeSecurityGroupIngress {
+                            group_id,
+                            protocol,
+                            from_port,
+                            to_port,
+                            cidr,
+                        } => {
+                            ec2_cmd::cmd_revoke_security_group_ingress(
+                                &client, &group_id, &protocol, from_port, to_port, &cidr,
+                            )
+                            .await?
+                        }
+                        Ec2Commands::RevokeSecurityGroupEgress {
+                            group_id,
+                            protocol,
+                            from_port,
+                            to_port,
+                            cidr,
+                        } => {
+                            ec2_cmd::cmd_revoke_security_group_egress(
+                                &client, &group_id, &protocol, from_port, to_port, &cidr,
+                            )
+                            .await?
+                        }
+                        Ec2Commands::CreateSecurityGroup {
+                            group_name,
+                            description,
+                            vpc_id,
+                        } => {
+                            ec2_cmd::cmd_create_security_group(
+                                &client,
+                                &group_name,
+                                &description,
+                                vpc_id.as_deref(),
+                            )
+                            .await?
+                        }
+                        Ec2Commands::DeleteSecurityGroup {
+                            group_id,
+                            group_name,
+                        } => {
+                            ec2_cmd::cmd_delete_security_group(
+                                &client,
+                                group_id.as_deref(),
+                                group_name.as_deref(),
+                            )
+                            .await?
+                        }
                         Ec2Commands::ImportKeyPair {
                             key_name,
                             public_key_file,
@@ -1422,6 +1682,29 @@ async fn main() -> Result<()> {
                         Ec2Commands::DeleteVolume { volume_id } => {
                             ec2_cmd::cmd_delete_volume(&client, &volume_id).await?
                         }
+                        Ec2Commands::AttachVolume {
+                            volume_id,
+                            instance_id,
+                            device,
+                        } => {
+                            ec2_cmd::cmd_attach_volume(&client, &volume_id, &instance_id, &device)
+                                .await?
+                        }
+                        Ec2Commands::DetachVolume {
+                            volume_id,
+                            instance_id,
+                            device,
+                            force,
+                        } => {
+                            ec2_cmd::cmd_detach_volume(
+                                &client,
+                                &volume_id,
+                                instance_id.as_deref(),
+                                device.as_deref(),
+                                force,
+                            )
+                            .await?
+                        }
                         Ec2Commands::CreateSnapshot {
                             volume_id,
                             description,
@@ -1435,6 +1718,23 @@ async fn main() -> Result<()> {
                         }
                         Ec2Commands::DeleteSnapshot { snapshot_id } => {
                             ec2_cmd::cmd_delete_snapshot(&client, &snapshot_id).await?
+                        }
+                        Ec2Commands::DescribeSubnets { subnet_ids } => {
+                            ec2_cmd::cmd_describe_subnets(&client, &subnet_ids).await?
+                        }
+                        Ec2Commands::DescribeVpcs { vpc_ids } => {
+                            ec2_cmd::cmd_describe_vpcs(&client, &vpc_ids).await?
+                        }
+                        Ec2Commands::DescribeRouteTables { route_table_ids } => {
+                            ec2_cmd::cmd_describe_route_tables(&client, &route_table_ids).await?
+                        }
+                        Ec2Commands::CreateTags { resource_ids, tags } => {
+                            let parsed = parse_tag_kv_pairs(&tags)?;
+                            ec2_cmd::cmd_create_tags(&client, &resource_ids, &parsed).await?
+                        }
+                        Ec2Commands::DeleteTags { resource_ids, tags } => {
+                            let parsed = parse_tag_kv_pairs(&tags)?;
+                            ec2_cmd::cmd_delete_tags(&client, &resource_ids, &parsed).await?
                         }
                         Ec2Commands::DescribeInstanceTypes { instance_types } => {
                             ec2_cmd::cmd_describe_instance_types(&client, &instance_types).await?

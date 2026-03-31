@@ -2,10 +2,7 @@ use anyhow::Result;
 use aws_sdk_rds::Client;
 
 /// List RDS database instances.
-pub async fn cmd_describe_db_instances(
-    client: &Client,
-    db_instance_ids: &[String],
-) -> Result<()> {
+pub async fn cmd_describe_db_instances(client: &Client, db_instance_ids: &[String]) -> Result<()> {
     let mut req = client.describe_db_instances();
 
     if !db_instance_ids.is_empty() {
@@ -29,7 +26,10 @@ pub async fn cmd_describe_db_instances(
         };
 
         let port = match instance.endpoint() {
-            Some(ep) => ep.port().map(|p| p.to_string()).unwrap_or_else(|| "N/A".to_string()),
+            Some(ep) => ep
+                .port()
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "N/A".to_string()),
             None => "N/A".to_string(),
         };
 
@@ -132,10 +132,7 @@ pub async fn cmd_modify_db_instance(
 }
 
 /// Start an RDS database instance.
-pub async fn cmd_start_db_instance(
-    client: &Client,
-    db_instance_identifier: &str,
-) -> Result<()> {
+pub async fn cmd_start_db_instance(client: &Client, db_instance_identifier: &str) -> Result<()> {
     let resp = client
         .start_db_instance()
         .db_instance_identifier(db_instance_identifier)
@@ -152,10 +149,7 @@ pub async fn cmd_start_db_instance(
 }
 
 /// Stop an RDS database instance.
-pub async fn cmd_stop_db_instance(
-    client: &Client,
-    db_instance_identifier: &str,
-) -> Result<()> {
+pub async fn cmd_stop_db_instance(client: &Client, db_instance_identifier: &str) -> Result<()> {
     let resp = client
         .stop_db_instance()
         .db_instance_identifier(db_instance_identifier)
@@ -172,10 +166,7 @@ pub async fn cmd_stop_db_instance(
 }
 
 /// Reboot an RDS database instance.
-pub async fn cmd_reboot_db_instance(
-    client: &Client,
-    db_instance_identifier: &str,
-) -> Result<()> {
+pub async fn cmd_reboot_db_instance(client: &Client, db_instance_identifier: &str) -> Result<()> {
     let resp = client
         .reboot_db_instance()
         .db_instance_identifier(db_instance_identifier)
@@ -247,10 +238,7 @@ pub async fn cmd_create_db_snapshot(
 }
 
 /// Delete an RDS database snapshot.
-pub async fn cmd_delete_db_snapshot(
-    client: &Client,
-    db_snapshot_identifier: &str,
-) -> Result<()> {
+pub async fn cmd_delete_db_snapshot(client: &Client, db_snapshot_identifier: &str) -> Result<()> {
     let resp = client
         .delete_db_snapshot()
         .db_snapshot_identifier(db_snapshot_identifier)

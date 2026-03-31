@@ -252,10 +252,7 @@ pub async fn cmd_create_policy(
         "PolicyId: {}",
         policy.and_then(|p| p.policy_id()).unwrap_or(UNKNOWN)
     );
-    println!(
-        "ARN: {}",
-        policy.and_then(|p| p.arn()).unwrap_or(UNKNOWN)
-    );
+    println!("ARN: {}", policy.and_then(|p| p.arn()).unwrap_or(UNKNOWN));
 
     Ok(())
 }
@@ -263,10 +260,7 @@ pub async fn cmd_create_policy(
 /// List all IAM users.
 pub async fn cmd_list_users(client: &Client, path_prefix: Option<&str>) -> Result<()> {
     let mut marker: Option<String> = None;
-    println!(
-        "{:<30} {:<30} {:<20}",
-        "UserName", "UserId", "CreateDate"
-    );
+    println!("{:<30} {:<30} {:<20}", "UserName", "UserId", "CreateDate");
     println!("{:<30} {:<30} {:<20}", "--------", "------", "----------");
 
     loop {
@@ -298,10 +292,7 @@ pub async fn cmd_list_users(client: &Client, path_prefix: Option<&str>) -> Resul
 /// List all IAM roles.
 pub async fn cmd_list_roles(client: &Client, path_prefix: Option<&str>) -> Result<()> {
     let mut marker: Option<String> = None;
-    println!(
-        "{:<40} {:<30} {}",
-        "RoleName", "RoleId", "CreateDate"
-    );
+    println!("{:<40} {:<30} {}", "RoleName", "RoleId", "CreateDate");
     println!("{:<40} {:<30} {}", "--------", "------", "----------");
 
     loop {
@@ -343,7 +334,10 @@ pub async fn cmd_list_policies(client: &Client, scope: &str, only_attached: bool
         "{:<50} {:<25} {}",
         "PolicyName", "PolicyId", "AttachmentCount"
     );
-    println!("{:<50} {:<25} {}", "----------", "--------", "---------------");
+    println!(
+        "{:<50} {:<25} {}",
+        "----------", "--------", "---------------"
+    );
 
     loop {
         let mut req = client
@@ -472,7 +466,11 @@ pub async fn cmd_detach_group_policy(
 }
 
 /// Add an IAM user to an IAM group.
-pub async fn cmd_add_user_to_group(client: &Client, group_name: &str, user_name: &str) -> Result<()> {
+pub async fn cmd_add_user_to_group(
+    client: &Client,
+    group_name: &str,
+    user_name: &str,
+) -> Result<()> {
     client
         .add_user_to_group()
         .group_name(group_name)
@@ -514,10 +512,7 @@ pub async fn cmd_list_groups_for_user(client: &Client, user_name: &str) -> Resul
         if let Some(ref m) = marker {
             req = req.marker(m);
         }
-        let resp = req
-            .send()
-            .await
-            .context("Failed to list groups for user")?;
+        let resp = req.send().await.context("Failed to list groups for user")?;
 
         for group in resp.groups() {
             let name = group.group_name();
@@ -537,7 +532,11 @@ pub async fn cmd_list_groups_for_user(client: &Client, user_name: &str) -> Resul
 }
 
 /// Attach a managed policy to an IAM user.
-pub async fn cmd_attach_user_policy(client: &Client, user_name: &str, policy_arn: &str) -> Result<()> {
+pub async fn cmd_attach_user_policy(
+    client: &Client,
+    user_name: &str,
+    policy_arn: &str,
+) -> Result<()> {
     client
         .attach_user_policy()
         .user_name(user_name)
@@ -551,7 +550,11 @@ pub async fn cmd_attach_user_policy(client: &Client, user_name: &str, policy_arn
 }
 
 /// Detach a managed policy from an IAM user.
-pub async fn cmd_detach_user_policy(client: &Client, user_name: &str, policy_arn: &str) -> Result<()> {
+pub async fn cmd_detach_user_policy(
+    client: &Client,
+    user_name: &str,
+    policy_arn: &str,
+) -> Result<()> {
     client
         .detach_user_policy()
         .user_name(user_name)
@@ -565,7 +568,11 @@ pub async fn cmd_detach_user_policy(client: &Client, user_name: &str, policy_arn
 }
 
 /// Attach a managed policy to an IAM role.
-pub async fn cmd_attach_role_policy(client: &Client, role_name: &str, policy_arn: &str) -> Result<()> {
+pub async fn cmd_attach_role_policy(
+    client: &Client,
+    role_name: &str,
+    policy_arn: &str,
+) -> Result<()> {
     client
         .attach_role_policy()
         .role_name(role_name)
@@ -579,7 +586,11 @@ pub async fn cmd_attach_role_policy(client: &Client, role_name: &str, policy_arn
 }
 
 /// Detach a managed policy from an IAM role.
-pub async fn cmd_detach_role_policy(client: &Client, role_name: &str, policy_arn: &str) -> Result<()> {
+pub async fn cmd_detach_role_policy(
+    client: &Client,
+    role_name: &str,
+    policy_arn: &str,
+) -> Result<()> {
     client
         .detach_role_policy()
         .role_name(role_name)
@@ -738,7 +749,11 @@ pub async fn cmd_list_group_policies(client: &Client, group_name: &str) -> Resul
 }
 
 /// Get an inline policy document embedded in an IAM user.
-pub async fn cmd_get_user_policy(client: &Client, user_name: &str, policy_name: &str) -> Result<()> {
+pub async fn cmd_get_user_policy(
+    client: &Client,
+    user_name: &str,
+    policy_name: &str,
+) -> Result<()> {
     let resp = client
         .get_user_policy()
         .user_name(user_name)
@@ -755,7 +770,11 @@ pub async fn cmd_get_user_policy(client: &Client, user_name: &str, policy_name: 
 }
 
 /// Get an inline policy document embedded in an IAM role.
-pub async fn cmd_get_role_policy(client: &Client, role_name: &str, policy_name: &str) -> Result<()> {
+pub async fn cmd_get_role_policy(
+    client: &Client,
+    role_name: &str,
+    policy_name: &str,
+) -> Result<()> {
     let resp = client
         .get_role_policy()
         .role_name(role_name)
@@ -953,12 +972,7 @@ pub async fn cmd_list_access_keys(client: &Client, user_name: &str) -> Result<()
                 .create_date()
                 .map(|d| d.to_string())
                 .unwrap_or_else(|| UNKNOWN.to_string());
-            println!(
-                "{:<25} {:<10} {}",
-                access_key_id,
-                status,
-                created
-            );
+            println!("{:<25} {:<10} {}", access_key_id, status, created);
         }
 
         if resp.is_truncated() {
@@ -1073,9 +1087,7 @@ pub async fn cmd_update_login_profile(
         req = req.password_reset_required(flag);
     }
 
-    req.send()
-        .await
-        .context("Failed to update login profile")?;
+    req.send().await.context("Failed to update login profile")?;
 
     println!("Updated login profile for user '{user_name}'");
     Ok(())

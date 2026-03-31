@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use aws_sdk_ec2::types::{
-    InstanceNetworkInterfaceSpecification, InstanceType, IpPermission, IpRange, VolumeType,
+    DomainType, InstanceNetworkInterfaceSpecification, InstanceType, IpPermission, IpRange, Tag,
+    VolumeType,
 };
 use aws_sdk_ec2::Client;
 use std::fs;
@@ -397,6 +398,366 @@ pub async fn cmd_delete_snapshot(client: &Client, snapshot_id: &str) -> Result<(
         .await
         .with_context(|| format!("Failed to delete snapshot {snapshot_id}"))?;
     println!("snapshot deleted: {snapshot_id}");
+    Ok(())
+}
+
+/// Describe EC2 availability zones.
+pub async fn cmd_describe_availability_zones(client: &Client) -> Result<()> {
+    let resp = client
+        .describe_availability_zones()
+        .all_availability_zones(true)
+        .send()
+        .await
+        .context("Failed to describe availability zones")?;
+
+    println!("{:<25} {:<12} {}", "ZoneName", "State", "RegionName");
+    for az in resp.availability_zones() {
+        let name = az.zone_name().unwrap_or("<unknown>");
+        let state = az.state().map(|s| s.as_str()).unwrap_or("unknown");
+        let region = az.region_name().unwrap_or("-");
+        println!("{name:<25} {state:<12} {region}");
+    }
+    Ok(())
+}
+
+/// Describe EC2 images (AMIs) owned by the caller unless owners are specified.
+pub async fn cmd_describe_images(
+    client: &Client,
+    image_ids: &[String],
+    owners: &[String],
+) -> Result<()> {
+    let mut req = client.describe_images();
+    for id in image_ids {
+        req = req.image_ids(id);
+    }
+    if owners.is_empty() {
+        req = req.owners("self");
+    } else {
+        for owner in owners {
+            req = req.owners(owner);
+        }
+    }
+    let resp = req.send().await.context("Failed to describe images")?;
+
+    println!("{:<20} {:<12} {}", "ImageId", "State", "Name");
+    for img in resp.images() {
+        let id = img.image_id().unwrap_or("<unknown>");
+        let state = img.state().map(|s| s.as_str()).unwrap_or("unknown");
+        let name = img.name().unwrap_or("");
+        println!("{id:<20} {state:<12} {name}");
+    }
+    Ok(())
+}
+
+/// Describe Elastic IP addresses.
+pub async fn cmd_describe_addresses(client: &Client) -> Result<()> {
+    let resp = client
+        .describe_addresses()
+        .send()
+        .await
+        .context("Failed to describe addresses")?;
+
+    println!(
+        "{:<20} {:<20} {:<20}",
+        "PublicIp", "AllocationId", "AssociationId"
+    );
+    for addr in resp.addresses() {
+        let pub_ip = addr.public_ip().unwrap_or("<unknown>");
+        let alloc = addr.allocation_id().unwrap_or("-");
+        let assoc = addr.association_id().unwrap_or("-");
+        println!("{pub_ip:<20} {alloc:<20} {assoc:<20}");
+    }
+    Ok(())
+}
+
+/// Allocate a new Elastic IP address.
+pub async fn cmd_allocate_address(client: &Client, domain: &str) -> Result<()> {
+    let resp = client
+        .allocate_address()
+        .domain(DomainType::from(domain))
+        .send()
+        .await
+        .with_context(|| format!("Failed to allocate address in domain {domain}"))?;
+    let alloc_id = resp.allocation_id().unwrap_or("<unknown>");
+    let pub_ip = resp.public_ip().unwrap_or("<unknown>");
+    println!("address allocated: {pub_ip} (allocation-id: {alloc_id})");
+    Ok(())
+}
+
+/// Associate an Elastic IP address with an instance.
+pub async fn cmd_associate_address(
+    client: &Client,
+    allocation_id: &str,
+    instance_id: Option<&str>,
+    network_interface_id: Option<&str>,
+) -> Result<()> {
+    let mut req = client.associate_address().allocation_id(allocation_id);
+    if let Some(inst) = instance_id {
+        req = req.instance_id(inst);
+    }
+    if let Some(eni) = network_interface_id {
+        req = req.network_interface_id(eni);
+    }
+    let resp = req
+        .send()
+        .await
+        .with_context(|| format!("Failed to associate address {allocation_id}"))?;
+    let assoc = resp.association_id().unwrap_or("<unknown>");
+    println!("address associated: {allocation_id} (association-id: {assoc})");
+    Ok(())
+}
+
+/// Disassociate an Elastic IP address.
+pub async fn cmd_disassociate_address(client: &Client, association_id: &str) -> Result<()> {
+    client
+        .disassociate_address()
+        .association_id(association_id)
+        .send()
+        .await
+        .with_context(|| format!("Failed to disassociate address {association_id}"))?;
+    println!("address disassociated: {association_id}");
+    Ok(())
+}
+
+/// Release an Elastic IP address.
+pub async fn cmd_release_address(client: &Client, allocation_id: &str) -> Result<()> {
+    client
+        .release_address()
+        .allocation_id(allocation_id)
+        .send()
+        .await
+        .with_context(|| format!("Failed to release address {allocation_id}"))?;
+    println!("address released: {allocation_id}");
+    Ok(())
+}
+
+/// Create a new security group.
+pub async fn cmd_create_security_group(
+    client: &Client,
+    group_name: &str,
+    description: &str,
+    vpc_id: Option<&str>,
+) -> Result<()> {
+    let mut req = client
+        .create_security_group()
+        .group_name(group_name)
+        .description(description);
+    if let Some(vpc) = vpc_id {
+        req = req.vpc_id(vpc);
+    }
+    let resp = req
+        .send()
+        .await
+        .with_context(|| format!("Failed to create security group {group_name}"))?;
+    let gid = resp.group_id().unwrap_or("<unknown>");
+    println!("security group created: {gid}");
+    Ok(())
+}
+
+/// Delete a security group.
+pub async fn cmd_delete_security_group(
+    client: &Client,
+    group_id: Option<&str>,
+    group_name: Option<&str>,
+) -> Result<()> {
+    if group_id.is_none() && group_name.is_none() {
+        anyhow::bail!("Either --group-id or --group-name is required");
+    }
+    let mut req = client.delete_security_group();
+    if let Some(id) = group_id {
+        req = req.group_id(id);
+    }
+    if let Some(name) = group_name {
+        req = req.group_name(name);
+    }
+    req.send()
+        .await
+        .context("Failed to delete security group")?;
+    println!(
+        "security group deleted: {}",
+        group_id.unwrap_or_else(|| group_name.unwrap_or("<unknown>"))
+    );
+    Ok(())
+}
+
+/// Revoke an ingress rule on a security group.
+pub async fn cmd_revoke_security_group_ingress(
+    client: &Client,
+    group_id: &str,
+    protocol: &str,
+    from_port: i32,
+    to_port: i32,
+    cidr: &str,
+) -> Result<()> {
+    let perm = build_ip_permission(protocol, from_port, to_port, cidr);
+    client
+        .revoke_security_group_ingress()
+        .group_id(group_id)
+        .ip_permissions(perm)
+        .send()
+        .await
+        .with_context(|| format!("Failed to revoke ingress on {group_id}"))?;
+    println!("ingress revoked: {group_id} {protocol} {from_port}-{to_port} {cidr}");
+    Ok(())
+}
+
+/// Revoke an egress rule on a security group.
+pub async fn cmd_revoke_security_group_egress(
+    client: &Client,
+    group_id: &str,
+    protocol: &str,
+    from_port: i32,
+    to_port: i32,
+    cidr: &str,
+) -> Result<()> {
+    let perm = build_ip_permission(protocol, from_port, to_port, cidr);
+    client
+        .revoke_security_group_egress()
+        .group_id(group_id)
+        .ip_permissions(perm)
+        .send()
+        .await
+        .with_context(|| format!("Failed to revoke egress on {group_id}"))?;
+    println!("egress revoked: {group_id} {protocol} {from_port}-{to_port} {cidr}");
+    Ok(())
+}
+
+/// Attach an EBS volume to an instance.
+pub async fn cmd_attach_volume(
+    client: &Client,
+    volume_id: &str,
+    instance_id: &str,
+    device: &str,
+) -> Result<()> {
+    client
+        .attach_volume()
+        .volume_id(volume_id)
+        .instance_id(instance_id)
+        .device(device)
+        .send()
+        .await
+        .with_context(|| format!("Failed to attach volume {volume_id} to {instance_id}"))?;
+    println!("volume attached: {volume_id} -> {instance_id} ({device})");
+    Ok(())
+}
+
+/// Detach an EBS volume.
+pub async fn cmd_detach_volume(
+    client: &Client,
+    volume_id: &str,
+    instance_id: Option<&str>,
+    device: Option<&str>,
+    force: bool,
+) -> Result<()> {
+    let mut req = client.detach_volume().volume_id(volume_id).force(force);
+    if let Some(inst) = instance_id {
+        req = req.instance_id(inst);
+    }
+    if let Some(dev) = device {
+        req = req.device(dev);
+    }
+    req.send()
+        .await
+        .with_context(|| format!("Failed to detach volume {volume_id}"))?;
+    println!("volume detached: {volume_id}");
+    Ok(())
+}
+
+/// Describe subnets.
+pub async fn cmd_describe_subnets(client: &Client, subnet_ids: &[String]) -> Result<()> {
+    let mut req = client.describe_subnets();
+    for sid in subnet_ids {
+        req = req.subnet_ids(sid);
+    }
+    let resp = req.send().await.context("Failed to describe subnets")?;
+
+    println!("{:<20} {:<15} {:<10}", "SubnetId", "VpcId", "CidrBlock");
+    for sn in resp.subnets() {
+        let id = sn.subnet_id().unwrap_or("<unknown>");
+        let vpc = sn.vpc_id().unwrap_or("-");
+        let cidr = sn.cidr_block().unwrap_or("-");
+        println!("{id:<20} {vpc:<15} {cidr:<10}");
+    }
+    Ok(())
+}
+
+/// Describe VPCs.
+pub async fn cmd_describe_vpcs(client: &Client, vpc_ids: &[String]) -> Result<()> {
+    let mut req = client.describe_vpcs();
+    for vid in vpc_ids {
+        req = req.vpc_ids(vid);
+    }
+    let resp = req.send().await.context("Failed to describe VPCs")?;
+
+    println!("{:<20} {:<10} {}", "VpcId", "State", "CidrBlock");
+    for vpc in resp.vpcs() {
+        let id = vpc.vpc_id().unwrap_or("<unknown>");
+        let state = vpc.state().map(|s| s.as_str()).unwrap_or("unknown");
+        let cidr = vpc.cidr_block().unwrap_or("-");
+        println!("{id:<20} {state:<10} {cidr}");
+    }
+    Ok(())
+}
+
+/// Describe route tables.
+pub async fn cmd_describe_route_tables(client: &Client, route_table_ids: &[String]) -> Result<()> {
+    let mut req = client.describe_route_tables();
+    for rid in route_table_ids {
+        req = req.route_table_ids(rid);
+    }
+    let resp = req
+        .send()
+        .await
+        .context("Failed to describe route tables")?;
+
+    println!("{:<20} {}", "RouteTableId", "VpcId");
+    for rt in resp.route_tables() {
+        let id = rt.route_table_id().unwrap_or("<unknown>");
+        let vpc = rt.vpc_id().unwrap_or("-");
+        println!("{id:<20} {vpc}");
+    }
+    Ok(())
+}
+
+/// Create one or more tags on resources.
+pub async fn cmd_create_tags(
+    client: &Client,
+    resource_ids: &[String],
+    tags: &[(String, String)],
+) -> Result<()> {
+    let tag_objs: Vec<Tag> = tags
+        .iter()
+        .map(|(k, v)| Tag::builder().key(k).value(v).build())
+        .collect();
+    client
+        .create_tags()
+        .set_resources(Some(resource_ids.to_vec()))
+        .set_tags(Some(tag_objs))
+        .send()
+        .await
+        .context("Failed to create tags")?;
+    println!("tags created on {} resource(s)", resource_ids.len());
+    Ok(())
+}
+
+/// Delete tags from resources.
+pub async fn cmd_delete_tags(
+    client: &Client,
+    resource_ids: &[String],
+    tags: &[(String, String)],
+) -> Result<()> {
+    let tag_objs: Vec<Tag> = tags
+        .iter()
+        .map(|(k, v)| Tag::builder().key(k).value(v).build())
+        .collect();
+    client
+        .delete_tags()
+        .set_resources(Some(resource_ids.to_vec()))
+        .set_tags(Some(tag_objs))
+        .send()
+        .await
+        .context("Failed to delete tags")?;
+    println!("tags deleted on {} resource(s)", resource_ids.len());
     Ok(())
 }
 

@@ -36,45 +36,48 @@ pub async fn cmd_assume_role(
         req = req.duration_seconds(duration);
     }
 
-    let resp = req
-        .send()
-        .await
-        .context("Failed to assume role")?;
+    let resp = req.send().await.context("Failed to assume role")?;
 
     if let Some(credentials) = resp.credentials() {
         println!("{:<20} {}", "AccessKeyId", credentials.access_key_id());
-        println!("{:<20} {}", "SecretAccessKey", credentials.secret_access_key());
+        println!(
+            "{:<20} {}",
+            "SecretAccessKey",
+            credentials.secret_access_key()
+        );
         println!("{:<20} {}", "SessionToken", credentials.session_token());
         println!("{:<20} {}", "Expiration", credentials.expiration());
     }
 
     if let Some(assumed_role_user) = resp.assumed_role_user() {
         println!("\n{:<20} {}", "AssumedRoleArn", assumed_role_user.arn());
-        println!("{:<20} {}", "AssumedRoleId", assumed_role_user.assumed_role_id());
+        println!(
+            "{:<20} {}",
+            "AssumedRoleId",
+            assumed_role_user.assumed_role_id()
+        );
     }
 
     Ok(())
 }
 
 /// Get temporary security credentials for the AWS account or IAM user.
-pub async fn cmd_get_session_token(
-    client: &Client,
-    duration_seconds: Option<i32>,
-) -> Result<()> {
+pub async fn cmd_get_session_token(client: &Client, duration_seconds: Option<i32>) -> Result<()> {
     let mut req = client.get_session_token();
 
     if let Some(duration) = duration_seconds {
         req = req.duration_seconds(duration);
     }
 
-    let resp = req
-        .send()
-        .await
-        .context("Failed to get session token")?;
+    let resp = req.send().await.context("Failed to get session token")?;
 
     if let Some(credentials) = resp.credentials() {
         println!("{:<20} {}", "AccessKeyId", credentials.access_key_id());
-        println!("{:<20} {}", "SecretAccessKey", credentials.secret_access_key());
+        println!(
+            "{:<20} {}",
+            "SecretAccessKey",
+            credentials.secret_access_key()
+        );
         println!("{:<20} {}", "SessionToken", credentials.session_token());
         println!("{:<20} {}", "Expiration", credentials.expiration());
     }

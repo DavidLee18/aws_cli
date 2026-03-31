@@ -1,16 +1,16 @@
 use anyhow::{anyhow, Context, Result};
+use aws_sdk_sso::Client;
 use aws_sdk_ssooidc::error::SdkError;
 use aws_sdk_ssooidc::operation::create_token::CreateTokenError;
-use aws_sdk_sso::Client;
 use aws_sdk_ssooidc::Client as SsoOidcClient;
 use chrono::{Duration as ChronoDuration, TimeZone, Utc};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::fs;
-use std::path::PathBuf;
+use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
-use std::io::Write;
-use sha2::{Digest, Sha256};
+use std::path::PathBuf;
 use tokio::time::{sleep, Duration, Instant};
 
 const MAX_BACKOFF_SECS: u64 = 10;
@@ -108,7 +108,11 @@ pub async fn cmd_get_role_credentials(
         .context("Failed to get AWS SSO role credentials")?;
 
     if let Some(credentials) = resp.role_credentials() {
-        println!("{:<20} {}", "AccessKeyId", credentials.access_key_id().unwrap_or("N/A"));
+        println!(
+            "{:<20} {}",
+            "AccessKeyId",
+            credentials.access_key_id().unwrap_or("N/A")
+        );
         println!(
             "{:<20} {}",
             "SecretAccessKey",
@@ -212,7 +216,8 @@ pub async fn cmd_login(
                     }
                 },
                 _ => {
-                    return Err(err).context("Failed to create SSO token from device authorization");
+                    return Err(err)
+                        .context("Failed to create SSO token from device authorization");
                 }
             },
         }
@@ -222,12 +227,8 @@ pub async fn cmd_login(
     let access_token = token
         .access_token()
         .ok_or_else(|| anyhow!("Login completed but no access token was returned"))?;
-    let cache_path = write_sso_token_cache(
-        access_token,
-        start_url,
-        sso_region,
-        token.expires_in(),
-    )?;
+    let cache_path =
+        write_sso_token_cache(access_token, start_url, sso_region, token.expires_in())?;
     println!("\nLogin successful.");
     println!("SSO token cached at: {}", cache_path.display());
 
@@ -253,8 +254,7 @@ fn write_sso_token_cache(
     let filename = format!("{SSO_CACHE_FILENAME_PREFIX}{:x}.json", hasher.finalize());
     let cache_path = cache_dir.join(filename);
     let expires_at =
-        (Utc::now() + ChronoDuration::seconds(ensure_min_duration(expires_in) as i64))
-            .to_rfc3339();
+        (Utc::now() + ChronoDuration::seconds(ensure_min_duration(expires_in) as i64)).to_rfc3339();
 
     let payload = json!({
         "startUrl": start_url,

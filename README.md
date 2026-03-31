@@ -4,10 +4,10 @@ A Rust port of the official AWS CLI, providing a fast, single-binary alternative
 
 ## Project Status
 
-This is an **active implementation** of core AWS CLI functionality in Rust. Currently at **56.43%** feature parity with the Python AWS CLI.
-Current **Phase 1 progress** is **84.07%**. Phase 1 focuses on a smaller core subset of commands, which is why its progress percentage is higher than overall parity.
+This is an **active implementation** of core AWS CLI functionality in Rust. Currently at **62.65%** feature parity with the Python AWS CLI.
+Current **Phase 1 progress** is **98.23%**. Phase 1 focuses on a smaller core subset of commands, which is why its progress percentage is higher than overall parity.
 
-### Currently Implemented (9 services, ~145 commands)
+### Currently Implemented (9 services, ~161 commands)
 
 #### ✓ Configure
 - [x] `configure` - Interactive configuration
@@ -31,9 +31,10 @@ Current **Phase 1 progress** is **84.07%**. Phase 1 focuses on a smaller core su
 - [x] `delete-bucket-policy` - Remove bucket policy
 - [x] `list-object-versions` - List object versions for a prefix
 
-#### ✓ EC2 (22/40 core commands - 55%)
+#### ✓ EC2 (38/40 core commands - 95%)
 - [x] `describe-instances` - List instances
 - [x] `describe-regions` - List regions
+- [x] `describe-availability-zones` - List AZs
 - [x] `start-instances` - Start instances
 - [x] `stop-instances` - Stop instances
 - [x] `reboot-instances` - Reboot instances
@@ -41,20 +42,37 @@ Current **Phase 1 progress** is **84.07%**. Phase 1 focuses on a smaller core su
 - [x] `describe-instance-types` - List instance types
 - [x] `describe-instance-status` - Show instance/system status
 - [x] `describe-security-groups` - List security groups
+- [x] `create-security-group` - Create security group
+- [x] `delete-security-group` - Delete security group
 - [x] `describe-key-pairs` - List key pairs
 - [x] `create-key-pair` - Create a key pair
 - [x] `delete-key-pair` - Delete a key pair
+- [x] `import-key-pair` - Import a public key
+- [x] `describe-images` - List AMIs
 - [x] `describe-volumes` - List EBS volumes
 - [x] `describe-snapshots` - List EBS snapshots
+- [x] `describe-addresses` - List Elastic IPs
+- [x] `allocate-address` - Allocate Elastic IP
+- [x] `associate-address` - Associate Elastic IP
+- [x] `disassociate-address` - Disassociate Elastic IP
+- [x] `release-address` - Release Elastic IP
 - [x] `run-instances` - Launch instances
 - [x] `authorize-security-group-ingress` - Add ingress rule
 - [x] `authorize-security-group-egress` - Add egress rule
-- [x] `import-key-pair` - Import a public key
+- [x] `revoke-security-group-ingress` - Remove ingress rule
+- [x] `revoke-security-group-egress` - Remove egress rule
 - [x] `create-volume` - Create an EBS volume
 - [x] `delete-volume` - Delete an EBS volume
+- [x] `attach-volume` - Attach an EBS volume
+- [x] `detach-volume` - Detach an EBS volume
 - [x] `create-snapshot` - Create an EBS snapshot
 - [x] `delete-snapshot` - Delete an EBS snapshot
-- [ ] Additional volume & snapshot lifecycle (attach/detach, copy, etc.)
+- [x] `describe-subnets` - List subnets
+- [x] `describe-vpcs` - List VPCs
+- [x] `describe-route-tables` - List route tables
+- [x] `create-tags` - Add resource tags
+- [x] `delete-tags` - Remove resource tags
+- [ ] Remaining Phase 1 EC2: image creation and snapshot copy
 
 #### ✓ IAM (50/50 core commands - 100%)
 - [x] `create-role` - Create IAM roles

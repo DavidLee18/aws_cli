@@ -33,9 +33,15 @@ pub async fn cmd_describe_table(client: &Client, table_name: &str) -> Result<()>
     if let Some(table) = resp.table() {
         println!("Table Name:        {}", table.table_name().unwrap_or("N/A"));
         println!("Table ARN:         {}", table.table_arn().unwrap_or("N/A"));
-        println!("Table Status:      {}", table.table_status().map(|s| s.as_str()).unwrap_or("N/A"));
+        println!(
+            "Table Status:      {}",
+            table.table_status().map(|s| s.as_str()).unwrap_or("N/A")
+        );
         println!("Item Count:        {}", table.item_count().unwrap_or(0));
-        println!("Table Size (bytes): {}", table.table_size_bytes().unwrap_or(0));
+        println!(
+            "Table Size (bytes): {}",
+            table.table_size_bytes().unwrap_or(0)
+        );
 
         if let Some(created) = table.creation_date_time() {
             println!("Created:           {}", created);
@@ -45,10 +51,7 @@ pub async fn cmd_describe_table(client: &Client, table_name: &str) -> Result<()>
         if !key_schema.is_empty() {
             println!("\nKey Schema:");
             for key in key_schema {
-                println!("  {} ({})",
-                    key.attribute_name(),
-                    key.key_type().as_str()
-                );
+                println!("  {} ({})", key.attribute_name(), key.key_type().as_str());
             }
         }
 
@@ -56,7 +59,8 @@ pub async fn cmd_describe_table(client: &Client, table_name: &str) -> Result<()>
         if !attrs.is_empty() {
             println!("\nAttribute Definitions:");
             for attr in attrs {
-                println!("  {} ({})",
+                println!(
+                    "  {} ({})",
                     attr.attribute_name(),
                     attr.attribute_type().as_str()
                 );
@@ -133,7 +137,10 @@ pub async fn cmd_create_table(
 
     if let Some(table) = resp.table_description() {
         println!("Created table: {}", table.table_name().unwrap_or("N/A"));
-        println!("Status: {}", table.table_status().map(|s| s.as_str()).unwrap_or("N/A"));
+        println!(
+            "Status: {}",
+            table.table_status().map(|s| s.as_str()).unwrap_or("N/A")
+        );
     }
 
     Ok(())
@@ -150,7 +157,10 @@ pub async fn cmd_delete_table(client: &Client, table_name: &str) -> Result<()> {
 
     if let Some(table) = resp.table_description() {
         println!("Deleting table: {}", table.table_name().unwrap_or("N/A"));
-        println!("Status: {}", table.table_status().map(|s| s.as_str()).unwrap_or("N/A"));
+        println!(
+            "Status: {}",
+            table.table_status().map(|s| s.as_str()).unwrap_or("N/A")
+        );
     }
 
     Ok(())
@@ -186,22 +196,20 @@ pub async fn cmd_update_table(
 
     if let Some(table) = resp.table_description() {
         println!("Updated table: {}", table.table_name().unwrap_or("N/A"));
-        println!("Status: {}", table.table_status().map(|s| s.as_str()).unwrap_or("N/A"));
+        println!(
+            "Status: {}",
+            table.table_status().map(|s| s.as_str()).unwrap_or("N/A")
+        );
     }
 
     Ok(())
 }
 
 /// Get an item from a DynamoDB table.
-pub async fn cmd_get_item(
-    client: &Client,
-    table_name: &str,
-    key_json: &str,
-) -> Result<()> {
+pub async fn cmd_get_item(client: &Client, table_name: &str, key_json: &str) -> Result<()> {
     use serde_json::Value;
 
-    let key_value: Value = serde_json::from_str(key_json)
-        .context("Failed to parse key JSON")?;
+    let key_value: Value = serde_json::from_str(key_json).context("Failed to parse key JSON")?;
 
     let key = json_to_attribute_value(&key_value)?;
 
@@ -224,15 +232,10 @@ pub async fn cmd_get_item(
 }
 
 /// Put an item into a DynamoDB table.
-pub async fn cmd_put_item(
-    client: &Client,
-    table_name: &str,
-    item_json: &str,
-) -> Result<()> {
+pub async fn cmd_put_item(client: &Client, table_name: &str, item_json: &str) -> Result<()> {
     use serde_json::Value;
 
-    let item_value: Value = serde_json::from_str(item_json)
-        .context("Failed to parse item JSON")?;
+    let item_value: Value = serde_json::from_str(item_json).context("Failed to parse item JSON")?;
 
     let item = json_to_attribute_value(&item_value)?;
 
@@ -250,15 +253,10 @@ pub async fn cmd_put_item(
 }
 
 /// Delete an item from a DynamoDB table.
-pub async fn cmd_delete_item(
-    client: &Client,
-    table_name: &str,
-    key_json: &str,
-) -> Result<()> {
+pub async fn cmd_delete_item(client: &Client, table_name: &str, key_json: &str) -> Result<()> {
     use serde_json::Value;
 
-    let key_value: Value = serde_json::from_str(key_json)
-        .context("Failed to parse key JSON")?;
+    let key_value: Value = serde_json::from_str(key_json).context("Failed to parse key JSON")?;
 
     let key = json_to_attribute_value(&key_value)?;
 
@@ -276,21 +274,14 @@ pub async fn cmd_delete_item(
 }
 
 /// Scan a DynamoDB table.
-pub async fn cmd_scan(
-    client: &Client,
-    table_name: &str,
-    limit: Option<i32>,
-) -> Result<()> {
+pub async fn cmd_scan(client: &Client, table_name: &str, limit: Option<i32>) -> Result<()> {
     let mut req = client.scan().table_name(table_name);
 
     if let Some(l) = limit {
         req = req.limit(l);
     }
 
-    let resp = req
-        .send()
-        .await
-        .context("Failed to scan DynamoDB table")?;
+    let resp = req.send().await.context("Failed to scan DynamoDB table")?;
 
     let items = resp.items();
     if items.is_empty() {

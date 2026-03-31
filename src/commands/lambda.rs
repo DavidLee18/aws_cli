@@ -99,7 +99,10 @@ pub async fn cmd_create_function(
         .await
         .context("Failed to create Lambda function")?;
 
-    println!("Created function: {}", resp.function_name().unwrap_or("N/A"));
+    println!(
+        "Created function: {}",
+        resp.function_name().unwrap_or("N/A")
+    );
     println!("Function ARN: {}", resp.function_arn().unwrap_or("N/A"));
     println!(
         "Runtime: {}",
@@ -137,10 +140,7 @@ pub async fn cmd_list_functions(client: &Client) -> Result<()> {
 
     for func in resp.functions() {
         let name = func.function_name().unwrap_or("N/A");
-        let runtime = func
-            .runtime()
-            .map(|r| r.as_str())
-            .unwrap_or("N/A");
+        let runtime = func.runtime().map(|r| r.as_str()).unwrap_or("N/A");
         let handler = func.handler().unwrap_or("N/A");
         let role = func.role().unwrap_or("N/A");
 
@@ -162,15 +162,24 @@ pub async fn cmd_get_function(client: &Client, function_name: &str) -> Result<()
         .context("Failed to get Lambda function")?;
 
     if let Some(config) = resp.configuration() {
-        println!("Function Name:  {}", config.function_name().unwrap_or("N/A"));
+        println!(
+            "Function Name:  {}",
+            config.function_name().unwrap_or("N/A")
+        );
         println!("Function ARN:   {}", config.function_arn().unwrap_or("N/A"));
-        println!("Runtime:        {}", config.runtime().map(|r| r.as_str()).unwrap_or("N/A"));
+        println!(
+            "Runtime:        {}",
+            config.runtime().map(|r| r.as_str()).unwrap_or("N/A")
+        );
         println!("Handler:        {}", config.handler().unwrap_or("N/A"));
         println!("Role:           {}", config.role().unwrap_or("N/A"));
         println!("Code Size:      {} bytes", config.code_size());
         println!("Memory Size:    {} MB", config.memory_size().unwrap_or(0));
         println!("Timeout:        {} seconds", config.timeout().unwrap_or(0));
-        println!("Last Modified:  {}", config.last_modified().unwrap_or("N/A"));
+        println!(
+            "Last Modified:  {}",
+            config.last_modified().unwrap_or("N/A")
+        );
     }
 
     if let Some(code) = resp.code() {
@@ -204,7 +213,10 @@ pub async fn cmd_publish_version(client: &Client, function_name: &str) -> Result
         .await
         .context("Failed to publish Lambda function version")?;
 
-    println!("Published version for: {}", resp.function_name().unwrap_or("N/A"));
+    println!(
+        "Published version for: {}",
+        resp.function_name().unwrap_or("N/A")
+    );
     println!("Version: {}", resp.version().unwrap_or("N/A"));
     println!("Function ARN: {}", resp.function_arn().unwrap_or("N/A"));
 
@@ -225,9 +237,7 @@ pub async fn cmd_invoke(
     }
 
     if let Some(lt) = log_type {
-        req = req.log_type(
-            aws_sdk_lambda::types::LogType::from(lt)
-        );
+        req = req.log_type(aws_sdk_lambda::types::LogType::from(lt));
     }
 
     let resp = req
@@ -244,7 +254,7 @@ pub async fn cmd_invoke(
 
     if let Some(log_result) = resp.log_result() {
         // Use base64 engine
-        use base64::{Engine as _, engine::general_purpose};
+        use base64::{engine::general_purpose, Engine as _};
         let decoded = match general_purpose::STANDARD.decode(log_result) {
             Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
             Err(_) => "Unable to decode logs".to_string(),
@@ -277,8 +287,14 @@ pub async fn cmd_list_event_source_mappings(
 
     for mapping in resp.event_source_mappings() {
         println!("UUID:           {}", mapping.uuid().unwrap_or("N/A"));
-        println!("Function ARN:   {}", mapping.function_arn().unwrap_or("N/A"));
-        println!("Event Source:   {}", mapping.event_source_arn().unwrap_or("N/A"));
+        println!(
+            "Function ARN:   {}",
+            mapping.function_arn().unwrap_or("N/A")
+        );
+        println!(
+            "Event Source:   {}",
+            mapping.event_source_arn().unwrap_or("N/A")
+        );
         println!("State:          {}", mapping.state().unwrap_or("N/A"));
         println!("Batch Size:     {}", mapping.batch_size().unwrap_or(0));
         println!();
@@ -295,9 +311,7 @@ pub async fn cmd_update_function_code(
     s3_bucket: Option<&str>,
     s3_key: Option<&str>,
 ) -> Result<()> {
-    let mut req = client
-        .update_function_code()
-        .function_name(function_name);
+    let mut req = client.update_function_code().function_name(function_name);
 
     if let Some(zip_path) = zip_file {
         let contents = std::fs::read(zip_path)
@@ -314,7 +328,10 @@ pub async fn cmd_update_function_code(
         .await
         .context("Failed to update Lambda function code")?;
 
-    println!("Updated function: {}", resp.function_name().unwrap_or("N/A"));
+    println!(
+        "Updated function: {}",
+        resp.function_name().unwrap_or("N/A")
+    );
     println!("Code SHA256: {}", resp.code_sha256().unwrap_or("N/A"));
     println!("Version: {}", resp.version().unwrap_or("N/A"));
 
