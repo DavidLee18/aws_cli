@@ -2,9 +2,9 @@ use anyhow::{Context, Result};
 use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::types::{BucketCannedAcl, ObjectCannedAcl, WebsiteConfiguration};
 use aws_sdk_s3::Client;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use std::{fs, path::Path as StdPath};
 
 /// List S3 buckets, or objects within a bucket.
 ///
@@ -309,7 +309,7 @@ pub async fn cmd_get_bucket_policy(client: &Client, uri: &str) -> Result<()> {
 /// Set or replace the bucket policy for a bucket.
 pub async fn cmd_put_bucket_policy(client: &Client, uri: &str, policy: &str) -> Result<()> {
     let (bucket, _) = parse_s3_uri(uri)?;
-    let policy_str = if StdPath::new(policy).exists() {
+    let policy_str = if Path::new(policy).exists() {
         fs::read_to_string(policy)
             .with_context(|| format!("Failed to read policy file {policy}"))?
     } else {
@@ -318,7 +318,7 @@ pub async fn cmd_put_bucket_policy(client: &Client, uri: &str, policy: &str) -> 
     client
         .put_bucket_policy()
         .bucket(&bucket)
-        .policy(policy_str.clone())
+        .policy(policy_str)
         .send()
         .await
         .with_context(|| format!("Failed to put bucket policy for {bucket}"))?;
@@ -683,9 +683,7 @@ fn print_acl(
         for g in gs {
             let grantee = g.grantee();
             let name = grantee.and_then(|gr| gr.display_name()).unwrap_or("");
-            let typ = grantee
-                .map(|gr| gr.r#type().as_str())
-                .unwrap_or("");
+            let typ = grantee.map(|gr| gr.r#type().as_str()).unwrap_or("");
             let perm = g
                 .permission()
                 .map(|p| p.as_str().to_string())

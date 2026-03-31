@@ -246,9 +246,10 @@ pub async fn cmd_run_instances(
             ni = ni.groups(sg);
         }
         req = req.network_interfaces(ni.build());
-        if let Some(kn) = key_name {
-            req = req.key_name(kn);
-        }
+    }
+
+    if let Some(kn) = key_name {
+        req = req.key_name(kn);
     }
 
     let resp = req.send().await.context("Failed to run instances")?;
