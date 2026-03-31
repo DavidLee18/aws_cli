@@ -536,6 +536,126 @@ pub async fn cmd_list_groups_for_user(client: &Client, user_name: &str) -> Resul
     Ok(())
 }
 
+/// Attach a managed policy to an IAM user.
+pub async fn cmd_attach_user_policy(client: &Client, user_name: &str, policy_arn: &str) -> Result<()> {
+    client
+        .attach_user_policy()
+        .user_name(user_name)
+        .policy_arn(policy_arn)
+        .send()
+        .await
+        .context("Failed to attach policy to user")?;
+
+    println!("Attached policy to user: {user_name} -> {policy_arn}");
+    Ok(())
+}
+
+/// Detach a managed policy from an IAM user.
+pub async fn cmd_detach_user_policy(client: &Client, user_name: &str, policy_arn: &str) -> Result<()> {
+    client
+        .detach_user_policy()
+        .user_name(user_name)
+        .policy_arn(policy_arn)
+        .send()
+        .await
+        .context("Failed to detach policy from user")?;
+
+    println!("Detached policy from user: {user_name} -> {policy_arn}");
+    Ok(())
+}
+
+/// Attach a managed policy to an IAM role.
+pub async fn cmd_attach_role_policy(client: &Client, role_name: &str, policy_arn: &str) -> Result<()> {
+    client
+        .attach_role_policy()
+        .role_name(role_name)
+        .policy_arn(policy_arn)
+        .send()
+        .await
+        .context("Failed to attach policy to role")?;
+
+    println!("Attached policy to role: {role_name} -> {policy_arn}");
+    Ok(())
+}
+
+/// Detach a managed policy from an IAM role.
+pub async fn cmd_detach_role_policy(client: &Client, role_name: &str, policy_arn: &str) -> Result<()> {
+    client
+        .detach_role_policy()
+        .role_name(role_name)
+        .policy_arn(policy_arn)
+        .send()
+        .await
+        .context("Failed to detach policy from role")?;
+
+    println!("Detached policy from role: {role_name} -> {policy_arn}");
+    Ok(())
+}
+
+/// List attached managed policies for an IAM user.
+pub async fn cmd_list_attached_user_policies(client: &Client, user_name: &str) -> Result<()> {
+    let mut marker: Option<String> = None;
+    println!("{:<50} {}", "PolicyName", "PolicyArn");
+    println!("{:<50} {}", "----------", "---------");
+
+    loop {
+        let mut req = client.list_attached_user_policies().user_name(user_name);
+        if let Some(ref m) = marker {
+            req = req.marker(m);
+        }
+        let resp = req
+            .send()
+            .await
+            .context("Failed to list attached user policies")?;
+
+        for policy in resp.attached_policies() {
+            let name = policy.policy_name().unwrap_or(UNKNOWN);
+            let arn = policy.policy_arn().unwrap_or(UNKNOWN);
+            println!("{name:<50} {arn}");
+        }
+
+        if resp.is_truncated() {
+            marker = resp.marker().map(str::to_string);
+        } else {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+/// List attached managed policies for an IAM role.
+pub async fn cmd_list_attached_role_policies(client: &Client, role_name: &str) -> Result<()> {
+    let mut marker: Option<String> = None;
+    println!("{:<50} {}", "PolicyName", "PolicyArn");
+    println!("{:<50} {}", "----------", "---------");
+
+    loop {
+        let mut req = client.list_attached_role_policies().role_name(role_name);
+        if let Some(ref m) = marker {
+            req = req.marker(m);
+        }
+        let resp = req
+            .send()
+            .await
+            .context("Failed to list attached role policies")?;
+
+        for policy in resp.attached_policies() {
+            let name = policy.policy_name().unwrap_or(UNKNOWN);
+            let arn = policy.policy_arn().unwrap_or(UNKNOWN);
+            println!("{name:<50} {arn}");
+        }
+
+        if resp.is_truncated() {
+            marker = resp.marker().map(str::to_string);
+        } else {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
 /// Get details about the current IAM account alias(es).
 pub async fn cmd_list_account_aliases(client: &Client) -> Result<()> {
     let resp = client
