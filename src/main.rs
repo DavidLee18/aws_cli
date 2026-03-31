@@ -283,6 +283,15 @@ enum IamCommands {
         #[arg(long)]
         path_prefix: Option<String>,
     },
+    /// Create an IAM group.
+    CreateGroup {
+        /// IAM group name to create.
+        #[arg(long, required = true)]
+        group_name: String,
+        /// Optional path for the group (e.g. /division_abc/).
+        #[arg(long)]
+        path: Option<String>,
+    },
     /// List account aliases.
     ListAccountAliases,
 }
@@ -836,6 +845,9 @@ async fn main() -> Result<()> {
                         } => iam_cmd::cmd_list_policies(&client, &scope, only_attached).await?,
                         IamCommands::ListGroups { path_prefix } => {
                             iam_cmd::cmd_list_groups(&client, path_prefix.as_deref()).await?
+                        }
+                        IamCommands::CreateGroup { group_name, path } => {
+                            iam_cmd::cmd_create_group(&client, &group_name, path.as_deref()).await?
                         }
                         IamCommands::ListAccountAliases => {
                             iam_cmd::cmd_list_account_aliases(&client).await?

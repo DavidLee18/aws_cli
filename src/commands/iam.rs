@@ -53,6 +53,27 @@ pub async fn cmd_create_role(
     Ok(())
 }
 
+/// Create an IAM group.
+pub async fn cmd_create_group(client: &Client, group_name: &str, path: Option<&str>) -> Result<()> {
+    let mut req = client.create_group().group_name(group_name);
+    if let Some(p) = path {
+        req = req.path(p);
+    }
+
+    let resp = req.send().await.context("Failed to create IAM group")?;
+    let group = resp.group();
+
+    println!(
+        "Created group: {}",
+        group.map(|g| g.group_name()).unwrap_or(group_name)
+    );
+    println!("Group ID: {}", group.map(|g| g.group_id()).unwrap_or("N/A"));
+    println!("ARN: {}", group.map(|g| g.arn()).unwrap_or("N/A"));
+    println!("Path: {}", group.map(|g| g.path()).unwrap_or("N/A"));
+
+    Ok(())
+}
+
 /// Delete an IAM user.
 pub async fn cmd_delete_user(client: &Client, user_name: &str) -> Result<()> {
     client
