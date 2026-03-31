@@ -4,10 +4,10 @@ A Rust port of the official AWS CLI, providing a fast, single-binary alternative
 
 ## Project Status
 
-This is an **active implementation** of core AWS CLI functionality in Rust. Currently at **43.20%** feature parity with the Python AWS CLI.
-Current **Phase 1 progress** is **53.98%**.
+This is an **active implementation** of core AWS CLI functionality in Rust. Currently at **46.68%** feature parity with the Python AWS CLI.
+Current **Phase 1 progress** is **61.06%**.
 
-### Currently Implemented (9 services, ~111 commands)
+### Currently Implemented (9 services, ~120 commands)
 
 #### ✓ Configure
 - [x] `configure` - Interactive configuration
@@ -37,7 +37,7 @@ Current **Phase 1 progress** is **53.98%**.
 - [ ] Key pair commands (4)
 - [ ] Volume & snapshot commands
 
-#### ✓ IAM (41/50 core commands - 82%)
+#### ✓ IAM (50/50 core commands - 100%)
 - [x] `create-role` - Create IAM roles
 - [x] `create-user` - Create IAM users
 - [x] `delete-user` - Delete IAM users
@@ -78,11 +78,16 @@ Current **Phase 1 progress** is **53.98%**.
 - [x] `delete-role-policy` - Delete inline policy document from role
 - [x] `put-group-policy` - Add or update inline policy document for group
 - [x] `delete-group-policy` - Delete inline policy document from group
+- [x] `create-access-key` - Create an access key for an IAM user
+- [x] `list-access-keys` - List access keys for an IAM user
+- [x] `update-access-key` - Update an IAM access key status
+- [x] `delete-access-key` - Delete an IAM access key
+- [x] `create-login-profile` - Create a console login profile for an IAM user
+- [x] `get-login-profile` - Get login profile metadata for an IAM user
+- [x] `update-login-profile` - Update an IAM user login profile
+- [x] `delete-login-profile` - Delete an IAM user login profile
+- [x] `update-assume-role-policy` - Update trust policy document for an IAM role
 - [x] `list-account-aliases` - List account aliases
-- [ ] User CRUD operations (4)
-- [ ] Role CRUD operations (4)
-- [ ] Policy CRUD operations (4)
-- [ ] Access key management (3)
 
 #### ✓ STS (4/4 core commands - 100%)
 - [x] `get-caller-identity` - Get caller identity
@@ -169,7 +174,7 @@ Current **Phase 1 progress** is **53.98%**.
 **Phase 1 progress snapshot (current):**
 - S3: 5/15 (remaining 10)
 - EC2: 7/40 (remaining 33)
-- IAM: 41/50 (remaining 9)
+- IAM: 50/50 (remaining 0)
 - STS: 4/4 (remaining 0)
 - SSO: 4/4 (remaining 0)
 

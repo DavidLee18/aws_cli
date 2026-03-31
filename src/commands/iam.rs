@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use aws_sdk_iam::Client;
 
 const UNKNOWN: &str = "<unknown>";
@@ -903,6 +903,212 @@ pub async fn cmd_delete_group_policy(
         .context("Failed to delete group policy")?;
 
     println!("Deleted inline policy '{policy_name}' from group '{group_name}'");
+    Ok(())
+}
+
+/// Create a new access key for an IAM user.
+pub async fn cmd_create_access_key(client: &Client, user_name: &str) -> Result<()> {
+    let resp = client
+        .create_access_key()
+        .user_name(user_name)
+        .send()
+        .await
+        .context("Failed to create access key")?;
+
+    if let Some(key) = resp.access_key() {
+        println!("UserName: {}", key.user_name());
+        println!("AccessKeyId: {}", key.access_key_id());
+        println!("SecretAccessKey: {}", key.secret_access_key());
+        println!("Status: {}", key.status().as_str());
+        println!(
+            "CreateDate: {}",
+            key.create_date()
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| UNKNOWN.to_string())
+        );
+    } else {
+        println!("No access key data returned for user: {user_name}");
+    }
+
+    Ok(())
+}
+
+/// List access keys for an IAM user.
+pub async fn cmd_list_access_keys(client: &Client, user_name: &str) -> Result<()> {
+    let mut marker: Option<String> = None;
+    println!("{:<25} {:<10} {}", "AccessKeyId", "Status", "CreateDate");
+    println!("{:<25} {:<10} {}", "-----------", "------", "----------");
+
+    loop {
+        let mut req = client.list_access_keys().user_name(user_name);
+        if let Some(ref m) = marker {
+            req = req.marker(m);
+        }
+        let resp = req.send().await.context("Failed to list access keys")?;
+
+        for key in resp.access_key_metadata() {
+            let access_key_id = key.access_key_id().unwrap_or(UNKNOWN);
+            let status = key.status().map(|s| s.as_str()).unwrap_or(UNKNOWN);
+            let created = key
+                .create_date()
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| UNKNOWN.to_string());
+            println!(
+                "{:<25} {:<10} {}",
+                access_key_id,
+                status,
+                created
+            );
+        }
+
+        if resp.is_truncated() {
+            marker = resp.marker().map(str::to_string);
+        } else {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+/// Update the status of an IAM access key.
+pub async fn cmd_update_access_key(
+    client: &Client,
+    user_name: &str,
+    access_key_id: &str,
+    status: &str,
+) -> Result<()> {
+    let status = match status.to_ascii_lowercase().as_str() {
+        "active" => aws_sdk_iam::types::StatusType::Active,
+        "inactive" => aws_sdk_iam::types::StatusType::Inactive,
+        _ => bail!("Invalid status '{status}'. Use 'Active' or 'Inactive'."),
+    };
+
+    client
+        .update_access_key()
+        .user_name(user_name)
+        .access_key_id(access_key_id)
+        .status(status)
+        .send()
+        .await
+        .context("Failed to update access key")?;
+
+    println!("Updated access key '{access_key_id}' for user '{user_name}'");
+    Ok(())
+}
+
+/// Delete an IAM access key.
+pub async fn cmd_delete_access_key(
+    client: &Client,
+    user_name: &str,
+    access_key_id: &str,
+) -> Result<()> {
+    client
+        .delete_access_key()
+        .user_name(user_name)
+        .access_key_id(access_key_id)
+        .send()
+        .await
+        .context("Failed to delete access key")?;
+
+    println!("Deleted access key '{access_key_id}' for user '{user_name}'");
+    Ok(())
+}
+
+/// Create a console login profile (password) for an IAM user.
+pub async fn cmd_create_login_profile(
+    client: &Client,
+    user_name: &str,
+    password: &str,
+    password_reset_required: bool,
+) -> Result<()> {
+    client
+        .create_login_profile()
+        .user_name(user_name)
+        .password(password)
+        .set_password_reset_required(Some(password_reset_required))
+        .send()
+        .await
+        .context("Failed to create login profile")?;
+
+    println!("Created login profile for user '{user_name}'");
+    Ok(())
+}
+
+/// Get login profile metadata for an IAM user.
+pub async fn cmd_get_login_profile(client: &Client, user_name: &str) -> Result<()> {
+    let resp = client
+        .get_login_profile()
+        .user_name(user_name)
+        .send()
+        .await
+        .context("Failed to get login profile")?;
+
+    if let Some(profile) = resp.login_profile() {
+        println!("UserName: {}", profile.user_name());
+        println!("CreateDate: {}", profile.create_date());
+        println!(
+            "PasswordResetRequired: {}",
+            profile.password_reset_required()
+        );
+    } else {
+        println!("No login profile data returned for user: {user_name}");
+    }
+
+    Ok(())
+}
+
+/// Update the login profile password settings for an IAM user.
+pub async fn cmd_update_login_profile(
+    client: &Client,
+    user_name: &str,
+    password: Option<&str>,
+    password_reset_required: Option<bool>,
+) -> Result<()> {
+    let mut req = client.update_login_profile().user_name(user_name);
+    if let Some(p) = password {
+        req = req.password(p);
+    }
+    if let Some(flag) = password_reset_required {
+        req = req.password_reset_required(flag);
+    }
+
+    req.send()
+        .await
+        .context("Failed to update login profile")?;
+
+    println!("Updated login profile for user '{user_name}'");
+    Ok(())
+}
+
+/// Delete a console login profile for an IAM user.
+pub async fn cmd_delete_login_profile(client: &Client, user_name: &str) -> Result<()> {
+    client
+        .delete_login_profile()
+        .user_name(user_name)
+        .send()
+        .await
+        .context("Failed to delete login profile")?;
+
+    println!("Deleted login profile for user '{user_name}'");
+    Ok(())
+}
+
+/// Update the trust policy document for an IAM role.
+pub async fn cmd_update_assume_role_policy(
+    client: &Client,
+    role_name: &str,
+    policy_document: &str,
+) -> Result<()> {
+    client
+        .update_assume_role_policy()
+        .role_name(role_name)
+        .policy_document(policy_document)
+        .send()
+        .await
+        .context("Failed to update assume role policy")?;
+
+    println!("Updated assume-role policy for role '{role_name}'");
     Ok(())
 }
 

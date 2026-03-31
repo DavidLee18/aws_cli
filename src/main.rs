@@ -508,6 +508,84 @@ enum IamCommands {
         #[arg(long, required = true)]
         policy_name: String,
     },
+    /// Create an access key for an IAM user.
+    CreateAccessKey {
+        /// IAM user name.
+        #[arg(long, required = true)]
+        user_name: String,
+    },
+    /// List access keys for an IAM user.
+    ListAccessKeys {
+        /// IAM user name.
+        #[arg(long, required = true)]
+        user_name: String,
+    },
+    /// Update the status of an IAM access key.
+    UpdateAccessKey {
+        /// IAM user name.
+        #[arg(long, required = true)]
+        user_name: String,
+        /// Access key ID.
+        #[arg(long, required = true)]
+        access_key_id: String,
+        /// New status: Active or Inactive.
+        #[arg(long, required = true)]
+        status: String,
+    },
+    /// Delete an access key for an IAM user.
+    DeleteAccessKey {
+        /// IAM user name.
+        #[arg(long, required = true)]
+        user_name: String,
+        /// Access key ID.
+        #[arg(long, required = true)]
+        access_key_id: String,
+    },
+    /// Create a console login profile for an IAM user.
+    CreateLoginProfile {
+        /// IAM user name.
+        #[arg(long, required = true)]
+        user_name: String,
+        /// Console password.
+        #[arg(long, required = true)]
+        password: String,
+        /// Require password reset on first sign-in.
+        #[arg(long, default_value_t = false)]
+        password_reset_required: bool,
+    },
+    /// Get console login profile metadata for an IAM user.
+    GetLoginProfile {
+        /// IAM user name.
+        #[arg(long, required = true)]
+        user_name: String,
+    },
+    /// Update a console login profile for an IAM user.
+    UpdateLoginProfile {
+        /// IAM user name.
+        #[arg(long, required = true)]
+        user_name: String,
+        /// New console password.
+        #[arg(long)]
+        password: Option<String>,
+        /// Require password reset on next sign-in.
+        #[arg(long)]
+        password_reset_required: Option<bool>,
+    },
+    /// Delete a console login profile for an IAM user.
+    DeleteLoginProfile {
+        /// IAM user name.
+        #[arg(long, required = true)]
+        user_name: String,
+    },
+    /// Update a role's trust policy document.
+    UpdateAssumeRolePolicy {
+        /// IAM role name.
+        #[arg(long, required = true)]
+        role_name: String,
+        /// New trust policy document JSON.
+        #[arg(long, required = true)]
+        policy_document: String,
+    },
     /// List account aliases.
     ListAccountAliases,
 }
@@ -1190,6 +1268,75 @@ async fn main() -> Result<()> {
                             group_name,
                             policy_name,
                         } => iam_cmd::cmd_delete_group_policy(&client, &group_name, &policy_name).await?,
+                        IamCommands::CreateAccessKey { user_name } => {
+                            iam_cmd::cmd_create_access_key(&client, &user_name).await?
+                        }
+                        IamCommands::ListAccessKeys { user_name } => {
+                            iam_cmd::cmd_list_access_keys(&client, &user_name).await?
+                        }
+                        IamCommands::UpdateAccessKey {
+                            user_name,
+                            access_key_id,
+                            status,
+                        } => {
+                            iam_cmd::cmd_update_access_key(
+                                &client,
+                                &user_name,
+                                &access_key_id,
+                                &status,
+                            )
+                            .await?
+                        }
+                        IamCommands::DeleteAccessKey {
+                            user_name,
+                            access_key_id,
+                        } => {
+                            iam_cmd::cmd_delete_access_key(&client, &user_name, &access_key_id)
+                                .await?
+                        }
+                        IamCommands::CreateLoginProfile {
+                            user_name,
+                            password,
+                            password_reset_required,
+                        } => {
+                            iam_cmd::cmd_create_login_profile(
+                                &client,
+                                &user_name,
+                                &password,
+                                password_reset_required,
+                            )
+                            .await?
+                        }
+                        IamCommands::GetLoginProfile { user_name } => {
+                            iam_cmd::cmd_get_login_profile(&client, &user_name).await?
+                        }
+                        IamCommands::UpdateLoginProfile {
+                            user_name,
+                            password,
+                            password_reset_required,
+                        } => {
+                            iam_cmd::cmd_update_login_profile(
+                                &client,
+                                &user_name,
+                                password.as_deref(),
+                                password_reset_required,
+                            )
+                            .await?
+                        }
+                        IamCommands::DeleteLoginProfile { user_name } => {
+                            iam_cmd::cmd_delete_login_profile(&client, &user_name).await?
+                        }
+                        IamCommands::UpdateAssumeRolePolicy {
+                            role_name,
+                            policy_document,
+                        } => {
+                            iam_cmd::cmd_update_assume_role_policy(
+                                &client,
+                                &role_name,
+                                &policy_document,
+                            )
+                            .await?
+                        }
                         IamCommands::ListAccountAliases => {
                             iam_cmd::cmd_list_account_aliases(&client).await?
                         }
