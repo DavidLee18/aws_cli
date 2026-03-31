@@ -1373,6 +1373,12 @@ enum ConfigureCommands {
 fn parse_tag_kv_pairs(raw: &[String]) -> Result<Vec<(String, String)>> {
     let mut out = Vec::with_capacity(raw.len());
     for entry in raw {
+        if entry.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Tag cannot be empty (expected key=value): {entry}"
+            ));
+        }
+
         if !entry.contains('=') {
             return Err(anyhow::anyhow!(
                 "Tag must be in key=value format (missing '='): {entry}"
@@ -1380,7 +1386,7 @@ fn parse_tag_kv_pairs(raw: &[String]) -> Result<Vec<(String, String)>> {
         }
 
         let mut parts = entry.splitn(2, '=');
-        let key = parts.next().unwrap_or("");
+        let key = parts.next().unwrap();
         let value = parts.next().unwrap_or("");
 
         if key.is_empty() {

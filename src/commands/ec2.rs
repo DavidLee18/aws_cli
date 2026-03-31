@@ -475,7 +475,9 @@ pub async fn cmd_allocate_address(client: &Client, domain: &str) -> Result<()> {
     let domain_type = match domain.to_lowercase().as_str() {
         "vpc" => DomainType::Vpc,
         "standard" => DomainType::Standard,
-        other => anyhow::bail!("Invalid domain: {other} (expected vpc or standard)"),
+        other => {
+            anyhow::bail!("Invalid domain: {other} (expected vpc or standard [legacy EC2-Classic])")
+        }
     };
     let resp = client
         .allocate_address()
