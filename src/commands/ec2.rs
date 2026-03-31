@@ -472,9 +472,14 @@ pub async fn cmd_describe_addresses(client: &Client) -> Result<()> {
 
 /// Allocate a new Elastic IP address.
 pub async fn cmd_allocate_address(client: &Client, domain: &str) -> Result<()> {
+    let domain_type = match domain.to_lowercase().as_str() {
+        "vpc" => DomainType::Vpc,
+        "standard" => DomainType::Standard,
+        other => anyhow::bail!("Invalid domain: {other} (expected vpc or standard)"),
+    };
     let resp = client
         .allocate_address()
-        .domain(DomainType::from(domain))
+        .domain(domain_type)
         .send()
         .await
         .with_context(|| format!("Failed to allocate address in domain {domain}"))?;

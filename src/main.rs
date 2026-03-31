@@ -1374,15 +1374,21 @@ fn parse_tag_kv_pairs(raw: &[String]) -> Result<Vec<(String, String)>> {
     let mut out = Vec::with_capacity(raw.len());
     for entry in raw {
         let mut parts = entry.splitn(2, '=');
-        let key = parts
-            .next()
-            .map(str::to_owned)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("Tag is missing key: {entry}"))?;
-        let value = parts
-            .next()
-            .map(str::to_owned)
-            .ok_or_else(|| anyhow::anyhow!("Tag is missing value (expected key=value): {entry}"))?;
+        let key_part = parts.next().unwrap_or("");
+        let value_part = parts.next();
+
+        if key_part.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Tag is missing key before '=' (expected key=value): {entry}"
+            ));
+        }
+
+        let value = value_part.ok_or_else(|| {
+            anyhow::anyhow!("Tag must be in key=value format (missing '='): {entry}")
+        })?;
+
+        let key = key_part.to_owned();
+        let value = value.to_owned();
         out.push((key, value));
     }
     Ok(out)
