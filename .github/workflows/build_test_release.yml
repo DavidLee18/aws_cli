@@ -8,14 +8,70 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-
+  
 jobs:
-  build-and-test:
+  update_version:
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
+    outputs:
+      new_tag: ${{ steps.tag_version.outputs.new_tag }}
+      previous_tag: ${{ steps.tag_version.outputs.previous_tag }}
+      changelog: ${{ steps.tag_version.outputs.changelog }}
     steps:
-    - uses: actions/checkout@v4
-    - name: Run tests
-      run: cargo test --verbose
-    - name: Build
-      run: cargo build --verbose
-    # TODO: release
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - name: Bump version and push tag
+        id: tag_version
+        uses: mathieudutour/github-tag-action@a22cf08638b34d5badda920f9daf6e72c477b07b
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+  build-and-test:
+    needs: update_version
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-26, macos-26-intel, windows-2025, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - name: Setup Rust Toolchain for GitHub CI
+        uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606
+        with:
+          # Comma-separated list of Rust toolchain specifications. Last version becomes the default. -- see https://rust-lang.github.io/rustup/concepts/toolchains.html#toolchain-specification
+          toolchain: # optional
+          # target: x86_64-unknown-linux-gnu # optional
+          components: # optional
+          rustflags: # optional, default is -D warnings
+          # Setup the last installed toolchain as the default via `rustup override`
+          override: # optional, default is true
+      - name: Test
+        run: cargo test --verbose
+      - name: Build
+        if: github.event_name != 'pull_request'
+        run: cargo build --release --verbose
+      - run: mv target/release/discord_obs_livebot discord_obs_livebot-${{ matrix.os }}
+      - name: Upload Artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: ${{ matrix.os }}
+          path: discord_obs_livebot-${{ matrix.os }}
+  release:
+    needs: [update_version, build-and-test]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          merge-multiple: true
+      - name: Release
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe
+        with:
+          prerelease: true
+          tag_name: ${{ needs.update_version.outputs.new_tag }}
+          previous_tag: ${{ needs.update_version.outputs.previous_tag }}
+          body: ${{ needs.update_version.outputs.changelog }}
+          files: |
+            discord_obs_livebot-*
