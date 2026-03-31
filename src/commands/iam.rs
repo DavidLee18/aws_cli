@@ -165,6 +165,44 @@ pub async fn cmd_delete_policy(client: &Client, policy_arn: &str) -> Result<()> 
     Ok(())
 }
 
+/// Create an IAM policy.
+pub async fn cmd_create_policy(
+    client: &Client,
+    policy_name: &str,
+    policy_document: &str,
+    description: Option<&str>,
+    path: Option<&str>,
+) -> Result<()> {
+    let mut req = client
+        .create_policy()
+        .policy_name(policy_name)
+        .policy_document(policy_document);
+    if let Some(d) = description {
+        req = req.description(d);
+    }
+    if let Some(p) = path {
+        req = req.path(p);
+    }
+
+    let resp = req.send().await.context("Failed to create IAM policy")?;
+    let policy = resp.policy();
+
+    println!(
+        "Created policy: {}",
+        policy.and_then(|p| p.policy_name()).unwrap_or(policy_name)
+    );
+    println!(
+        "PolicyId: {}",
+        policy.and_then(|p| p.policy_id()).unwrap_or(UNKNOWN)
+    );
+    println!(
+        "ARN: {}",
+        policy.and_then(|p| p.arn()).unwrap_or(UNKNOWN)
+    );
+
+    Ok(())
+}
+
 /// List all IAM users.
 pub async fn cmd_list_users(client: &Client, path_prefix: Option<&str>) -> Result<()> {
     let mut marker: Option<String> = None;

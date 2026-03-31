@@ -247,6 +247,21 @@ enum IamCommands {
         #[arg(long, required = true)]
         policy_arn: String,
     },
+    /// Create an IAM policy.
+    CreatePolicy {
+        /// Name for the IAM policy.
+        #[arg(long, required = true)]
+        policy_name: String,
+        /// JSON policy document.
+        #[arg(long, required = true)]
+        policy_document: String,
+        /// Optional description for the policy.
+        #[arg(long)]
+        description: Option<String>,
+        /// Optional path for the policy (e.g. /service-role/).
+        #[arg(long)]
+        path: Option<String>,
+    },
     /// Get details for an IAM policy.
     GetPolicy {
         /// ARN of the IAM policy to retrieve.
@@ -796,6 +811,21 @@ async fn main() -> Result<()> {
                         }
                         IamCommands::DeletePolicy { policy_arn } => {
                             iam_cmd::cmd_delete_policy(&client, &policy_arn).await?
+                        }
+                        IamCommands::CreatePolicy {
+                            policy_name,
+                            policy_document,
+                            description,
+                            path,
+                        } => {
+                            iam_cmd::cmd_create_policy(
+                                &client,
+                                &policy_name,
+                                &policy_document,
+                                description.as_deref(),
+                                path.as_deref(),
+                            )
+                            .await?
                         }
                         IamCommands::GetPolicy { policy_arn } => {
                             iam_cmd::cmd_get_policy(&client, &policy_arn).await?
