@@ -4,10 +4,10 @@ A Rust port of the official AWS CLI, providing a fast, single-binary alternative
 
 ## Project Status
 
-This is an **active implementation** of core AWS CLI functionality in Rust. Currently at **34.24%** feature parity with the Python AWS CLI.
-Current **Phase 1 progress** is **39.92%**.
+This is an **active implementation** of core AWS CLI functionality in Rust. Currently at **36.19%** feature parity with the Python AWS CLI.
+Current **Phase 1 progress** is **45.17%**.
 
-### Currently Implemented (9 services, ~88 commands)
+### Currently Implemented (9 services, ~93 commands)
 
 #### ✓ Configure
 - [x] `configure` - Interactive configuration
@@ -37,7 +37,7 @@ Current **Phase 1 progress** is **39.92%**.
 - [ ] Key pair commands (4)
 - [ ] Volume & snapshot commands
 
-#### ✓ IAM (18/50 core commands - 36%)
+#### ✓ IAM (23/50 core commands - 46%)
 - [x] `create-role` - Create IAM roles
 - [x] `create-user` - Create IAM users
 - [x] `delete-user` - Delete IAM users
@@ -55,6 +55,11 @@ Current **Phase 1 progress** is **39.92%**.
 - [x] `get-group` - Get IAM group details
 - [x] `delete-group` - Delete IAM group
 - [x] `list-attached-group-policies` - List attached group policies
+- [x] `attach-group-policy` - Attach managed policy to group
+- [x] `detach-group-policy` - Detach managed policy from group
+- [x] `add-user-to-group` - Add user to group
+- [x] `remove-user-from-group` - Remove user from group
+- [x] `list-groups-for-user` - List groups for user
 - [x] `list-account-aliases` - List account aliases
 - [ ] User CRUD operations (4)
 - [ ] Role CRUD operations (4)
@@ -147,7 +152,7 @@ Current **Phase 1 progress** is **39.92%**.
 **Phase 1 progress snapshot (current):**
 - S3: 5/15 (remaining 10)
 - EC2: 7/40 (remaining 33)
-- IAM: 18/50 (remaining 32)
+- IAM: 23/50 (remaining 27)
 - STS: 4/4 (remaining 0)
 - SSO: 4/4 (remaining 0)
 

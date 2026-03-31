@@ -310,6 +310,48 @@ enum IamCommands {
         #[arg(long, required = true)]
         group_name: String,
     },
+    /// Attach a managed policy to an IAM group.
+    AttachGroupPolicy {
+        /// IAM group name to update.
+        #[arg(long, required = true)]
+        group_name: String,
+        /// Managed policy ARN to attach.
+        #[arg(long, required = true)]
+        policy_arn: String,
+    },
+    /// Detach a managed policy from an IAM group.
+    DetachGroupPolicy {
+        /// IAM group name to update.
+        #[arg(long, required = true)]
+        group_name: String,
+        /// Managed policy ARN to detach.
+        #[arg(long, required = true)]
+        policy_arn: String,
+    },
+    /// Add a user to an IAM group.
+    AddUserToGroup {
+        /// IAM group name.
+        #[arg(long, required = true)]
+        group_name: String,
+        /// IAM user name.
+        #[arg(long, required = true)]
+        user_name: String,
+    },
+    /// Remove a user from an IAM group.
+    RemoveUserFromGroup {
+        /// IAM group name.
+        #[arg(long, required = true)]
+        group_name: String,
+        /// IAM user name.
+        #[arg(long, required = true)]
+        user_name: String,
+    },
+    /// List IAM groups that a user belongs to.
+    ListGroupsForUser {
+        /// IAM user name to query.
+        #[arg(long, required = true)]
+        user_name: String,
+    },
     /// List account aliases.
     ListAccountAliases,
 }
@@ -875,6 +917,28 @@ async fn main() -> Result<()> {
                         }
                         IamCommands::ListAttachedGroupPolicies { group_name } => {
                             iam_cmd::cmd_list_attached_group_policies(&client, &group_name).await?
+                        }
+                        IamCommands::AttachGroupPolicy {
+                            group_name,
+                            policy_arn,
+                        } => iam_cmd::cmd_attach_group_policy(&client, &group_name, &policy_arn)
+                            .await?,
+                        IamCommands::DetachGroupPolicy {
+                            group_name,
+                            policy_arn,
+                        } => iam_cmd::cmd_detach_group_policy(&client, &group_name, &policy_arn)
+                            .await?,
+                        IamCommands::AddUserToGroup {
+                            group_name,
+                            user_name,
+                        } => iam_cmd::cmd_add_user_to_group(&client, &group_name, &user_name).await?,
+                        IamCommands::RemoveUserFromGroup {
+                            group_name,
+                            user_name,
+                        } => iam_cmd::cmd_remove_user_from_group(&client, &group_name, &user_name)
+                            .await?,
+                        IamCommands::ListGroupsForUser { user_name } => {
+                            iam_cmd::cmd_list_groups_for_user(&client, &user_name).await?
                         }
                         IamCommands::ListAccountAliases => {
                             iam_cmd::cmd_list_account_aliases(&client).await?

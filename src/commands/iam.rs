@@ -435,6 +435,107 @@ pub async fn cmd_list_attached_group_policies(client: &Client, group_name: &str)
     Ok(())
 }
 
+/// Attach a managed policy to an IAM group.
+pub async fn cmd_attach_group_policy(
+    client: &Client,
+    group_name: &str,
+    policy_arn: &str,
+) -> Result<()> {
+    client
+        .attach_group_policy()
+        .group_name(group_name)
+        .policy_arn(policy_arn)
+        .send()
+        .await
+        .context("Failed to attach policy to group")?;
+
+    println!("Attached policy to group: {group_name} -> {policy_arn}");
+    Ok(())
+}
+
+/// Detach a managed policy from an IAM group.
+pub async fn cmd_detach_group_policy(
+    client: &Client,
+    group_name: &str,
+    policy_arn: &str,
+) -> Result<()> {
+    client
+        .detach_group_policy()
+        .group_name(group_name)
+        .policy_arn(policy_arn)
+        .send()
+        .await
+        .context("Failed to detach policy from group")?;
+
+    println!("Detached policy from group: {group_name} -> {policy_arn}");
+    Ok(())
+}
+
+/// Add an IAM user to an IAM group.
+pub async fn cmd_add_user_to_group(client: &Client, group_name: &str, user_name: &str) -> Result<()> {
+    client
+        .add_user_to_group()
+        .group_name(group_name)
+        .user_name(user_name)
+        .send()
+        .await
+        .context("Failed to add user to group")?;
+
+    println!("Added user to group: {user_name} -> {group_name}");
+    Ok(())
+}
+
+/// Remove an IAM user from an IAM group.
+pub async fn cmd_remove_user_from_group(
+    client: &Client,
+    group_name: &str,
+    user_name: &str,
+) -> Result<()> {
+    client
+        .remove_user_from_group()
+        .group_name(group_name)
+        .user_name(user_name)
+        .send()
+        .await
+        .context("Failed to remove user from group")?;
+
+    println!("Removed user from group: {user_name} -> {group_name}");
+    Ok(())
+}
+
+/// List groups that an IAM user belongs to.
+pub async fn cmd_list_groups_for_user(client: &Client, user_name: &str) -> Result<()> {
+    let mut marker: Option<String> = None;
+    println!("{:<30} {:<30} {}", "GroupName", "GroupId", "CreateDate");
+    println!("{:<30} {:<30} {}", "---------", "-------", "----------");
+
+    loop {
+        let mut req = client.list_groups_for_user().user_name(user_name);
+        if let Some(ref m) = marker {
+            req = req.marker(m);
+        }
+        let resp = req
+            .send()
+            .await
+            .context("Failed to list groups for user")?;
+
+        for group in resp.groups() {
+            let name = group.group_name();
+            let gid = group.group_id();
+            let created = group.create_date().to_string();
+            println!("{name:<30} {gid:<30} {created}");
+        }
+
+        if resp.is_truncated() {
+            marker = resp.marker().map(str::to_string);
+        } else {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
 /// Get details about the current IAM account alias(es).
 pub async fn cmd_list_account_aliases(client: &Client) -> Result<()> {
     let resp = client
