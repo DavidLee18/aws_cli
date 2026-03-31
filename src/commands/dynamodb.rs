@@ -1,4 +1,7 @@
 use anyhow::{Context, Result};
+use aws_sdk_dynamodb::types::{
+    DeleteRequest, KeysAndAttributes, PutRequest, WriteRequest,
+};
 use aws_sdk_dynamodb::Client;
 
 /// List all DynamoDB tables.
@@ -273,6 +276,169 @@ pub async fn cmd_delete_item(client: &Client, table_name: &str, key_json: &str) 
     Ok(())
 }
 
+/// Query a DynamoDB table.
+pub async fn cmd_query(
+    client: &Client,
+    table_name: &str,
+    key_condition_expression: &str,
+    expr_attr_values_json: Option<&str>,
+    limit: Option<i32>,
+) -> Result<()> {
+    let mut req = client
+        .query()
+        .table_name(table_name)
+        .key_condition_expression(key_condition_expression);
+
+    if let Some(raw) = expr_attr_values_json {
+        let value: Value =
+            serde_json::from_str(raw).context("Failed to parse expression-attribute-values JSON")?;
+        let map = json_to_attribute_value(&value)?;
+        req = req.set_expression_attribute_values(Some(map));
+    }
+
+    if let Some(l) = limit {
+        req = req.limit(l);
+    }
+
+    let resp = req.send().await.context("Failed to query DynamoDB table")?;
+
+    let items = resp.items();
+    if items.is_empty() {
+        println!("No items found.");
+    } else {
+        println!("Found {} items:", items.len());
+        for item in items {
+            let json_item = attribute_map_to_json(item)?;
+            println!("{}", serde_json::to_string_pretty(&json_item)?);
+        }
+    }
+
+    Ok(())
+}
+
+/// Batch get items across one or more DynamoDB tables.
+pub async fn cmd_batch_get_item(client: &Client, request_items_json: &str) -> Result<()> {
+    let value: Value =
+        serde_json::from_str(request_items_json).context("Failed to parse request-items JSON")?;
+
+    let mut request_items = std::collections::HashMap::new();
+    let obj = value
+        .as_object()
+        .context("request-items JSON must be an object mapping table -> keys")?;
+
+    for (table_name, keys_value) in obj {
+        let keys_array = keys_value
+            .as_array()
+            .context("Each table entry must be an array of key objects")?;
+
+        let mut keys = Vec::with_capacity(keys_array.len());
+        for key_val in keys_array {
+            let key_map = json_to_attribute_value(key_val)?;
+            keys.push(key_map);
+        }
+
+        let kaa = KeysAndAttributes::builder()
+            .set_keys(Some(keys))
+            .build()?;
+
+        request_items.insert(table_name.clone(), kaa);
+    }
+
+    let resp = client
+        .batch_get_item()
+        .set_request_items(Some(request_items))
+        .send()
+        .await
+        .context("Failed to batch-get items")?;
+
+    if let Some(responses) = resp.responses() {
+        for (table, items) in responses {
+            println!("Table: {}", table);
+            for item in items {
+                let json_item = attribute_map_to_json(item)?;
+                println!("{}", serde_json::to_string_pretty(&json_item)?);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Batch write items across one or more DynamoDB tables.
+pub async fn cmd_batch_write_item(client: &Client, request_items_json: &str) -> Result<()> {
+    let value: Value =
+        serde_json::from_str(request_items_json).context("Failed to parse request-items JSON")?;
+
+    let obj = value
+        .as_object()
+        .context("request-items JSON must be an object mapping table -> {put:[...], delete:[...]}")?;
+
+    let mut request_items = std::collections::HashMap::new();
+
+    for (table_name, ops) in obj {
+        let ops_obj = ops
+            .as_object()
+            .context("Each table entry must be an object with put/delete arrays")?;
+
+        let mut writes: Vec<WriteRequest> = Vec::new();
+
+        if let Some(puts) = ops_obj.get("put") {
+            let arr = puts
+                .as_array()
+                .context("'put' must be an array of items")?;
+            for item_val in arr {
+                let item_map = json_to_attribute_value(item_val)?;
+                writes.push(
+                    WriteRequest::builder()
+                        .put_request(
+                            PutRequest::builder()
+                                .set_item(Some(item_map))
+                                .build()?,
+                        )
+                        .build(),
+                );
+            }
+        }
+
+        if let Some(deletes) = ops_obj.get("delete") {
+            let arr = deletes
+                .as_array()
+                .context("'delete' must be an array of keys")?;
+            for key_val in arr {
+                let key_map = json_to_attribute_value(key_val)?;
+                writes.push(
+                    WriteRequest::builder()
+                        .delete_request(
+                            DeleteRequest::builder()
+                                .set_key(Some(key_map))
+                                .build()?,
+                        )
+                        .build(),
+                );
+            }
+        }
+
+        if !writes.is_empty() {
+            request_items.insert(table_name.clone(), writes);
+        }
+    }
+
+    if request_items.is_empty() {
+        anyhow::bail!("No write requests were provided");
+    }
+
+    client
+        .batch_write_item()
+        .set_request_items(Some(request_items))
+        .send()
+        .await
+        .context("Failed to batch-write items")?;
+
+    println!("Batch write submitted.");
+
+    Ok(())
+}
+
 /// Scan a DynamoDB table.
 pub async fn cmd_scan(client: &Client, table_name: &str, limit: Option<i32>) -> Result<()> {
     let mut req = client.scan().table_name(table_name);
@@ -305,22 +471,63 @@ use std::collections::HashMap;
 fn json_to_attribute_value(value: &Value) -> Result<HashMap<String, AttributeValue>> {
     let mut map = HashMap::new();
 
-    if let Value::Object(obj) = value {
-        for (key, val) in obj {
-            let attr_val = match val {
-                Value::String(s) => AttributeValue::S(s.clone()),
-                Value::Number(n) => AttributeValue::N(n.to_string()),
-                Value::Bool(b) => AttributeValue::Bool(*b),
-                Value::Null => AttributeValue::Null(true),
-                _ => anyhow::bail!("Unsupported JSON type for key {}", key),
-            };
-            map.insert(key.clone(), attr_val);
-        }
-    } else {
-        anyhow::bail!("Expected JSON object");
+    let obj = value
+        .as_object()
+        .context("Expected JSON object of attribute names to values")?;
+
+    for (key, val) in obj {
+        let attr_val = value_to_av(val)?;
+        map.insert(key.clone(), attr_val);
     }
 
     Ok(map)
+}
+
+fn value_to_av(val: &Value) -> Result<AttributeValue> {
+    if let Some(s) = val.as_str() {
+        return Ok(AttributeValue::S(s.to_owned()));
+    }
+    if let Some(n) = val.as_i64() {
+        return Ok(AttributeValue::N(n.to_string()));
+    }
+    if let Some(n) = val.as_f64() {
+        return Ok(AttributeValue::N(n.to_string()));
+    }
+    if let Some(b) = val.as_bool() {
+        return Ok(AttributeValue::Bool(b));
+    }
+    if val.is_null() {
+        return Ok(AttributeValue::Null(true));
+    }
+
+    if let Some(obj) = val.as_object() {
+        if obj.len() == 1 {
+            if let Some(s) = obj.get("S").and_then(|v| v.as_str()) {
+                return Ok(AttributeValue::S(s.to_owned()));
+            }
+            if let Some(n) = obj.get("N") {
+                if let Some(intv) = n.as_i64() {
+                    return Ok(AttributeValue::N(intv.to_string()));
+                }
+                if let Some(fv) = n.as_f64() {
+                    return Ok(AttributeValue::N(fv.to_string()));
+                }
+                if let Some(raw) = n.as_str() {
+                    return Ok(AttributeValue::N(raw.to_owned()));
+                }
+            }
+            if let Some(b) = obj.get("BOOL").and_then(|v| v.as_bool()) {
+                return Ok(AttributeValue::Bool(b));
+            }
+            if let Some(is_null) = obj.get("NULL").and_then(|v| v.as_bool()) {
+                if is_null {
+                    return Ok(AttributeValue::Null(true));
+                }
+            }
+        }
+    }
+
+    anyhow::bail!("Unsupported JSON value for AttributeValue: {val}")
 }
 
 fn attribute_map_to_json(map: &HashMap<String, AttributeValue>) -> Result<Value> {

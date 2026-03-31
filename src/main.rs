@@ -1382,6 +1382,33 @@ enum DynamodbCommands {
         #[arg(long)]
         limit: Option<i32>,
     },
+    /// Query a DynamoDB table.
+    Query {
+        /// Name of the table.
+        #[arg(long, required = true)]
+        table_name: String,
+        /// Key condition expression (e.g., "pk = :pk").
+        #[arg(long, required = true)]
+        key_condition_expression: String,
+        /// Expression attribute values as JSON (e.g., '{":pk":"123"}').
+        #[arg(long)]
+        expression_attribute_values: Option<String>,
+        /// Maximum number of items to return.
+        #[arg(long)]
+        limit: Option<i32>,
+    },
+    /// Batch get items from one or more tables.
+    BatchGetItem {
+        /// Request items JSON (e.g., '{"Table":[{"id":"123"},{"id":"456"}]}' ).
+        #[arg(long, required = true)]
+        request_items: String,
+    },
+    /// Batch write items (put/delete) to one or more tables.
+    BatchWriteItem {
+        /// Request items JSON (e.g., '{"Table":{"put":[{...}],\"delete\":[{...}]}}').
+        #[arg(long, required = true)]
+        request_items: String,
+    },
 }
 
 // ── Configure sub-commands ────────────────────────────────────────────────────
@@ -2448,6 +2475,27 @@ async fn main() -> Result<()> {
                         }
                         DynamodbCommands::Scan { table_name, limit } => {
                             dynamodb_cmd::cmd_scan(&client, &table_name, limit).await?
+                        }
+                        DynamodbCommands::Query {
+                            table_name,
+                            key_condition_expression,
+                            expression_attribute_values,
+                            limit,
+                        } => {
+                            dynamodb_cmd::cmd_query(
+                                &client,
+                                &table_name,
+                                &key_condition_expression,
+                                expression_attribute_values.as_deref(),
+                                limit,
+                            )
+                            .await?
+                        }
+                        DynamodbCommands::BatchGetItem { request_items } => {
+                            dynamodb_cmd::cmd_batch_get_item(&client, &request_items).await?
+                        }
+                        DynamodbCommands::BatchWriteItem { request_items } => {
+                            dynamodb_cmd::cmd_batch_write_item(&client, &request_items).await?
                         }
                     }
                 }

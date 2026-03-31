@@ -4,10 +4,10 @@ A Rust port of the official AWS CLI, providing a fast, single-binary alternative
 
 ## Project Status
 
-This is an **active implementation** of core AWS CLI functionality in Rust. Currently at **63.60%** feature parity with the Python AWS CLI.
+This is an **active implementation** of core AWS CLI functionality in Rust. Currently at **65.13%** feature parity with the Python AWS CLI.
 Current **Phase 1 progress** is **100.00%**. Phase 1 focuses on a smaller core subset of commands, which is why its progress percentage is higher than overall parity.
 
-### Currently Implemented (9 services, ~163 commands)
+### Currently Implemented (9 services, ~166 commands)
 
 #### ✓ Configure
 - [x] `configure` - Interactive configuration
@@ -164,7 +164,7 @@ Current **Phase 1 progress** is **100.00%**. Phase 1 focuses on a smaller core s
 - [x] `update-function-configuration`
 - [x] `put-function-event-invoke-config`
 
-#### ✓ DynamoDB (9/12 core commands - 75%)
+#### ✓ DynamoDB (12/12 core commands - 100%)
 - [x] `list-tables`
 - [x] `describe-table`
 - [x] `create-table`
@@ -174,6 +174,9 @@ Current **Phase 1 progress** is **100.00%**. Phase 1 focuses on a smaller core s
 - [x] `put-item`
 - [x] `delete-item`
 - [x] `scan`
+- [x] `query`
+- [x] `batch-get-item`
+- [x] `batch-write-item`
 
 ### Not Yet Implemented (42+ services)
 
@@ -183,7 +186,7 @@ Current **Phase 1 progress** is **100.00%**. Phase 1 focuses on a smaller core s
 
 **High Priority (Phase 2 - Weeks 5-8)**
 - [x] Lambda - Serverless functions (10+ commands)
-- [ ] DynamoDB - NoSQL database (12+ commands)
+- [x] DynamoDB - NoSQL database (12+ commands)
 - [ ] CloudFormation - Infrastructure as code (8+ commands)
 
 **Medium Priority (Phase 3 - Weeks 9-12)**
