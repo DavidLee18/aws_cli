@@ -1,5 +1,8 @@
 use anyhow::{Context, Result};
+use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::Client;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// List S3 buckets, or objects within a bucket.
 ///
@@ -26,6 +29,73 @@ pub async fn cmd_cp(client: &Client, src: &str, dst: &str) -> Result<()> {
         (true, true) => copy_object(client, src, dst).await,
         (false, false) => anyhow::bail!("At least one argument must be an S3 URI (s3://)"),
     }
+}
+
+/// Move/rename a local file or S3 object.
+pub async fn cmd_mv(client: &Client, src: &str, dst: &str) -> Result<()> {
+    let src_is_s3 = src.starts_with("s3://");
+    let dst_is_s3 = dst.starts_with("s3://");
+
+    match (src_is_s3, dst_is_s3) {
+        (false, false) => {
+            std::fs::rename(src, dst).with_context(|| format!("Failed to move {src} to {dst}"))?;
+            println!("move: {src} -> {dst}");
+            Ok(())
+        }
+        (false, true) => {
+            upload_file(client, src, dst).await?;
+            std::fs::remove_file(src)
+                .with_context(|| format!("Uploaded but failed to remove source file {src}"))?;
+            println!("move: {src} -> {dst}");
+            Ok(())
+        }
+        (true, false) => {
+            download_file(client, src, dst).await?;
+            cmd_rm(client, src).await?;
+            println!("move: {src} -> {dst}");
+            Ok(())
+        }
+        (true, true) => {
+            copy_object(client, src, dst).await?;
+            cmd_rm(client, src).await?;
+            println!("move: {src} -> {dst}");
+            Ok(())
+        }
+    }
+}
+
+/// Sync a local directory to/from S3.
+pub async fn cmd_sync(client: &Client, src: &str, dst: &str) -> Result<()> {
+    let src_is_s3 = src.starts_with("s3://");
+    let dst_is_s3 = dst.starts_with("s3://");
+
+    match (src_is_s3, dst_is_s3) {
+        (false, true) => sync_local_to_s3(client, src, dst).await,
+        (true, false) => sync_s3_to_local(client, src, dst).await,
+        _ => anyhow::bail!("sync currently supports local→S3 or S3→local"),
+    }
+}
+
+/// Generate a presigned URL for an S3 object.
+pub async fn cmd_presign(client: &Client, uri: &str, expires_in: u64) -> Result<()> {
+    let (bucket, key_opt) = parse_s3_uri(uri)?;
+    let key = key_opt
+        .filter(|k| !k.is_empty())
+        .context("s3 presign requires an object key")?;
+
+    let config = PresigningConfig::expires_in(Duration::from_secs(expires_in))
+        .context("Invalid expiration for presign")?;
+
+    let presigned = client
+        .get_object()
+        .bucket(&bucket)
+        .key(&key)
+        .presigned(config)
+        .await
+        .with_context(|| format!("Failed to presign s3://{bucket}/{key}"))?;
+
+    println!("{}", presigned.uri());
+    Ok(())
 }
 
 /// Remove an object from S3.
@@ -277,6 +347,144 @@ async fn copy_object(client: &Client, src_uri: &str, dst_uri: &str) -> Result<()
     Ok(())
 }
 
+async fn sync_local_to_s3(client: &Client, local_dir: &str, s3_uri: &str) -> Result<()> {
+    let base = Path::new(local_dir);
+    if !base.is_dir() {
+        anyhow::bail!("Local path for sync must be a directory");
+    }
+    let files = collect_local_files(base)?;
+    let (bucket, prefix_opt) = parse_s3_uri(s3_uri)?;
+    let base_prefix = prefix_opt.unwrap_or_default();
+    let base_prefix = if base_prefix.is_empty() || base_prefix.ends_with('/') {
+        base_prefix
+    } else {
+        format!("{base_prefix}/")
+    };
+
+    for file in files {
+        let rel = file
+            .strip_prefix(base)
+            .context("Failed to compute relative path during sync")?;
+        let rel_str = normalize_path_for_s3(rel);
+        let key = format!("{base_prefix}{rel_str}");
+
+        let body = aws_sdk_s3::primitives::ByteStream::from_path(&file)
+            .await
+            .with_context(|| format!("Cannot read file {}", file.display()))?;
+
+        client
+            .put_object()
+            .bucket(&bucket)
+            .key(&key)
+            .body(body)
+            .send()
+            .await
+            .with_context(|| {
+                format!("Failed to upload {} to s3://{bucket}/{key}", file.display())
+            })?;
+
+        println!("upload: {} -> s3://{bucket}/{key}", file.display());
+    }
+
+    Ok(())
+}
+
+async fn sync_s3_to_local(client: &Client, s3_uri: &str, local_dir: &str) -> Result<()> {
+    let (bucket, prefix_opt) = parse_s3_uri(s3_uri)?;
+    let prefix = prefix_opt.unwrap_or_default();
+    let dest_root = Path::new(local_dir);
+    std::fs::create_dir_all(dest_root).with_context(|| {
+        format!(
+            "Failed to create destination directory {}",
+            dest_root.display()
+        )
+    })?;
+
+    let mut continuation: Option<String> = None;
+    loop {
+        let mut req = client.list_objects_v2().bucket(&bucket);
+        if !prefix.is_empty() {
+            req = req.prefix(&prefix);
+        }
+        if let Some(ref tok) = continuation {
+            req = req.continuation_token(tok);
+        }
+
+        let resp = req
+            .send()
+            .await
+            .with_context(|| format!("Failed to list objects in {bucket}"))?;
+
+        for obj in resp.contents() {
+            if let Some(key) = obj.key() {
+                let rel = if prefix.is_empty() {
+                    key.to_string()
+                } else if let Some(stripped) = key.strip_prefix(&prefix) {
+                    stripped.to_string()
+                } else {
+                    anyhow::bail!(
+                        "S3 sync encountered key {key} that does not match expected prefix {prefix}"
+                    );
+                };
+                let dest_path = dest_root.join(&rel);
+                if let Some(parent) = dest_path.parent() {
+                    std::fs::create_dir_all(parent).with_context(|| {
+                        format!("Failed to create directory {}", parent.display())
+                    })?;
+                }
+
+                let data = client
+                    .get_object()
+                    .bucket(&bucket)
+                    .key(key)
+                    .send()
+                    .await
+                    .with_context(|| format!("Failed to download s3://{bucket}/{key}"))?
+                    .body
+                    .collect()
+                    .await
+                    .context("Failed to read response body")?;
+
+                std::fs::write(&dest_path, data.into_bytes())
+                    .with_context(|| format!("Cannot write {}", dest_path.display()))?;
+                println!("download: s3://{bucket}/{key} -> {}", dest_path.display());
+            }
+        }
+
+        match resp.next_continuation_token() {
+            Some(tok) => continuation = Some(tok.to_string()),
+            None => break,
+        }
+    }
+
+    Ok(())
+}
+
+fn collect_local_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut stack = vec![root.to_path_buf()];
+    let mut files = Vec::new();
+
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)
+            .with_context(|| format!("Failed to read directory {}", dir.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+
+    Ok(files)
+}
+
+fn normalize_path_for_s3(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 /// Parse `s3://bucket/optional/key` into `(bucket, Option<key>)`.
 pub fn parse_s3_uri(uri: &str) -> Result<(String, Option<String>)> {
     let without_scheme = uri
@@ -292,6 +500,26 @@ pub fn parse_s3_uri(uri: &str) -> Result<(String, Option<String>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+
+    struct TempDirGuard {
+        path: PathBuf,
+    }
+
+    impl TempDirGuard {
+        fn new(path: PathBuf) -> Self {
+            Self { path }
+        }
+    }
+
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
 
     #[test]
     fn test_parse_s3_uri_bucket_only() {
@@ -310,5 +538,45 @@ mod tests {
     #[test]
     fn test_parse_s3_uri_invalid() {
         assert!(parse_s3_uri("https://my-bucket/key").is_err());
+    }
+
+    #[test]
+    fn test_collect_local_files_nested() {
+        let seed = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!("aws_cli_sync_test_{seed}"));
+        let _guard = TempDirGuard::new(root.clone());
+
+        std::fs::create_dir_all(root.join("nested/inner")).unwrap();
+        std::fs::write(root.join("file1.txt"), "one").unwrap();
+        std::fs::write(root.join("nested/inner/file2.txt"), "two").unwrap();
+
+        let files = collect_local_files(&root).unwrap();
+        let mut rels: Vec<String> = files
+            .iter()
+            .map(|p| {
+                let rel = p
+                    .strip_prefix(&root)
+                    .expect("collected file should reside under the root directory");
+                normalize_path_for_s3(rel)
+            })
+            .collect();
+        rels.sort();
+
+        assert_eq!(rels, vec!["file1.txt", "nested/inner/file2.txt"]);
+    }
+
+    #[test]
+    fn test_normalize_path_for_s3_backslashes() {
+        let path = std::path::Path::new("dir\\sub\\file.txt");
+        assert_eq!(normalize_path_for_s3(path), "dir/sub/file.txt");
+    }
+
+    #[test]
+    fn test_normalize_path_for_s3_mixed() {
+        let mut path = std::path::PathBuf::new();
+        path.push("dir");
+        path.push("sub");
+        path.push("file.txt");
+        assert_eq!(normalize_path_for_s3(&path), "dir/sub/file.txt");
     }
 }

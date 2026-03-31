@@ -3,8 +3,8 @@ use aws_config::meta::region::RegionProviderChain;
 use clap::{Parser, Subcommand};
 
 use aws_cli::commands::{
-    dynamodb as dynamodb_cmd, ec2 as ec2_cmd, iam as iam_cmd, lambda as lambda_cmd,
-    rds as rds_cmd, s3 as s3_cmd, sso as sso_cmd, sts as sts_cmd,
+    dynamodb as dynamodb_cmd, ec2 as ec2_cmd, iam as iam_cmd, lambda as lambda_cmd, rds as rds_cmd,
+    s3 as s3_cmd, sso as sso_cmd, sts as sts_cmd,
 };
 use aws_cli::config as cfg;
 
@@ -110,6 +110,28 @@ enum S3Commands {
         /// Destination path (local or s3://).
         dst: String,
     },
+    /// Sync a directory to/from S3.
+    Sync {
+        /// Source path (local dir or s3://bucket/prefix).
+        src: String,
+        /// Destination path (local dir or s3://bucket/prefix).
+        dst: String,
+    },
+    /// Move/rename a local file or S3 object.
+    Mv {
+        /// Source path (local or s3://).
+        src: String,
+        /// Destination path (local or s3://).
+        dst: String,
+    },
+    /// Generate a presigned URL for an S3 object.
+    Presign {
+        /// S3 URI of the object to presign (s3://bucket/key).
+        uri: String,
+        /// Expiration in seconds (default: 3600).
+        #[arg(long, default_value_t = 3600)]
+        expires_in: u64,
+    },
     /// Remove an S3 object.
     Rm {
         /// S3 URI of the object to remove (s3://bucket/key).
@@ -171,6 +193,54 @@ enum Ec2Commands {
         /// Instance IDs to terminate.
         #[arg(value_name = "INSTANCE_ID", required = true)]
         instance_ids: Vec<String>,
+    },
+    /// Describe the status of EC2 instances.
+    DescribeInstanceStatus {
+        /// Instance IDs to query (omit for all).
+        #[arg(value_name = "INSTANCE_ID")]
+        instance_ids: Vec<String>,
+        /// Include all instances, even those not running.
+        #[arg(long)]
+        include_all_instances: bool,
+    },
+    /// Describe EC2 security groups.
+    DescribeSecurityGroups {
+        /// Group IDs to filter.
+        #[arg(long = "group-id", value_name = "GROUP_ID")]
+        group_ids: Vec<String>,
+        /// Group names to filter.
+        #[arg(long = "group-name", value_name = "GROUP_NAME")]
+        group_names: Vec<String>,
+    },
+    /// Describe EC2 key pairs.
+    DescribeKeyPairs {
+        /// Key pair names to filter.
+        #[arg(long = "key-name", value_name = "KEY_NAME")]
+        key_names: Vec<String>,
+    },
+    /// Create a new EC2 key pair (prints the private key).
+    CreateKeyPair {
+        /// Key pair name.
+        #[arg(long, required = true)]
+        key_name: String,
+    },
+    /// Delete an EC2 key pair.
+    DeleteKeyPair {
+        /// Key pair name.
+        #[arg(long, required = true)]
+        key_name: String,
+    },
+    /// Describe EBS volumes.
+    DescribeVolumes {
+        /// Volume IDs to filter (omit for all).
+        #[arg(value_name = "VOLUME_ID")]
+        volume_ids: Vec<String>,
+    },
+    /// Describe EBS snapshots.
+    DescribeSnapshots {
+        /// Snapshot IDs to filter (omit for all).
+        #[arg(value_name = "SNAPSHOT_ID")]
+        snapshot_ids: Vec<String>,
     },
     /// Describe EC2 instance types.
     DescribeInstanceTypes {
@@ -1000,28 +1070,24 @@ async fn main() -> Result<()> {
             aws_secret_access_key,
             region,
             output,
-        } => {
-            match subcommand {
-                Some(ConfigureCommands::Get { key }) => {
-                    cfg::run_configure_get(&key, &cli.profile)
-                        .map_err(anyhow::Error::from)?;
-                }
-                Some(ConfigureCommands::List) => {
-                    cfg::run_configure_list(&cli.profile)
-                        .map_err(anyhow::Error::from)?;
-                }
-                None => {
-                    cfg::run_configure(
-                        &cli.profile,
-                        aws_access_key_id.as_deref(),
-                        aws_secret_access_key.as_deref(),
-                        region.as_deref(),
-                        output.as_deref(),
-                    )
-                    .map_err(anyhow::Error::from)?;
-                }
+        } => match subcommand {
+            Some(ConfigureCommands::Get { key }) => {
+                cfg::run_configure_get(&key, &cli.profile).map_err(anyhow::Error::from)?;
             }
-        }
+            Some(ConfigureCommands::List) => {
+                cfg::run_configure_list(&cli.profile).map_err(anyhow::Error::from)?;
+            }
+            None => {
+                cfg::run_configure(
+                    &cli.profile,
+                    aws_access_key_id.as_deref(),
+                    aws_secret_access_key.as_deref(),
+                    region.as_deref(),
+                    output.as_deref(),
+                )
+                .map_err(anyhow::Error::from)?;
+            }
+        },
 
         service_command => {
             // Build an AWS config for all service commands.
@@ -1034,8 +1100,13 @@ async fn main() -> Result<()> {
                         S3Commands::Ls { uri, recursive } => {
                             s3_cmd::cmd_ls(&client, uri.as_deref(), recursive).await?
                         }
-                        S3Commands::Cp { src, dst } => {
-                            s3_cmd::cmd_cp(&client, &src, &dst).await?
+                        S3Commands::Cp { src, dst } => s3_cmd::cmd_cp(&client, &src, &dst).await?,
+                        S3Commands::Sync { src, dst } => {
+                            s3_cmd::cmd_sync(&client, &src, &dst).await?
+                        }
+                        S3Commands::Mv { src, dst } => s3_cmd::cmd_mv(&client, &src, &dst).await?,
+                        S3Commands::Presign { uri, expires_in } => {
+                            s3_cmd::cmd_presign(&client, &uri, expires_in).await?
                         }
                         S3Commands::Rm { uri } => s3_cmd::cmd_rm(&client, &uri).await?,
                         S3Commands::Mb { uri, region } => {
@@ -1068,6 +1139,39 @@ async fn main() -> Result<()> {
                         }
                         Ec2Commands::TerminateInstances { instance_ids } => {
                             ec2_cmd::cmd_terminate_instances(&client, &instance_ids).await?
+                        }
+                        Ec2Commands::DescribeInstanceStatus {
+                            instance_ids,
+                            include_all_instances,
+                        } => {
+                            ec2_cmd::cmd_describe_instance_status(
+                                &client,
+                                &instance_ids,
+                                include_all_instances,
+                            )
+                            .await?
+                        }
+                        Ec2Commands::DescribeSecurityGroups {
+                            group_ids,
+                            group_names,
+                        } => {
+                            ec2_cmd::cmd_describe_security_groups(&client, &group_ids, &group_names)
+                                .await?
+                        }
+                        Ec2Commands::DescribeKeyPairs { key_names } => {
+                            ec2_cmd::cmd_describe_key_pairs(&client, &key_names).await?
+                        }
+                        Ec2Commands::CreateKeyPair { key_name } => {
+                            ec2_cmd::cmd_create_key_pair(&client, &key_name).await?
+                        }
+                        Ec2Commands::DeleteKeyPair { key_name } => {
+                            ec2_cmd::cmd_delete_key_pair(&client, &key_name).await?
+                        }
+                        Ec2Commands::DescribeVolumes { volume_ids } => {
+                            ec2_cmd::cmd_describe_volumes(&client, &volume_ids).await?
+                        }
+                        Ec2Commands::DescribeSnapshots { snapshot_ids } => {
+                            ec2_cmd::cmd_describe_snapshots(&client, &snapshot_ids).await?
                         }
                         Ec2Commands::DescribeInstanceTypes { instance_types } => {
                             ec2_cmd::cmd_describe_instance_types(&client, &instance_types).await?
@@ -1155,41 +1259,61 @@ async fn main() -> Result<()> {
                         IamCommands::AttachGroupPolicy {
                             group_name,
                             policy_arn,
-                        } => iam_cmd::cmd_attach_group_policy(&client, &group_name, &policy_arn)
-                            .await?,
+                        } => {
+                            iam_cmd::cmd_attach_group_policy(&client, &group_name, &policy_arn)
+                                .await?
+                        }
                         IamCommands::DetachGroupPolicy {
                             group_name,
                             policy_arn,
-                        } => iam_cmd::cmd_detach_group_policy(&client, &group_name, &policy_arn)
-                            .await?,
+                        } => {
+                            iam_cmd::cmd_detach_group_policy(&client, &group_name, &policy_arn)
+                                .await?
+                        }
                         IamCommands::AddUserToGroup {
                             group_name,
                             user_name,
-                        } => iam_cmd::cmd_add_user_to_group(&client, &group_name, &user_name).await?,
+                        } => {
+                            iam_cmd::cmd_add_user_to_group(&client, &group_name, &user_name).await?
+                        }
                         IamCommands::RemoveUserFromGroup {
                             group_name,
                             user_name,
-                        } => iam_cmd::cmd_remove_user_from_group(&client, &group_name, &user_name)
-                            .await?,
+                        } => {
+                            iam_cmd::cmd_remove_user_from_group(&client, &group_name, &user_name)
+                                .await?
+                        }
                         IamCommands::ListGroupsForUser { user_name } => {
                             iam_cmd::cmd_list_groups_for_user(&client, &user_name).await?
                         }
                         IamCommands::AttachUserPolicy {
                             user_name,
                             policy_arn,
-                        } => iam_cmd::cmd_attach_user_policy(&client, &user_name, &policy_arn).await?,
+                        } => {
+                            iam_cmd::cmd_attach_user_policy(&client, &user_name, &policy_arn)
+                                .await?
+                        }
                         IamCommands::DetachUserPolicy {
                             user_name,
                             policy_arn,
-                        } => iam_cmd::cmd_detach_user_policy(&client, &user_name, &policy_arn).await?,
+                        } => {
+                            iam_cmd::cmd_detach_user_policy(&client, &user_name, &policy_arn)
+                                .await?
+                        }
                         IamCommands::AttachRolePolicy {
                             role_name,
                             policy_arn,
-                        } => iam_cmd::cmd_attach_role_policy(&client, &role_name, &policy_arn).await?,
+                        } => {
+                            iam_cmd::cmd_attach_role_policy(&client, &role_name, &policy_arn)
+                                .await?
+                        }
                         IamCommands::DetachRolePolicy {
                             role_name,
                             policy_arn,
-                        } => iam_cmd::cmd_detach_role_policy(&client, &role_name, &policy_arn).await?,
+                        } => {
+                            iam_cmd::cmd_detach_role_policy(&client, &role_name, &policy_arn)
+                                .await?
+                        }
                         IamCommands::ListAttachedUserPolicies { user_name } => {
                             iam_cmd::cmd_list_attached_user_policies(&client, &user_name).await?
                         }
@@ -1208,15 +1332,22 @@ async fn main() -> Result<()> {
                         IamCommands::GetUserPolicy {
                             user_name,
                             policy_name,
-                        } => iam_cmd::cmd_get_user_policy(&client, &user_name, &policy_name).await?,
+                        } => {
+                            iam_cmd::cmd_get_user_policy(&client, &user_name, &policy_name).await?
+                        }
                         IamCommands::GetRolePolicy {
                             role_name,
                             policy_name,
-                        } => iam_cmd::cmd_get_role_policy(&client, &role_name, &policy_name).await?,
+                        } => {
+                            iam_cmd::cmd_get_role_policy(&client, &role_name, &policy_name).await?
+                        }
                         IamCommands::GetGroupPolicy {
                             group_name,
                             policy_name,
-                        } => iam_cmd::cmd_get_group_policy(&client, &group_name, &policy_name).await?,
+                        } => {
+                            iam_cmd::cmd_get_group_policy(&client, &group_name, &policy_name)
+                                .await?
+                        }
                         IamCommands::PutUserPolicy {
                             user_name,
                             policy_name,
@@ -1233,7 +1364,10 @@ async fn main() -> Result<()> {
                         IamCommands::DeleteUserPolicy {
                             user_name,
                             policy_name,
-                        } => iam_cmd::cmd_delete_user_policy(&client, &user_name, &policy_name).await?,
+                        } => {
+                            iam_cmd::cmd_delete_user_policy(&client, &user_name, &policy_name)
+                                .await?
+                        }
                         IamCommands::PutRolePolicy {
                             role_name,
                             policy_name,
@@ -1250,7 +1384,10 @@ async fn main() -> Result<()> {
                         IamCommands::DeleteRolePolicy {
                             role_name,
                             policy_name,
-                        } => iam_cmd::cmd_delete_role_policy(&client, &role_name, &policy_name).await?,
+                        } => {
+                            iam_cmd::cmd_delete_role_policy(&client, &role_name, &policy_name)
+                                .await?
+                        }
                         IamCommands::PutGroupPolicy {
                             group_name,
                             policy_name,
@@ -1267,7 +1404,10 @@ async fn main() -> Result<()> {
                         IamCommands::DeleteGroupPolicy {
                             group_name,
                             policy_name,
-                        } => iam_cmd::cmd_delete_group_policy(&client, &group_name, &policy_name).await?,
+                        } => {
+                            iam_cmd::cmd_delete_group_policy(&client, &group_name, &policy_name)
+                                .await?
+                        }
                         IamCommands::CreateAccessKey { user_name } => {
                             iam_cmd::cmd_create_access_key(&client, &user_name).await?
                         }
@@ -1377,13 +1517,12 @@ async fn main() -> Result<()> {
                             start_url,
                             sso_region,
                         } => {
-                            let region_cfg = aws_config::defaults(
-                                aws_config::BehaviorVersion::latest(),
-                            )
-                            .region(aws_config::Region::new(sso_region.clone()))
-                            .profile_name(cli.profile.clone())
-                            .load()
-                            .await;
+                            let region_cfg =
+                                aws_config::defaults(aws_config::BehaviorVersion::latest())
+                                    .region(aws_config::Region::new(sso_region.clone()))
+                                    .profile_name(cli.profile.clone())
+                                    .load()
+                                    .await;
                             let oidc_client = aws_sdk_ssooidc::Client::new(&region_cfg);
                             sso_cmd::cmd_login(&oidc_client, &start_url, &sso_region).await?
                         }
@@ -1479,7 +1618,8 @@ async fn main() -> Result<()> {
                         RdsCommands::RebootDbInstance {
                             db_instance_identifier,
                         } => {
-                            rds_cmd::cmd_reboot_db_instance(&client, &db_instance_identifier).await?
+                            rds_cmd::cmd_reboot_db_instance(&client, &db_instance_identifier)
+                                .await?
                         }
                         RdsCommands::DescribeDbSnapshots {
                             db_instance_identifier,
@@ -1506,7 +1646,8 @@ async fn main() -> Result<()> {
                         RdsCommands::DeleteDbSnapshot {
                             db_snapshot_identifier,
                         } => {
-                            rds_cmd::cmd_delete_db_snapshot(&client, &db_snapshot_identifier).await?
+                            rds_cmd::cmd_delete_db_snapshot(&client, &db_snapshot_identifier)
+                                .await?
                         }
                         RdsCommands::RestoreDbInstanceFromDbSnapshot {
                             db_instance_identifier,

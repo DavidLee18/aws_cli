@@ -4,27 +4,29 @@ A Rust port of the official AWS CLI, providing a fast, single-binary alternative
 
 ## Project Status
 
-This is an **active implementation** of core AWS CLI functionality in Rust. Currently at **46.68%** feature parity with the Python AWS CLI.
-Current **Phase 1 progress** is **61.06%**.
+This is an **active implementation** of core AWS CLI functionality in Rust. Currently at **50.53%** feature parity with the Python AWS CLI.
+Current **Phase 1 progress** is **69.78%**. Phase 1 focuses on a smaller core subset of commands, which is why its progress percentage is higher than overall parity.
 
-### Currently Implemented (9 services, ~120 commands)
+### Currently Implemented (9 services, ~130 commands)
 
 #### ✓ Configure
 - [x] `configure` - Interactive configuration
 - [x] `configure get` - Get configuration value
 - [x] `configure list` - List all configuration
 
-#### ✓ S3 (5/15 core commands - 33%)
+#### ✓ S3 (8/15 core commands - 53%)
 - [x] `ls` - List buckets/objects
 - [x] `cp` - Copy files
+- [x] `sync` - Sync directories
+- [x] `mv` - Move objects
+- [x] `presign` - Generate presigned URLs
 - [x] `rm` - Remove objects
 - [x] `mb` - Make bucket
 - [x] `rb` - Remove bucket
-- [ ] `sync` - Sync directories
-- [ ] `mv` - Move objects
-- [ ] `presign` - Generate presigned URLs
+- [ ] `website` - Bucket website configuration
+- [ ] `acl` - ACL management
 
-#### ✓ EC2 (7/40 core commands - 17.5%)
+#### ✓ EC2 (14/40 core commands - 35%)
 - [x] `describe-instances` - List instances
 - [x] `describe-regions` - List regions
 - [x] `start-instances` - Start instances
@@ -32,10 +34,17 @@ Current **Phase 1 progress** is **61.06%**.
 - [x] `reboot-instances` - Reboot instances
 - [x] `terminate-instances` - Terminate instances
 - [x] `describe-instance-types` - List instance types
+- [x] `describe-instance-status` - Show instance/system status
+- [x] `describe-security-groups` - List security groups
+- [x] `describe-key-pairs` - List key pairs
+- [x] `create-key-pair` - Create a key pair
+- [x] `delete-key-pair` - Delete a key pair
+- [x] `describe-volumes` - List EBS volumes
+- [x] `describe-snapshots` - List EBS snapshots
 - [ ] `run-instances` - Launch instances
-- [ ] Security group commands (4)
-- [ ] Key pair commands (4)
-- [ ] Volume & snapshot commands
+- [ ] Security group ingress/egress management
+- [ ] Key pair import
+- [ ] Volume & snapshot lifecycle
 
 #### ✓ IAM (50/50 core commands - 100%)
 - [x] `create-role` - Create IAM roles
@@ -172,8 +181,8 @@ Current **Phase 1 progress** is **61.06%**.
 - ~40 new commands, ~100-150 hours
 
 **Phase 1 progress snapshot (current):**
-- S3: 5/15 (remaining 10)
-- EC2: 7/40 (remaining 33)
+- S3: 8/15 (remaining 7)
+- EC2: 14/40 (remaining 26)
 - IAM: 50/50 (remaining 0)
 - STS: 4/4 (remaining 0)
 - SSO: 4/4 (remaining 0)
