@@ -1374,9 +1374,7 @@ fn parse_tag_kv_pairs(raw: &[String]) -> Result<Vec<(String, String)>> {
     let mut out = Vec::with_capacity(raw.len());
     for entry in raw {
         if entry.is_empty() {
-            return Err(anyhow::anyhow!(
-                "Tag cannot be empty (expected key=value): {entry}"
-            ));
+            return Err(anyhow::anyhow!("Tag cannot be empty (expected key=value)"));
         }
 
         if !entry.contains('=') {
@@ -1386,6 +1384,7 @@ fn parse_tag_kv_pairs(raw: &[String]) -> Result<Vec<(String, String)>> {
         }
 
         let mut parts = entry.splitn(2, '=');
+        // Safe unwrap: splitn always yields at least one part after contains('=') check.
         let key = parts.next().unwrap();
         let value = parts.next().unwrap_or("");
 
