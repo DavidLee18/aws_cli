@@ -792,6 +792,120 @@ pub async fn cmd_get_group_policy(
     Ok(())
 }
 
+/// Add or update an inline policy document for an IAM user.
+pub async fn cmd_put_user_policy(
+    client: &Client,
+    user_name: &str,
+    policy_name: &str,
+    policy_document: &str,
+) -> Result<()> {
+    client
+        .put_user_policy()
+        .user_name(user_name)
+        .policy_name(policy_name)
+        .policy_document(policy_document)
+        .send()
+        .await
+        .context("Failed to put user policy")?;
+
+    println!("Updated inline policy '{policy_name}' on user '{user_name}'");
+    Ok(())
+}
+
+/// Delete an inline policy embedded in an IAM user.
+pub async fn cmd_delete_user_policy(
+    client: &Client,
+    user_name: &str,
+    policy_name: &str,
+) -> Result<()> {
+    client
+        .delete_user_policy()
+        .user_name(user_name)
+        .policy_name(policy_name)
+        .send()
+        .await
+        .context("Failed to delete user policy")?;
+
+    println!("Deleted inline policy '{policy_name}' from user '{user_name}'");
+    Ok(())
+}
+
+/// Add or update an inline policy document for an IAM role.
+pub async fn cmd_put_role_policy(
+    client: &Client,
+    role_name: &str,
+    policy_name: &str,
+    policy_document: &str,
+) -> Result<()> {
+    client
+        .put_role_policy()
+        .role_name(role_name)
+        .policy_name(policy_name)
+        .policy_document(policy_document)
+        .send()
+        .await
+        .context("Failed to put role policy")?;
+
+    println!("Updated inline policy '{policy_name}' on role '{role_name}'");
+    Ok(())
+}
+
+/// Delete an inline policy embedded in an IAM role.
+pub async fn cmd_delete_role_policy(
+    client: &Client,
+    role_name: &str,
+    policy_name: &str,
+) -> Result<()> {
+    client
+        .delete_role_policy()
+        .role_name(role_name)
+        .policy_name(policy_name)
+        .send()
+        .await
+        .context("Failed to delete role policy")?;
+
+    println!("Deleted inline policy '{policy_name}' from role '{role_name}'");
+    Ok(())
+}
+
+/// Add or update an inline policy document for an IAM group.
+pub async fn cmd_put_group_policy(
+    client: &Client,
+    group_name: &str,
+    policy_name: &str,
+    policy_document: &str,
+) -> Result<()> {
+    client
+        .put_group_policy()
+        .group_name(group_name)
+        .policy_name(policy_name)
+        .policy_document(policy_document)
+        .send()
+        .await
+        .context("Failed to put group policy")?;
+
+    println!("Updated inline policy '{policy_name}' on group '{group_name}'");
+    Ok(())
+}
+
+/// Delete an inline policy embedded in an IAM group.
+pub async fn cmd_delete_group_policy(
+    client: &Client,
+    group_name: &str,
+    policy_name: &str,
+) -> Result<()> {
+    client
+        .delete_group_policy()
+        .group_name(group_name)
+        .policy_name(policy_name)
+        .send()
+        .await
+        .context("Failed to delete group policy")?;
+
+    println!("Deleted inline policy '{policy_name}' from group '{group_name}'");
+    Ok(())
+}
+
 /// Get details about the current IAM account alias(es).
 pub async fn cmd_list_account_aliases(client: &Client) -> Result<()> {
     let resp = client

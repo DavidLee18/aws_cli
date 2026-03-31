@@ -4,10 +4,10 @@ A Rust port of the official AWS CLI, providing a fast, single-binary alternative
 
 ## Project Status
 
-This is an **active implementation** of core AWS CLI functionality in Rust. Currently at **40.86%** feature parity with the Python AWS CLI.
-Current **Phase 1 progress** is **48.67%**.
+This is an **active implementation** of core AWS CLI functionality in Rust. Currently at **43.20%** feature parity with the Python AWS CLI.
+Current **Phase 1 progress** is **53.98%**.
 
-### Currently Implemented (9 services, ~105 commands)
+### Currently Implemented (9 services, ~111 commands)
 
 #### ✓ Configure
 - [x] `configure` - Interactive configuration
@@ -37,7 +37,7 @@ Current **Phase 1 progress** is **48.67%**.
 - [ ] Key pair commands (4)
 - [ ] Volume & snapshot commands
 
-#### ✓ IAM (35/50 core commands - 70%)
+#### ✓ IAM (41/50 core commands - 82%)
 - [x] `create-role` - Create IAM roles
 - [x] `create-user` - Create IAM users
 - [x] `delete-user` - Delete IAM users
@@ -72,6 +72,12 @@ Current **Phase 1 progress** is **48.67%**.
 - [x] `get-user-policy` - Get inline policy document for user
 - [x] `get-role-policy` - Get inline policy document for role
 - [x] `get-group-policy` - Get inline policy document for group
+- [x] `put-user-policy` - Add or update inline policy document for user
+- [x] `delete-user-policy` - Delete inline policy document from user
+- [x] `put-role-policy` - Add or update inline policy document for role
+- [x] `delete-role-policy` - Delete inline policy document from role
+- [x] `put-group-policy` - Add or update inline policy document for group
+- [x] `delete-group-policy` - Delete inline policy document from group
 - [x] `list-account-aliases` - List account aliases
 - [ ] User CRUD operations (4)
 - [ ] Role CRUD operations (4)
@@ -163,7 +169,7 @@ Current **Phase 1 progress** is **48.67%**.
 **Phase 1 progress snapshot (current):**
 - S3: 5/15 (remaining 10)
 - EC2: 7/40 (remaining 33)
-- IAM: 35/50 (remaining 15)
+- IAM: 41/50 (remaining 9)
 - STS: 4/4 (remaining 0)
 - SSO: 4/4 (remaining 0)
 

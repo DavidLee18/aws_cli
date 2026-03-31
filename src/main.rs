@@ -445,6 +445,69 @@ enum IamCommands {
         #[arg(long, required = true)]
         policy_name: String,
     },
+    /// Add or update an inline policy document for an IAM user.
+    PutUserPolicy {
+        /// IAM user name to update.
+        #[arg(long, required = true)]
+        user_name: String,
+        /// Inline policy name.
+        #[arg(long, required = true)]
+        policy_name: String,
+        /// IAM policy document JSON.
+        #[arg(long, required = true)]
+        policy_document: String,
+    },
+    /// Delete an inline policy embedded in an IAM user.
+    DeleteUserPolicy {
+        /// IAM user name to update.
+        #[arg(long, required = true)]
+        user_name: String,
+        /// Inline policy name to delete.
+        #[arg(long, required = true)]
+        policy_name: String,
+    },
+    /// Add or update an inline policy document for an IAM role.
+    PutRolePolicy {
+        /// IAM role name to update.
+        #[arg(long, required = true)]
+        role_name: String,
+        /// Inline policy name.
+        #[arg(long, required = true)]
+        policy_name: String,
+        /// IAM policy document JSON.
+        #[arg(long, required = true)]
+        policy_document: String,
+    },
+    /// Delete an inline policy embedded in an IAM role.
+    DeleteRolePolicy {
+        /// IAM role name to update.
+        #[arg(long, required = true)]
+        role_name: String,
+        /// Inline policy name to delete.
+        #[arg(long, required = true)]
+        policy_name: String,
+    },
+    /// Add or update an inline policy document for an IAM group.
+    PutGroupPolicy {
+        /// IAM group name to update.
+        #[arg(long, required = true)]
+        group_name: String,
+        /// Inline policy name.
+        #[arg(long, required = true)]
+        policy_name: String,
+        /// IAM policy document JSON.
+        #[arg(long, required = true)]
+        policy_document: String,
+    },
+    /// Delete an inline policy embedded in an IAM group.
+    DeleteGroupPolicy {
+        /// IAM group name to update.
+        #[arg(long, required = true)]
+        group_name: String,
+        /// Inline policy name to delete.
+        #[arg(long, required = true)]
+        policy_name: String,
+    },
     /// List account aliases.
     ListAccountAliases,
 }
@@ -1076,6 +1139,57 @@ async fn main() -> Result<()> {
                             group_name,
                             policy_name,
                         } => iam_cmd::cmd_get_group_policy(&client, &group_name, &policy_name).await?,
+                        IamCommands::PutUserPolicy {
+                            user_name,
+                            policy_name,
+                            policy_document,
+                        } => {
+                            iam_cmd::cmd_put_user_policy(
+                                &client,
+                                &user_name,
+                                &policy_name,
+                                &policy_document,
+                            )
+                            .await?
+                        }
+                        IamCommands::DeleteUserPolicy {
+                            user_name,
+                            policy_name,
+                        } => iam_cmd::cmd_delete_user_policy(&client, &user_name, &policy_name).await?,
+                        IamCommands::PutRolePolicy {
+                            role_name,
+                            policy_name,
+                            policy_document,
+                        } => {
+                            iam_cmd::cmd_put_role_policy(
+                                &client,
+                                &role_name,
+                                &policy_name,
+                                &policy_document,
+                            )
+                            .await?
+                        }
+                        IamCommands::DeleteRolePolicy {
+                            role_name,
+                            policy_name,
+                        } => iam_cmd::cmd_delete_role_policy(&client, &role_name, &policy_name).await?,
+                        IamCommands::PutGroupPolicy {
+                            group_name,
+                            policy_name,
+                            policy_document,
+                        } => {
+                            iam_cmd::cmd_put_group_policy(
+                                &client,
+                                &group_name,
+                                &policy_name,
+                                &policy_document,
+                            )
+                            .await?
+                        }
+                        IamCommands::DeleteGroupPolicy {
+                            group_name,
+                            policy_name,
+                        } => iam_cmd::cmd_delete_group_policy(&client, &group_name, &policy_name).await?,
                         IamCommands::ListAccountAliases => {
                             iam_cmd::cmd_list_account_aliases(&client).await?
                         }
