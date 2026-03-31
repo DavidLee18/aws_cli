@@ -485,7 +485,7 @@ pub async fn cmd_allocate_address(client: &Client, domain: &str) -> Result<()> {
         .with_context(|| format!("Failed to allocate address in domain {domain}"))?;
     let alloc_id = resp.allocation_id().unwrap_or("<unknown>");
     let pub_ip = resp.public_ip().unwrap_or("<unknown>");
-    println!("address allocated: {pub_ip} (allocation-id: {alloc_id})");
+    println!("Address allocated: {pub_ip} (Allocation ID: {alloc_id})");
     Ok(())
 }
 
@@ -508,7 +508,7 @@ pub async fn cmd_associate_address(
         .await
         .with_context(|| format!("Failed to associate address {allocation_id}"))?;
     let assoc = resp.association_id().unwrap_or("<unknown>");
-    println!("address associated: {allocation_id} (association-id: {assoc})");
+    println!("Address associated: {allocation_id} (Association ID: {assoc})");
     Ok(())
 }
 
@@ -520,7 +520,7 @@ pub async fn cmd_disassociate_address(client: &Client, association_id: &str) -> 
         .send()
         .await
         .with_context(|| format!("Failed to disassociate address {association_id}"))?;
-    println!("address disassociated: {association_id}");
+    println!("Address disassociated: {association_id}");
     Ok(())
 }
 
@@ -532,7 +532,7 @@ pub async fn cmd_release_address(client: &Client, allocation_id: &str) -> Result
         .send()
         .await
         .with_context(|| format!("Failed to release address {allocation_id}"))?;
-    println!("address released: {allocation_id}");
+    println!("Address released: {allocation_id}");
     Ok(())
 }
 
@@ -555,7 +555,7 @@ pub async fn cmd_create_security_group(
         .await
         .with_context(|| format!("Failed to create security group {group_name}"))?;
     let gid = resp.group_id().unwrap_or("<unknown>");
-    println!("security group created: {gid}");
+    println!("Security group created: {gid}");
     Ok(())
 }
 
@@ -602,7 +602,7 @@ pub async fn cmd_revoke_security_group_ingress(
         .send()
         .await
         .with_context(|| format!("Failed to revoke ingress on {group_id}"))?;
-    println!("ingress revoked: {group_id} {protocol} {from_port}-{to_port} {cidr}");
+    println!("Ingress revoked: {group_id} {protocol} {from_port}-{to_port} {cidr}");
     Ok(())
 }
 
@@ -623,7 +623,7 @@ pub async fn cmd_revoke_security_group_egress(
         .send()
         .await
         .with_context(|| format!("Failed to revoke egress on {group_id}"))?;
-    println!("egress revoked: {group_id} {protocol} {from_port}-{to_port} {cidr}");
+    println!("Egress revoked: {group_id} {protocol} {from_port}-{to_port} {cidr}");
     Ok(())
 }
 
@@ -642,7 +642,7 @@ pub async fn cmd_attach_volume(
         .send()
         .await
         .with_context(|| format!("Failed to attach volume {volume_id} to {instance_id}"))?;
-    println!("volume attached: {volume_id} -> {instance_id} ({device})");
+    println!("Volume attached: {volume_id} -> {instance_id} ({device})");
     Ok(())
 }
 
@@ -664,7 +664,7 @@ pub async fn cmd_detach_volume(
     req.send()
         .await
         .with_context(|| format!("Failed to detach volume {volume_id}"))?;
-    println!("volume detached: {volume_id}");
+    println!("Volume detached: {volume_id}");
     Ok(())
 }
 
@@ -741,7 +741,7 @@ pub async fn cmd_create_tags(
         .send()
         .await
         .context("Failed to create tags")?;
-    println!("tags created on {} resource(s)", resource_ids.len());
+    println!("Tags created on {} resource(s)", resource_ids.len());
     Ok(())
 }
 
@@ -762,7 +762,7 @@ pub async fn cmd_delete_tags(
         .send()
         .await
         .context("Failed to delete tags")?;
-    println!("tags deleted on {} resource(s)", resource_ids.len());
+    println!("Tags deleted on {} resource(s)", resource_ids.len());
     Ok(())
 }
 
