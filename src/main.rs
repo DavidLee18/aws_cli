@@ -292,6 +292,24 @@ enum IamCommands {
         #[arg(long)]
         path: Option<String>,
     },
+    /// Get details for an IAM group.
+    GetGroup {
+        /// IAM group name to retrieve.
+        #[arg(long, required = true)]
+        group_name: String,
+    },
+    /// Delete an IAM group.
+    DeleteGroup {
+        /// IAM group name to delete.
+        #[arg(long, required = true)]
+        group_name: String,
+    },
+    /// List attached managed policies for an IAM group.
+    ListAttachedGroupPolicies {
+        /// IAM group name to query.
+        #[arg(long, required = true)]
+        group_name: String,
+    },
     /// List account aliases.
     ListAccountAliases,
 }
@@ -848,6 +866,15 @@ async fn main() -> Result<()> {
                         }
                         IamCommands::CreateGroup { group_name, path } => {
                             iam_cmd::cmd_create_group(&client, &group_name, path.as_deref()).await?
+                        }
+                        IamCommands::GetGroup { group_name } => {
+                            iam_cmd::cmd_get_group(&client, &group_name).await?
+                        }
+                        IamCommands::DeleteGroup { group_name } => {
+                            iam_cmd::cmd_delete_group(&client, &group_name).await?
+                        }
+                        IamCommands::ListAttachedGroupPolicies { group_name } => {
+                            iam_cmd::cmd_list_attached_group_policies(&client, &group_name).await?
                         }
                         IamCommands::ListAccountAliases => {
                             iam_cmd::cmd_list_account_aliases(&client).await?

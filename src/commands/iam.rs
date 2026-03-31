@@ -74,6 +74,42 @@ pub async fn cmd_create_group(client: &Client, group_name: &str, path: Option<&s
     Ok(())
 }
 
+/// Get details for a single IAM group.
+pub async fn cmd_get_group(client: &Client, group_name: &str) -> Result<()> {
+    let resp = client
+        .get_group()
+        .group_name(group_name)
+        .send()
+        .await
+        .context("Failed to get IAM group")?;
+
+    if let Some(group) = resp.group() {
+        println!("GroupName: {}", group.group_name());
+        println!("GroupId: {}", group.group_id());
+        println!("ARN: {}", group.arn());
+        println!("Path: {}", group.path());
+        println!("CreateDate: {}", group.create_date());
+    } else {
+        println!("No group data returned for: {group_name}");
+    }
+
+    println!("UsersInGroup: {}", resp.users().len());
+    Ok(())
+}
+
+/// Delete an IAM group.
+pub async fn cmd_delete_group(client: &Client, group_name: &str) -> Result<()> {
+    client
+        .delete_group()
+        .group_name(group_name)
+        .send()
+        .await
+        .context("Failed to delete IAM group")?;
+
+    println!("Deleted group: {group_name}");
+    Ok(())
+}
+
 /// Delete an IAM user.
 pub async fn cmd_delete_user(client: &Client, user_name: &str) -> Result<()> {
     client
@@ -364,6 +400,38 @@ pub async fn cmd_list_groups(client: &Client, path_prefix: Option<&str>) -> Resu
             break;
         }
     }
+    Ok(())
+}
+
+/// List managed policies attached to an IAM group.
+pub async fn cmd_list_attached_group_policies(client: &Client, group_name: &str) -> Result<()> {
+    let mut marker: Option<String> = None;
+    println!("{:<50} {}", "PolicyName", "PolicyArn");
+    println!("{:<50} {}", "----------", "---------");
+
+    loop {
+        let mut req = client.list_attached_group_policies().group_name(group_name);
+        if let Some(ref m) = marker {
+            req = req.marker(m);
+        }
+        let resp = req
+            .send()
+            .await
+            .context("Failed to list attached group policies")?;
+
+        for policy in resp.attached_policies() {
+            let name = policy.policy_name().unwrap_or(UNKNOWN);
+            let arn = policy.policy_arn().unwrap_or(UNKNOWN);
+            println!("{name:<50} {arn}");
+        }
+
+        if resp.is_truncated() {
+            marker = resp.marker().map(str::to_string);
+        } else {
+            break;
+        }
+    }
+
     Ok(())
 }
 
