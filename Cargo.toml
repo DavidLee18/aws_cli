@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [profile.release]
 # Optimize for size ("s" or "z"). "z" is generally the smallest.
-opt-level = "s"
+opt-level = "3"
 # Enable link-time optimization to allow the linker to remove unused code.
 lto = true
 # Strip all symbols from the binary (both debug and non-debug).
