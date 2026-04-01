@@ -9,6 +9,18 @@ license = "MIT"
 name = "aws"
 path = "src/main.rs"
 
+[profile.release]
+# Optimize for size ("s" or "z"). "z" is generally the smallest.
+opt-level = "z"
+# Enable link-time optimization to allow the linker to remove unused code.
+lto = true
+# Strip all symbols from the binary (both debug and non-debug).
+strip = true
+# Reduce the number of codegen units to 1 for maximum optimization.
+codegen-units = 1
+# Abort on panic (removes panic unwinding information).
+panic = "abort"
+
 [lib]
 name = "aws_cli"
 path = "src/lib.rs"
