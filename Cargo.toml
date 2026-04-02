@@ -1,6 +1,6 @@
 [package]
 name = "aws_cli"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Jaehyun Lee"]
 edition = "2021"
 description = "A CLI using AWS SDK, porting from original Python AWS CLI"
