@@ -1,9 +1,16 @@
 [package]
 name = "aws_cli"
 version = "0.1.0"
+authors = ["Jaehyun Lee"]
 edition = "2021"
 description = "A CLI using AWS SDK, porting from original Python AWS CLI"
 license = "MIT"
+categories = ["command-line-interface", "command-line-utilities"]
+repository = "https://github.com/DavidLee18/aws_cli"
+readme = "README.md"
+
+[badges]
+maintenance = { status = "experimental" }
 
 [[bin]]
 name = "aws"
