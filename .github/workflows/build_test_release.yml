@@ -42,6 +42,12 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           custom_tag: v${{ github.event.inputs.version }}
       - name: Apply Updated Version to Cargo.toml
+        if: github.event_name == 'push'
+        run: |
+          sed -i -r 's/version = "[0-9]+.[0-9]+.[0-9]+"/version = "${{ steps.tag_version.outputs.new_version }}"/' Cargo.toml
+          cat -e Cargo.toml
+      - name: Apply Updated Version to Cargo.toml
+        if: github.event_name == 'workflow_dispatch'
         run: |
           sed -i -r 's/version = "[0-9]+.[0-9]+.[0-9]+"/version = "${{ github.event.inputs.version }}"/' Cargo.toml
           cat -e Cargo.toml
