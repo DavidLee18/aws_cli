@@ -50,6 +50,7 @@ jobs:
           tag_name: ${{ steps.tag_version.outputs.new_tag }}
           commit_message: "sync version in Cargo.toml to ${{ steps.tag_version.outputs.new_version }}"
   build-and-test:
+    needs: update_version
     strategy:
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-15, macos-15-intel, windows-2025, windows-11-arm]
@@ -88,7 +89,7 @@ jobs:
           name: ${{ matrix.os }}
           path: aws-${{ matrix.os }}
   release:
-    needs: [update_version, build-and-test]
+    needs: [build-and-test]
     runs-on: ubuntu-latest
     permissions:
       contents: write
