@@ -1038,12 +1038,12 @@ enum StsCommands {
 enum SsoCommands {
     /// Start AWS SSO device authorization login.
     Login {
-        /// AWS SSO start URL.
-        #[arg(long, required = true)]
-        start_url: String,
-        /// AWS region hosting the SSO directory.
-        #[arg(long, required = true)]
-        sso_region: String,
+        /// AWS SSO start URL (reads from profile config if not provided).
+        #[arg(long)]
+        start_url: Option<String>,
+        /// AWS region hosting the SSO directory (reads from profile config if not provided).
+        #[arg(long)]
+        sso_region: Option<String>,
     },
     /// List AWS accounts available via SSO.
     ListAccounts {
@@ -2173,14 +2173,26 @@ async fn main() -> Result<()> {
                             start_url,
                             sso_region,
                         } => {
+                            // Read SSO configuration from profile if not provided via CLI
+                            let (final_start_url, final_sso_region) = match (start_url, sso_region) {
+                                (Some(url), Some(region)) => (url.clone(), region.clone()),
+                                (url_opt, region_opt) => {
+                                    let sso_config = cfg::read_sso_config(&cli.profile)
+                                        .map_err(|e| anyhow::anyhow!("Failed to read SSO configuration from profile: {}. Either provide --start-url and --sso-region, or configure them in ~/.aws/config", e))?;
+                                    let url = url_opt.clone().unwrap_or(sso_config.sso_start_url);
+                                    let region = region_opt.clone().unwrap_or(sso_config.sso_region);
+                                    (url, region)
+                                }
+                            };
+
                             let region_cfg =
                                 aws_config::defaults(aws_config::BehaviorVersion::latest())
-                                    .region(aws_config::Region::new(sso_region.clone()))
+                                    .region(aws_config::Region::new(final_sso_region.clone()))
                                     .profile_name(cli.profile.clone())
                                     .load()
                                     .await;
                             let oidc_client = aws_sdk_ssooidc::Client::new(&region_cfg);
-                            sso_cmd::cmd_login(&oidc_client, &start_url, &sso_region).await?
+                            sso_cmd::cmd_login(&oidc_client, &final_start_url, &final_sso_region).await?
                         }
                         SsoCommands::ListAccounts { access_token } => {
                             sso_cmd::cmd_list_accounts(&client, &access_token).await?

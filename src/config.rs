@@ -288,6 +288,37 @@ fn get_ini_value(content: &IniContent, section: &str, key: &str) -> Option<Strin
     None
 }
 
+/// Read SSO configuration from the profile in ~/.aws/config
+pub fn read_sso_config(profile: &str) -> Result<SsoConfig, CliError> {
+    let dir = aws_dir()?;
+    let config_path = dir.join("config");
+    let content = read_ini_file(&config_path)?;
+
+    let config_section = if profile == "default" {
+        "default".to_string()
+    } else {
+        format!("profile {profile}")
+    };
+
+    let sso_start_url = get_ini_value(&content, &config_section, "sso_start_url")
+        .ok_or_else(|| CliError::Config(format!("Profile '{}' does not have sso_start_url configured", profile)))?;
+
+    let sso_region = get_ini_value(&content, &config_section, "sso_region")
+        .ok_or_else(|| CliError::Config(format!("Profile '{}' does not have sso_region configured", profile)))?;
+
+    Ok(SsoConfig {
+        sso_start_url,
+        sso_region,
+    })
+}
+
+/// SSO configuration from profile
+#[derive(Debug)]
+pub struct SsoConfig {
+    pub sso_start_url: String,
+    pub sso_region: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
