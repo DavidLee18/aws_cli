@@ -43,7 +43,8 @@ jobs:
           custom_tag: ${{ github.event.inputs.version }}
       - name: Apply Updated Version to Cargo.toml
         run: |
-          sed -i -r 's/^version = "[0-9]+.[0-9]+.[0-9]+$"/version = "${{ steps.tag_version.outputs.new_version }}"/' Cargo.toml
+          sed -i -r 's/^version = "[0-9]+.[0-9]+.[0-9]+"/^version = "${{ steps.tag_version.outputs.new_version }}"/' Cargo.toml
+          cat -e Cargo.toml
           cargo publish --dry-run --allow-dirty
       - uses: stefanzweifel/git-auto-commit-action@04702edda442b2e678b25b537cec683a1493fcb9
         with:
