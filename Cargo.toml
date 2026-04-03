@@ -8,6 +8,7 @@ license = "MIT"
 categories = ["command-line-interface", "command-line-utilities"]
 repository = "https://github.com/DavidLee18/aws_cli"
 readme = "README.md"
+rust-version = "1.91.1"
 
 [badges]
 maintenance = { status = "experimental" }
