@@ -44,11 +44,11 @@ jobs:
       - name: Apply Updated Version to Cargo.toml
         run: |
           sed -i -r 's/version = "[0-9]+.[0-9]+.[0-9]+"/version = "${{ steps.tag_version.outputs.new_version }}"/' Cargo.toml
-          cat -e Cargo.toml
+          cargo publish --dry-run
       - uses: stefanzweifel/git-auto-commit-action@04702edda442b2e678b25b537cec683a1493fcb9
         with:
           tag_name: ${{ steps.tag_version.outputs.new_tag }}
-          commit_message: "set version to ${{ steps.tag_version.outputs.new_version }}"
+          commit_message: "sync version in Cargo.toml to ${{ steps.tag_version.outputs.new_version }}"
   build-and-test:
     strategy:
       matrix:
