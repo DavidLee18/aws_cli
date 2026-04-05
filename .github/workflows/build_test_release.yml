@@ -3,8 +3,6 @@ name: Build, Test and Release
 on:
   push:
     branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
   workflow_dispatch:
     inputs:
       version:
@@ -17,7 +15,6 @@ env:
   
 jobs:
   update_version:
-    if: github.event_name != 'pull_request'
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -54,7 +51,19 @@ jobs:
     needs: update_version
     strategy:
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15, macos-15-intel, windows-2025, windows-11-arm]
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
@@ -65,7 +74,7 @@ jobs:
         with:
           # Comma-separated list of Rust toolchain specifications. Last version becomes the default. -- see https://rust-lang.github.io/rustup/concepts/toolchains.html#toolchain-specification
           toolchain: # optional
-          # target: x86_64-unknown-linux-gnu # optional
+          target: ${{ matrix.target }} # optional
           components: # optional
           rustflags: # optional, default is -D warnings
           # Setup the last installed toolchain as the default via `rustup override`
@@ -73,24 +82,16 @@ jobs:
       - name: Test
         run: cargo test --verbose
       - name: Build
-        if: github.event_name != 'pull_request'
-        run: cargo build --release --verbose
-      - run: mv target/release/aws.exe aws-${{ matrix.os }}.exe
+        run: cargo build --release --verbose --target ${{ matrix.target }}
+      - run: tar -czf aws-${{ matrix.target }}.tar.gz target/${{ matrix.target }}/release/aws.exe
         if: contains(matrix.os, 'windows')
-      - run: mv target/release/aws aws-${{ matrix.os }}
+      - run: tar -czf aws-${{ matrix.target }}.tar.gz target/${{ matrix.target }}/release/aws
         if: contains(matrix.os, 'windows') == false
       - name: Upload Artifact
-        if: github.event_name != 'pull_request' && contains(matrix.os, 'windows')
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
         with:
-          name: ${{ matrix.os }}
-          path: aws-${{ matrix.os }}.exe
-      - name: Upload Artifact
-        if: github.event_name != 'pull_request' && contains(matrix.os, 'windows') == false
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
-        with:
-          name: ${{ matrix.os }}
-          path: aws-${{ matrix.os }}
+          name: ${{ matrix.target }}
+          path: aws-${{ matrix.target }}.tar.gz
   release:
     needs: [update_version, build-and-test]
     runs-on: ubuntu-latest
@@ -110,7 +111,7 @@ jobs:
           previous_tag: ${{ needs.update_version.outputs.previous_tag }}
           body: ${{ needs.update_version.outputs.changelog }}
           files: |
-            aws-*
+            aws-*.tar.gz
   publish:
     needs: [update_version, release]
     runs-on: ubuntu-latest
