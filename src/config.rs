@@ -300,15 +300,41 @@ pub fn read_sso_config(profile: &str) -> Result<SsoConfig, CliError> {
         format!("profile {profile}")
     };
 
-    let sso_start_url = get_ini_value(&content, &config_section, "sso_start_url")
-        .ok_or_else(|| CliError::Config(format!("Profile '{}' does not have sso_start_url configured", profile)))?;
+    // First try to get sso_start_url and sso_region directly from the profile
+    let sso_start_url = get_ini_value(&content, &config_section, "sso_start_url");
+    let sso_region = get_ini_value(&content, &config_section, "sso_region");
 
-    let sso_region = get_ini_value(&content, &config_section, "sso_region")
-        .ok_or_else(|| CliError::Config(format!("Profile '{}' does not have sso_region configured", profile)))?;
+    // If not found directly, check if profile has sso_session field for indirection
+    let (final_start_url, final_region) = match (sso_start_url, sso_region) {
+        (Some(url), Some(region)) => (url, region),
+        _ => {
+            // Try to find sso-session indirection
+            if let Some(sso_session) = get_ini_value(&content, &config_section, "sso_session") {
+                let session_section = format!("sso-session {}", sso_session);
+                let session_start_url = get_ini_value(&content, &session_section, "sso_start_url");
+                let session_region = get_ini_value(&content, &session_section, "sso_region");
+
+                match (session_start_url, session_region) {
+                    (Some(url), Some(region)) => (url, region),
+                    _ => {
+                        return Err(CliError::Config(format!(
+                            "Profile '{}' references sso-session '{}', but that session does not have sso_start_url and sso_region configured",
+                            profile, sso_session
+                        )));
+                    }
+                }
+            } else {
+                return Err(CliError::Config(format!(
+                    "Profile '{}' does not have sso_start_url configured. Either provide --start-url and --sso-region, or configure them in ~/.aws/config",
+                    profile
+                )));
+            }
+        }
+    };
 
     Ok(SsoConfig {
-        sso_start_url,
-        sso_region,
+        sso_start_url: final_start_url,
+        sso_region: final_region,
     })
 }
 
