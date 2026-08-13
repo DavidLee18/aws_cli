@@ -1,0 +1,35 @@
+{
+  "_comment": "Captured from `aws sts get-caller-identity --debug` (awscli 2.36.22) with the documented AWS example credentials and no config files. SigV4 is deterministic given credentials, timestamp and request, so this pins our signer against the reference byte-for-byte with no network and no real credentials. Regenerate by rerunning that command and re-extracting the botocore.auth DEBUG blocks.",
+  "credentials": {
+    "access_key_id": "AKIAIOSFODNN7EXAMPLE",
+    "secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+  },
+  "request": {
+    "method": "POST",
+    "url": "https://sts.us-east-1.amazonaws.com/",
+    "host": "sts.us-east-1.amazonaws.com",
+    "path": "/",
+    "query": "",
+    "content_type": "application/x-www-form-urlencoded; charset=utf-8",
+    "body": "Action=GetCallerIdentity&Version=2011-06-15"
+  },
+  "signing": {
+    "region": "us-east-1",
+    "service": "sts",
+    "timestamp": "20260813T214816Z",
+    "date": "20260813",
+    "signed_headers": "content-type;host;x-amz-date"
+  },
+  "expected": {
+    "body_sha256": "ab821ae955788b0e33ebd34c208442ccfc2d406e2edc5e7a39bd6458fbb4f843",
+    "canonical_request": "POST\n/\n\ncontent-type:application/x-www-form-urlencoded; charset=utf-8\nhost:sts.us-east-1.amazonaws.com\nx-amz-date:20260813T214816Z\n\ncontent-type;host;x-amz-date\nab821ae955788b0e33ebd34c208442ccfc2d406e2edc5e7a39bd6458fbb4f843",
+    "canonical_request_sha256": "4f746f71e0ea7186bef2ee7b4c754506bc370a9fcc8bb732841c27ce6cd8bb62",
+    "string_to_sign": "AWS4-HMAC-SHA256\n20260813T214816Z\n20260813/us-east-1/sts/aws4_request\n4f746f71e0ea7186bef2ee7b4c754506bc370a9fcc8bb732841c27ce6cd8bb62",
+    "signature": "893bafe22ed9c9cd584b4cf9d16b46e3cb77aa3106b93103bfc00faa42a06f61",
+    "authorization": "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260813/us-east-1/sts/aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature=893bafe22ed9c9cd584b4cf9d16b46e3cb77aa3106b93103bfc00faa42a06f61"
+  },
+  "notes": [
+    "amz-sdk-invocation-id, amz-sdk-request and user-agent are sent but NOT signed -- SignedHeaders covers only content-type, host, x-amz-date.",
+    "The endpoint comes from the ruleset with UseGlobalEndpoint=false, giving the regional sts.us-east-1.amazonaws.com rather than the legacy global sts.amazonaws.com."
+  ]
+}

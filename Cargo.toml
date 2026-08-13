@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+# Crates are added as they are implemented. The full planned layout is in README.md:
+# awsc (binary), model, args, protocol, runtime, output, custom.
+members = [
+    "crates/aws-cli-model",
+    "crates/aws-cli-protocol",
+    "crates/aws-cli-runtime",
+    "crates/aws-cli-output",
+    "crates/aws-cli-conformance",
+    "crates/awsc",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+aws-cli-model = { path = "crates/aws-cli-model" }
+aws-cli-protocol = { path = "crates/aws-cli-protocol" }
+aws-cli-runtime = { path = "crates/aws-cli-runtime" }
+aws-cli-output = { path = "crates/aws-cli-output" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+quick-xml = "0.37"
+thiserror = "2"
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util"] }
+tracing = "0.1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

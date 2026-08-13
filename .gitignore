@@ -1,0 +1,4 @@
+/target
+# Vendored Smithy models: ~110MB across the full catalogue, and reproducible via
+# scripts/fetch-models.sh. Pin with AWS_SDK_RUST_REF for a reproducible build.
+/models
