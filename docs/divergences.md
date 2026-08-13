@@ -78,8 +78,6 @@ the reference while building the STS vertical slice.
   take their declared defaults, which is what the reference uses absent explicit
   configuration.
 
-### Outstanding
-
 - **Credential chain** — implemented: environment variables, static profile keys,
   **SSO** (both the `sso-session` and legacy inline forms), **`credential_process`**,
   **ECS/EKS container roles**, and **IMDSv2**. Verified end to end: a live
@@ -98,11 +96,31 @@ the reference while building the STS vertical slice.
     keys in `~/.aws/config` (positions 5/7/8). The two files are therefore kept separate
     rather than merged, since a merged view cannot express that ordering.
 
-  Still outstanding: **assume-role** (`role_arn`, including `source_profile` chaining,
-  `credential_source`, and web identity) is detected and refused by name rather than
-  silently falling through; SSO **token refresh** via OIDC `CreateToken` is not
-  implemented, so an expired token requires `aws sso login` (the cache is shared with the
-  reference, so that works); and `aws login` / `login_session` is not supported.
+  **assume-role** is implemented: `source_profile` (recursive, so role chaining works,
+  guarded against cycles), `credential_source` (`Environment`/`EcsContainer`/
+  `Ec2InstanceMetadata`, matched case-insensitively), and web identity (unsigned
+  `AssumeRoleWithWebIdentity`). Session name defaults to `botocore-session-<epoch>` and is
+  excluded from the cache key when generated. Results are cached in `~/.aws/cli/cache`
+  using botocore's key — `sha1` over JSON with **Python's** `", "`/`": "` separators —
+  so the cache is shared with the reference in both directions.
+
+  **SSO token refresh** is implemented: a token inside the 15-minute window is renewed via
+  unsigned `sso-oidc:CreateToken` against `sso_region` and written back to the shared
+  cache.
+
+  Both of the reference's distinct SSO failure messages are reproduced verbatim, because
+  which one appears depends on the path: a locally-detected expiry gives botocore's
+  `TokenRetrievalError` wording, while a portal 401/403 gives `UnauthorizedSSOTokenError`.
+
+  Verified byte-identical to the reference (stdout, stderr and exit code) across five
+  paths: assume-role failure, `credential_process` success, expired SSO, unknown profile,
+  and rejected static credentials.
+
+  Still outstanding: the initial SSO **login** flow (`aws sso login`; the cache is shared,
+  so the reference's login works), `aws login` / `login_session`, and MFA input is not
+  hidden the way the reference's `getpass` hides it.
+
+### Outstanding
 
 - **Retries** are not implemented (the reference defaults to `standard` mode).
 

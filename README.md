@@ -63,7 +63,7 @@ Crates are added as they are implemented.
 | `aws-cli-model` | **implemented** | Smithy AST loader, shape index, botocore-compatible naming, overlays |
 | `aws-cli-conformance` | **implemented** | Differential testing against the reference CLI |
 | `aws-cli-protocol` | **awsQuery** | Serialise/deserialise; restXml, restJson1, awsJson 1.0/1.1, ec2Query to follow |
-| `aws-cli-runtime` | **partial** | sigv4 ✅, endpoint rulesets ✅ (14,112/14,112 AWS conformance cases), credentials ✅ (env, static, SSO, credential_process, IMDSv2, container) |
+| `aws-cli-runtime` | **partial** | sigv4 ✅, endpoint rulesets ✅ (14,112/14,112 AWS conformance cases), credentials ✅ (env, static, SSO + refresh, assume-role, credential_process, IMDSv2, container) |
 | `aws-cli-output` | **json** | `text`/`table`/`yaml` fail loudly rather than silently emitting JSON |
 | `awsc` | **runs** | The binary: dispatch, global args, exit codes |
 | `aws-cli-args` | planned | Shorthand syntax, `--cli-input-json`, `--generate-cli-skeleton` |
@@ -180,8 +180,8 @@ This is an independent project and is not affiliated with or endorsed by AWS.
    byte-for-byte against the reference) + endpoint + credentials + XML parse + JSON out
 5. ~~Endpoint ruleset interpreter (`smithy.rules#endpointRuleSet`)~~ ✅ — passes AWS's
    own suite, **14,112/14,112 cases across all 431 services**
-6. ~~Credential chain~~ ✅ — env, static, SSO, `credential_process`, IMDSv2, container.
-   Assume-role and SSO token refresh still outstanding
+6. ~~Credential chain~~ ✅ — env, static, SSO (+ OIDC refresh), assume-role (chaining,
+   `credential_source`, web identity), `credential_process`, IMDSv2, container
 7. Remaining five protocols
 8. Output formatters and `--query`
 9. Pagination/waiter *runtimes* (specs: `docs/pagination-runtime.md`; data already vendored)

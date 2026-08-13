@@ -8,12 +8,15 @@
 //! chain that silently falls through to the next provider can authenticate as the wrong
 //! identity, which is far worse than a clear error.
 
+pub mod assume_role;
 pub mod imds;
 pub mod process;
 pub mod profile;
 pub mod sso;
 
+use assume_role::AssumeRoleRequest;
 use profile::{Config, Section};
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone)]
 pub struct Credentials {
@@ -34,17 +37,39 @@ pub enum CredentialError {
     Process { profile: String, message: String },
     #[error("profile `{profile}`: {message}")]
     Sso { profile: String, message: String },
-    /// The reference's own wording for the case users hit most, plus the specific reason
-    /// (the reference gives none, and "which of the eleven cache files was stale" is
-    /// exactly what you want to know).
+    /// The reference has TWO distinct SSO failure messages and which one appears depends
+    /// on where the failure happened. Collapsing them into one would be a stderr
+    /// divergence, so both are reproduced verbatim.
+    ///
+    /// This one is botocore's `TokenRetrievalError` (`tokens.py`): the cached token is
+    /// missing, unusable, or expired with refresh unavailable or unsuccessful.
+    #[error("Error when retrieving token from sso: Token has expired and refresh failed")]
+    SsoTokenExpired { profile: String, detail: String },
+    /// botocore's `UnauthorizedSSOTokenError`: the portal itself rejected the token.
     #[error(
         "The SSO session associated with this profile has expired or is otherwise \
-         invalid. To refresh this SSO session run `aws sso login --profile {profile}`. \
-         ({detail})"
+         invalid. To refresh this SSO session run aws sso login with the corresponding \
+         profile."
     )]
-    SsoExpired { profile: String, detail: String },
+    SsoUnauthorized { profile: String },
     #[error("profile `{profile}` uses {mechanism}, which is not implemented yet")]
     Unsupported { profile: String, mechanism: &'static str },
+    #[error("profile `{profile}`: {message}")]
+    AssumeRole { profile: String, message: String },
+    /// STS rejected the AssumeRole call. The reference reports this exactly like any
+    /// other service error — same wording, same exit code 254 — rather than as a
+    /// credential-chain failure, so it is kept as its own variant.
+    #[error("An error occurred ({code}) when calling the {operation} operation: {message}")]
+    AssumeRoleService { code: String, message: String, operation: String },
+    /// botocore's `InvalidConfigError` cases, kept distinct so the message can name the
+    /// exact misconfiguration.
+    #[error("profile `{profile}`: {message}")]
+    InvalidConfig { profile: String, message: String },
+    #[error(
+        "Infinite loop in credential configuration detected. \
+         Attempting to load from profile `{profile}` which was already visited."
+    )]
+    ProfileCycle { profile: String },
     #[error(transparent)]
     Config(#[from] profile::ConfigError),
 }
@@ -60,13 +85,24 @@ impl CredentialError {
     pub fn is_configuration_error(&self) -> bool {
         matches!(self, CredentialError::NotFound)
     }
+
+    /// A rejected AssumeRole is a *client* error (254), like any other service failure.
+    pub fn is_client_error(&self) -> bool {
+        matches!(self, CredentialError::AssumeRoleService { .. })
+    }
 }
 
 /// Resolve credentials for the given profile.
 ///
+/// `region` is the caller's resolved region, used for any `sts:AssumeRole` call — botocore
+/// uses the session's first client region for this, not a per-profile setting.
+///
 /// Chain order follows botocore's `create_credential_resolver`; see [`from_profile`] for
 /// the within-profile ordering, which is *not* the intuitive one.
-pub fn resolve(explicit_profile: Option<&str>) -> Result<Credentials, CredentialError> {
+pub fn resolve(
+    explicit_profile: Option<&str>,
+    region: Option<&str>,
+) -> Result<Credentials, CredentialError> {
     // An explicitly-selected profile REMOVES the environment provider from the chain
     // entirely (botocore credentials.py:92 + :151-171). Without this, `--profile foo`
     // would silently authenticate as whatever AWS_ACCESS_KEY_ID happened to be exported.
@@ -84,7 +120,8 @@ pub fn resolve(explicit_profile: Option<&str>) -> Result<Credentials, Credential
     let name = profile::profile_name(explicit_profile);
 
     if config.profile_exists(&name) {
-        return from_profile(&config, &name);
+        let mut visited = BTreeSet::new();
+        return from_profile(&config, &name, region, &mut visited);
     }
     // An explicitly named profile that does not exist is an error; a missing `default`
     // just means "try the ambient providers".
@@ -132,17 +169,17 @@ fn from_ambient() -> Result<Credentials, CredentialError> {
 ///
 /// Steps 4 and 6 are why the two files are not merged: static keys in `config` lose to
 /// `credential_process`, while the same keys in `credentials` win.
-fn from_profile(config: &Config, name: &str) -> Result<Credentials, CredentialError> {
+fn from_profile(
+    config: &Config,
+    name: &str,
+    region: Option<&str>,
+    visited: &mut BTreeSet<String>,
+) -> Result<Credentials, CredentialError> {
     let merged = config.profile(name).unwrap_or_default();
 
     // 1 & 2: assume-role variants, before anything else.
     if merged.contains_key("role_arn") {
-        let mechanism = if merged.contains_key("web_identity_token_file") {
-            "web-identity assume-role"
-        } else {
-            "assume-role"
-        };
-        return Err(CredentialError::Unsupported { profile: name.to_string(), mechanism });
+        return resolve_assume_role(config, name, &merged, region, visited);
     }
 
     // 3: SSO.
@@ -168,6 +205,118 @@ fn from_profile(config: &Config, name: &str) -> Result<Credentials, CredentialEr
     // The profile exists but declares no credential mechanism (a region-only profile is
     // common); fall through to the ambient providers rather than failing outright.
     from_ambient()
+}
+
+/// Resolve a `role_arn` profile.
+///
+/// Source credentials come from `source_profile` (recursive, so role chaining works) or
+/// `credential_source` (one of the flat ambient providers). Exactly one must be present.
+fn resolve_assume_role(
+    config: &Config,
+    name: &str,
+    section: &Section,
+    region: Option<&str>,
+    visited: &mut BTreeSet<String>,
+) -> Result<Credentials, CredentialError> {
+    // Cycles are unbounded in depth but must terminate.
+    if !visited.insert(name.to_string()) {
+        return Err(CredentialError::ProfileCycle { profile: name.to_string() });
+    }
+
+    let role_arn = section.get("role_arn").cloned().unwrap_or_default();
+    let region = region.ok_or_else(|| CredentialError::InvalidConfig {
+        profile: name.to_string(),
+        message: "assuming a role requires a region".to_string(),
+    })?;
+
+    // Web identity is a different API and needs no source credentials.
+    if let Some(token_file) = section.get("web_identity_token_file") {
+        let token = std::fs::read_to_string(token_file).map_err(|e| {
+            CredentialError::InvalidConfig {
+                profile: name.to_string(),
+                message: format!("cannot read web_identity_token_file `{token_file}`: {e}"),
+            }
+        })?;
+        return assume_role::assume_role_with_web_identity(
+            region,
+            &role_arn,
+            token.trim(),
+            section.get("role_session_name").map(String::as_str),
+            name,
+        );
+    }
+
+    let has_source = section.contains_key("source_profile");
+    let has_credential_source = section.contains_key("credential_source");
+    if has_source && has_credential_source {
+        return Err(CredentialError::InvalidConfig {
+            profile: name.to_string(),
+            message: "contains both source_profile and credential_source".to_string(),
+        });
+    }
+
+    let source = if let Some(source_profile) = section.get("source_profile") {
+        if !config.profile_exists(source_profile) {
+            return Err(CredentialError::InvalidConfig {
+                profile: name.to_string(),
+                message: format!("source_profile `{source_profile}` does not exist"),
+            });
+        }
+        from_profile(config, source_profile, Some(region), visited)?
+    } else if let Some(credential_source) = section.get("credential_source") {
+        // Matched case-insensitively, as botocore does.
+        match credential_source.to_ascii_lowercase().as_str() {
+            "environment" => from_environment().ok_or(CredentialError::NotFound)?,
+            "ecscontainer" => imds::from_container()?.ok_or(CredentialError::NotFound)?,
+            "ec2instancemetadata" => {
+                imds::from_instance_metadata()?.ok_or(CredentialError::NotFound)?
+            }
+            _ => {
+                return Err(CredentialError::InvalidConfig {
+                    profile: name.to_string(),
+                    message: format!("credential_source `{credential_source}` is not valid"),
+                })
+            }
+        }
+    } else {
+        return Err(CredentialError::InvalidConfig {
+            profile: name.to_string(),
+            message: "role_arn requires source_profile or credential_source".to_string(),
+        });
+    };
+
+    let request = AssumeRoleRequest {
+        role_arn,
+        role_session_name: section.get("role_session_name").cloned(),
+        // botocore coerces with int() and silently drops an unparseable value.
+        duration_seconds: section.get("duration_seconds").and_then(|d| d.parse().ok()),
+        external_id: section.get("external_id").cloned(),
+        serial_number: section.get("mfa_serial").cloned(),
+        token_code: match section.get("mfa_serial") {
+            Some(serial) => Some(prompt_mfa(serial)?),
+            None => None,
+        },
+    };
+
+    assume_role::assume_role(&source, region, &request, name)
+}
+
+/// Prompt for an MFA code.
+///
+/// The reference hides the input via `getpass`; this does not, which is a deliberate
+/// divergence rather than an oversight — hiding it needs terminal control this crate
+/// otherwise has no reason to carry, and the code is single-use and short-lived.
+fn prompt_mfa(serial: &str) -> Result<String, CredentialError> {
+    use std::io::{BufRead, Write};
+    eprint!("Enter MFA code for {serial}: ");
+    let _ = std::io::stderr().flush();
+
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line).map_err(|e| CredentialError::AssumeRole {
+        profile: serial.to_string(),
+        message: format!("could not read MFA code: {e}"),
+    })?;
+    Ok(line.trim().to_string())
 }
 
 /// Static keys from one section. The access key alone triggers the provider; a missing
@@ -243,7 +392,7 @@ mod tests {
             .config_profiles
             .insert("p".into(), section(&[("credential_process", "should-not-run")]));
 
-        assert_eq!(from_profile(&config, "p").unwrap().access_key_id, "AKIA");
+        assert_eq!(from_profile(&config, "p", Some("us-east-1"), &mut BTreeSet::new()).unwrap().access_key_id, "AKIA");
     }
 
     /// ...but the same keys in `~/.aws/config` lose to it, because the providers sit on
@@ -261,7 +410,7 @@ mod tests {
         );
         // `false` exits non-zero, so reaching the process provider surfaces its error
         // rather than returning the config-file keys.
-        match from_profile(&config, "p") {
+        match from_profile(&config, "p", Some("us-east-1"), &mut BTreeSet::new()) {
             Err(CredentialError::Process { .. }) => {}
             other => panic!("credential_process should have run first, got {other:?}"),
         }
@@ -279,11 +428,84 @@ mod tests {
             .config_profiles
             .insert("p".into(), section(&[("role_arn", "arn:aws:iam::1:role/r")]));
 
-        match from_profile(&config, "p") {
-            Err(CredentialError::Unsupported { mechanism, .. }) => {
-                assert_eq!(mechanism, "assume-role")
+        // Reaching the assume-role path at all is the point: it complains about the
+        // missing source rather than quietly returning the static keys below it.
+        match from_profile(&config, "p", Some("us-east-1"), &mut BTreeSet::new()) {
+            Err(CredentialError::InvalidConfig { message, .. }) => {
+                assert!(message.contains("source_profile"), "got: {message}")
             }
             other => panic!("assume-role should take precedence, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_both_source_profile_and_credential_source() {
+        let mut config = Config::default();
+        config.config_profiles.insert(
+            "p".into(),
+            section(&[
+                ("role_arn", "arn:aws:iam::1:role/r"),
+                ("source_profile", "base"),
+                ("credential_source", "Environment"),
+            ]),
+        );
+        match from_profile(&config, "p", Some("us-east-1"), &mut BTreeSet::new()) {
+            Err(CredentialError::InvalidConfig { message, .. }) => {
+                assert!(message.contains("both"), "got: {message}")
+            }
+            other => panic!("expected an InvalidConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_credential_source() {
+        let mut config = Config::default();
+        config.config_profiles.insert(
+            "p".into(),
+            section(&[
+                ("role_arn", "arn:aws:iam::1:role/r"),
+                ("credential_source", "NotAThing"),
+            ]),
+        );
+        match from_profile(&config, "p", Some("us-east-1"), &mut BTreeSet::new()) {
+            Err(CredentialError::InvalidConfig { message, .. }) => {
+                assert!(message.contains("not valid"), "got: {message}")
+            }
+            other => panic!("expected an InvalidConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_missing_source_profile() {
+        let mut config = Config::default();
+        config.config_profiles.insert(
+            "p".into(),
+            section(&[("role_arn", "arn:aws:iam::1:role/r"), ("source_profile", "nope")]),
+        );
+        match from_profile(&config, "p", Some("us-east-1"), &mut BTreeSet::new()) {
+            Err(CredentialError::InvalidConfig { message, .. }) => {
+                assert!(message.contains("does not exist"), "got: {message}")
+            }
+            other => panic!("expected an InvalidConfig, got {other:?}"),
+        }
+    }
+
+    /// Role chaining is unbounded in depth, so a cycle must be caught rather than
+    /// recursing until the stack runs out.
+    #[test]
+    fn detects_source_profile_cycles() {
+        let mut config = Config::default();
+        config.config_profiles.insert(
+            "a".into(),
+            section(&[("role_arn", "arn:aws:iam::1:role/a"), ("source_profile", "b")]),
+        );
+        config.config_profiles.insert(
+            "b".into(),
+            section(&[("role_arn", "arn:aws:iam::1:role/b"), ("source_profile", "a")]),
+        );
+        match from_profile(&config, "a", Some("us-east-1"), &mut BTreeSet::new()) {
+            Err(CredentialError::ProfileCycle { .. }) => {}
+            other => panic!("expected a cycle error, got {other:?}"),
         }
     }
 
@@ -351,11 +573,13 @@ mod tests {
                 ("web_identity_token_file", "/tmp/token"),
             ]),
         );
-        match from_profile(&config, "p") {
-            Err(CredentialError::Unsupported { mechanism, .. }) => {
-                assert_eq!(mechanism, "web-identity assume-role")
+        // The web-identity branch reads the token file first, so a missing file proves
+        // that path was taken rather than the source_profile one.
+        match from_profile(&config, "p", Some("us-east-1"), &mut BTreeSet::new()) {
+            Err(CredentialError::InvalidConfig { message, .. }) => {
+                assert!(message.contains("web_identity_token_file"), "got: {message}")
             }
-            other => panic!("expected an explicit refusal, got {other:?}"),
+            other => panic!("expected the web-identity path, got {other:?}"),
         }
     }
 }

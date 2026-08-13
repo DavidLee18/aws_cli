@@ -43,7 +43,10 @@ fn main() -> ExitCode {
     match run() {
         Ok(code) => code,
         Err(f) => {
-            eprintln!("aws: [ERROR]: {}", f.message);
+            // The reference prefixes every error with a blank line — verified across
+            // service errors, unknown profiles and SSO failures. Cosmetic, but it is a
+            // byte difference in stderr and this is a drop-in replacement.
+            eprintln!("\naws: [ERROR]: {}", f.message);
             exit::code(f.code)
         }
     }
@@ -120,13 +123,19 @@ fn run() -> Result<ExitCode, Failure> {
         }
         other => Failure::new(exit::GENERAL_ERROR, other),
     })?;
-    let creds = credentials::resolve(parsed.profile.as_deref()).map_err(|e| {
+    let creds = credentials::resolve(parsed.profile.as_deref(), Some(&ep.signing_region))
+        .map_err(|e| {
         // Only "no credentials found at all" is a configuration error; an unknown
         // profile or an expired SSO token is general (255). Matches the reference.
-        let code =
-            if e.is_configuration_error() { exit::CONFIGURATION } else { exit::GENERAL_ERROR };
-        Failure::new(code, e)
-    })?;
+            let code = if e.is_configuration_error() {
+                exit::CONFIGURATION
+            } else if e.is_client_error() {
+                exit::CLIENT_ERROR
+            } else {
+                exit::GENERAL_ERROR
+            };
+            Failure::new(code, e)
+        })?;
 
     let request = http::PreparedRequest {
         method: "POST".to_string(),
