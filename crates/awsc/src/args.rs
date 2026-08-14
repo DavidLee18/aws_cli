@@ -102,6 +102,12 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
         extras: Vec::new(),
     };
 
+    // In the `s3` tree `--page-size` is a per-command argument, not the injected
+    // pagination control, and it is validated differently — so it has to reach the
+    // subcommand rather than being consumed here. `--no-paginate` and `--output` really
+    // are accepted-and-ignored there, so those stay global.
+    let owns_its_arguments = parsed.service == "s3";
+
     let mut i = 2;
     while i < argv.len() {
         let arg = &argv[i];
@@ -144,7 +150,7 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
                 parsed.max_items =
                     Some(v.parse().map_err(|_| format!("--max-items: `{v}` is not a number"))?);
             }
-            "--page-size" => {
+            "--page-size" if !owns_its_arguments => {
                 let v = take_value()?;
                 parsed.page_size =
                     Some(v.parse().map_err(|_| format!("--page-size: `{v}` is not a number"))?);

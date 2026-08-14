@@ -16,7 +16,9 @@ pub struct PreparedRequest {
     pub content_type: Option<String>,
     /// Protocol headers such as `X-Amz-Target`, plus any bound by the operation.
     pub extra_headers: Vec<(String, String)>,
-    pub body: String,
+    /// Raw request body. Bytes rather than a `String` because `s3 cp` uploads arbitrary
+    /// binary content.
+    pub body_bytes: Vec<u8>,
 }
 
 /// Transport-level options from the global arguments.
@@ -30,11 +32,24 @@ pub struct Transport {
 
 pub struct Response {
     pub status: u16,
-    pub body: String,
+    /// The raw response bytes.
+    ///
+    /// Kept as bytes rather than a `String` because `s3 cp` downloads arbitrary binary
+    /// objects; decoding every response as UTF-8 would corrupt them. Protocol parsing goes
+    /// through [`Response::text`].
+    pub bytes: Vec<u8>,
     headers: Vec<(String, String)>,
 }
 
 impl Response {
+    /// The body as text, for the protocol parsers and error documents.
+    ///
+    /// Lossy on purpose: a malformed body should surface as a parse error naming the
+    /// service, not as a decoding error from the transport.
+    pub fn text(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.bytes)
+    }
+
     /// Case-insensitive header lookup.
     pub fn header(&self, name: &str) -> Option<String> {
         self.headers
@@ -67,7 +82,7 @@ fn signed_headers(
     // header for this request: x-amz-content-sha256"), unlike every other service, which
     // is happy with the hash appearing only inside the canonical request.
     if requires_content_sha256(&req.endpoint.signing_name) {
-        headers.push(("x-amz-content-sha256".to_string(), payload_hash(req.body.as_bytes())));
+        headers.push(("x-amz-content-sha256".to_string(), payload_hash(&req.body_bytes)));
     }
     for (k, v) in &req.extra_headers {
         headers.push((k.to_ascii_lowercase(), v.clone()));
@@ -98,12 +113,15 @@ pub fn sign_request(
         service: &req.endpoint.signing_name,
         timestamp,
     };
+    // The endpoint may already carry a path (S3 path-style addressing), and that part is
+    // signed too — signing only `req.path` would authorise a different resource.
+    let path = format!("{}{}", req.endpoint.path_prefix, req.path);
     let signing_req = SigningRequest {
         method: &req.method,
-        path: if req.path.is_empty() { "/" } else { &req.path },
+        path: if path.is_empty() { "/" } else { &path },
         query: &canonical_query(&req.query),
         headers: headers.clone(),
-        body: req.body.as_bytes(),
+        body: &req.body_bytes,
     };
     let signature = sigv4::sign(&ctx, &signing_req);
 
@@ -204,10 +222,12 @@ pub fn send(
             .iter()
             .filter_map(|n| resp.header(n).map(|v| (n.clone(), v.to_string())))
             .collect();
-        resp.into_string().map(|body| Response { status, body, headers })
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut resp.into_reader(), &mut bytes)
+            .map(|_| Response { status, bytes, headers })
     };
 
-    match call.send_string(&req.body) {
+    match call.send_bytes(&req.body_bytes) {
         Ok(resp) => collect(resp).map_err(|e| RuntimeError::Http(e.to_string())),
         // A 4xx/5xx is a normal outcome carrying a modelled error document, not a
         // transport failure — hand the body back for the protocol layer to parse.

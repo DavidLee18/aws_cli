@@ -25,6 +25,25 @@ pub struct PresignRequest<'a> {
     /// Headers signed in addition to `host`, such as `x-k8s-aws-id`.
     pub extra_signed_headers: Vec<(String, String)>,
     pub expires: u32,
+    /// The payload hash to sign. S3 presigns with the literal `UNSIGNED-PAYLOAD`
+    /// (`S3SigV4QueryAuth.payload`), everything else with the empty-body SHA-256.
+    pub payload: Payload,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Payload {
+    #[default]
+    EmptyBody,
+    Unsigned,
+}
+
+impl Payload {
+    fn as_str(self) -> &'static str {
+        match self {
+            Payload::EmptyBody => sigv4::EMPTY_SHA256,
+            Payload::Unsigned => "UNSIGNED-PAYLOAD",
+        }
+    }
 }
 
 /// Return the query string (without a leading `?`), auth parameters and signature
@@ -73,7 +92,7 @@ pub fn presign(ctx: &SigningContext<'_>, req: &PresignRequest<'_>) -> String {
         "{}\n{}\n{canonical_query}\n{canonical_headers}\n{signed_headers}\n{}",
         req.method,
         req.path,
-        sigv4::EMPTY_SHA256
+        req.payload.as_str()
     );
 
     let (_, signature) = sigv4::sign_canonical_request(ctx, &canonical_request);
@@ -147,6 +166,7 @@ mod tests {
                 ],
                 extra_signed_headers: Vec::new(),
                 expires: 900,
+                payload: Payload::EmptyBody,
             },
         );
         let names: Vec<&str> =
@@ -195,6 +215,7 @@ mod tests {
                 ],
                 extra_signed_headers: vec![("x-k8s-aws-id".into(), "my-cluster".into())],
                 expires: 60,
+                payload: Payload::EmptyBody,
             },
         );
         assert!(query.contains("X-Amz-SignedHeaders=host%3Bx-k8s-aws-id"), "{query}");
@@ -222,6 +243,7 @@ mod tests {
                     params: vec![("Action".into(), "GetCallerIdentity".into())],
                     extra_signed_headers: vec![("x-k8s-aws-id".into(), cluster.into())],
                     expires: 60,
+                    payload: Payload::EmptyBody,
                 },
             )
         };

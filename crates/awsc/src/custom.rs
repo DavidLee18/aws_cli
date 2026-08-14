@@ -31,6 +31,8 @@ pub fn dispatch(parsed: &Parsed) -> Result<Option<ExitCode>, Failure> {
         ("eks", "get-token") => eks_get_token(parsed, &globals)?,
         ("configservice", "subscribe") => configservice_subscribe(parsed, &globals)?,
         ("logs", "tail") => crate::logs_tail::run(parsed, &globals)?,
+        // The whole s3 tree is custom: it has no model of its own.
+        ("s3", _) => crate::s3::dispatch(parsed, &globals)?,
         _ => return Ok(None),
     };
     Ok(Some(outcome))
@@ -270,6 +272,7 @@ fn generate_db_auth_token(parsed: &Parsed, globals: &Globals) -> Result<ExitCode
             ],
             extra_signed_headers: Vec::new(),
             expires: 900,
+            payload: aws_cli_runtime::presign::Payload::EmptyBody,
         },
     );
 
@@ -471,6 +474,7 @@ fn eks_get_token(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure
             ],
             extra_signed_headers: vec![("x-k8s-aws-id".into(), identifier.to_string())],
             expires: 60,
+            payload: aws_cli_runtime::presign::Payload::EmptyBody,
         },
     );
     let url = format!("{}/?{query}", sts.endpoint.url.trim_end_matches('/'));

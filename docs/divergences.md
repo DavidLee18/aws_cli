@@ -529,3 +529,60 @@ honest "unknown operation".
   existing `~/.kube/config` in place*, non-atomically and with no backup. A partial parser
   that mis-reads an unusual but valid kubeconfig would destroy a file the user depends on.
   This one should not be attempted until the YAML work above is done and tested.
+
+---
+
+## The `aws s3` tree
+
+Separate from `s3api`: it has no model of its own, builds its requests by hand, and writes
+plain text to stdout. `--output` and `--query` are ignored throughout (the reference says
+so in `ls`'s own description).
+
+Implemented: `ls`, `mb`, `rb`, `presign`, `website`. `presign` is byte-identical to the
+reference across five cases including a session token, UTF-8 and space in the key, and
+path-style fallback; the argument-handling and error paths of all five match across
+fourteen cases.
+
+### Two bugs this surfaced in existing code
+
+- **S3 needs virtual-host addressing.** The endpoint ruleset takes `Bucket` as a *named*
+  parameter, not a builtin, so we were never supplying it and always resolved the generic
+  `https://s3.<region>.amazonaws.com`. The reference produces
+  `https://<bucket>.s3.<region>.amazonaws.com` — a different host, and the host is signed.
+- **A resolved endpoint can carry a path, and that path is signed.** For a bucket whose
+  name contains a dot, no wildcard certificate matches the virtual-host form, so the
+  ruleset falls back to putting the bucket in the *path*. We signed only the request path,
+  authorising a different resource than the one requested. `Endpoint` now carries
+  `path_prefix` and the signer includes it.
+
+Both were invisible until a byte-diff of `presign`, because a wrong signature only shows up
+against the live service.
+
+### Notes
+
+- `ls` prints timestamps in the machine's **local** timezone. Rust's standard library
+  carries no timezone data, so this asks the C library for the UTC offset rather than
+  assuming UTC and being silently wrong by the local offset. That is the one new
+  dependency (`libc`, unix only), and it also lets `logs tail --since` accept naive
+  timestamps in future.
+- `mb` and `rb` are unusual: they catch every error themselves and exit **1** with an
+  undecorated `make_bucket failed: ...` on stderr, rather than the usual `aws: [ERROR]:`
+  at 254. Reproduced.
+- `ls` with a prefix that matches nothing exits **1** silently; with no key at all
+  (bare bucket, or no path) an empty result is still 0.
+- Integer arguments (`--page-size`, `--expires-in`) are converted with a bare `int()`
+  upstream, so a bad value is an uncaught `ValueError` at **255**, not parameter
+  validation at 252.
+- `--page-size` in this tree is a per-command argument, not the injected pagination
+  control, so the global parser no longer consumes it for `s3`. `--no-paginate` and
+  `--output` genuinely are accepted-and-ignored there.
+- `presign s3://bucket` with no key fails parameter validation: the reference validates
+  the underlying `GetObject` parameters and `Key` has a minimum length of 1.
+
+### Still to come
+
+`cp`, `mv`, `rm` and `sync` — the transfer engine. Research is captured: 8 MiB multipart
+threshold and chunk size, 10 concurrent requests, the `--exclude`/`--include` chain where
+the *last* matching rule wins and `*` crosses `/`, and the sync comparator's asymmetric
+time rule (upload skips when `dest >= src`, download skips when `local <= s3`, with no
+tolerance). Exit codes there are their own rule: 1 for any failure, 2 for warnings only.

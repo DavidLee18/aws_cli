@@ -3,6 +3,7 @@
 pub mod credentials;
 pub mod endpoint;
 pub mod http;
+pub mod localtime;
 pub mod presign;
 pub mod retry;
 pub mod rules;

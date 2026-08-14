@@ -14,6 +14,14 @@ use std::collections::BTreeMap;
 pub struct Endpoint {
     pub url: String,
     pub host: String,
+    /// Any path the resolved endpoint already carries, without a trailing slash.
+    ///
+    /// S3 resolves to path-style addressing for buckets a virtual host cannot express —
+    /// a name containing a dot, which no wildcard certificate matches — putting the
+    /// bucket here (`https://s3.us-west-2.amazonaws.com/my.dotted.bucket`). It has to be
+    /// part of the *signed* path as well as the sent URL, or the signature is computed
+    /// over a different resource than the one requested.
+    pub path_prefix: String,
     pub signing_region: String,
     pub signing_name: String,
 }
@@ -42,6 +50,13 @@ pub struct EndpointParams {
     pub use_fips: bool,
     /// `--endpoint-url`; the ruleset honours it via the `Endpoint` builtin.
     pub endpoint_url: Option<String>,
+    /// The S3 bucket, matched by parameter *name* rather than a builtin.
+    ///
+    /// Without it S3's ruleset falls back to path-style
+    /// (`https://s3.<region>.amazonaws.com/<bucket>/<key>`) instead of the virtual-host
+    /// form (`https://<bucket>.s3.<region>.amazonaws.com/<key>`) that the reference
+    /// produces — a different host, and so a different signature.
+    pub bucket: Option<String>,
 }
 
 /// Resolve the endpoint for an operation.
@@ -87,6 +102,10 @@ pub fn resolve(
                 .clone()
                 .map(Value::String)
                 .unwrap_or(Value::None),
+            // Matched by name: `Bucket` is an operation parameter, not a builtin.
+            _ if name == "Bucket" => {
+                params.bucket.clone().map(Value::String).unwrap_or(Value::None)
+            }
             // Everything else (S3 path-style, STS global endpoint, account-id modes)
             // takes its declared default. Wiring those to real config is future work;
             // the defaults are what the reference uses absent explicit configuration.
@@ -101,6 +120,7 @@ pub fn resolve(
     let resolved = engine.resolve(&ruleset, &values)?;
 
     let host = host_of(&resolved.url).unwrap_or_default();
+    let path_prefix = path_of(&resolved.url);
     // The ruleset's signing region wins where it supplies one: STS's global endpoint
     // resolves to sts.amazonaws.com but signs for us-east-1, not for `aws-global`.
     let signing_region = resolved.signing_region.or(region).unwrap_or_default();
@@ -111,6 +131,7 @@ pub fn resolve(
     Ok(Endpoint {
         url: ensure_trailing_slash(&resolved.url),
         host,
+        path_prefix,
         signing_region,
         signing_name,
     })
@@ -148,6 +169,15 @@ fn ensure_trailing_slash(url: &str) -> String {
 fn host_of(url: &str) -> Option<String> {
     let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
     Some(rest.split('/').next()?.to_string())
+}
+
+/// The path component of an endpoint URL, `""` when there is none.
+fn path_of(url: &str) -> String {
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    match rest.find('/') {
+        Some(index) => rest[index..].trim_end_matches('/').to_string(),
+        None => String::new(),
+    }
 }
 
 /// The region to use, following botocore's precedence.

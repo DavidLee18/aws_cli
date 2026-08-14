@@ -16,6 +16,7 @@ mod custom;
 mod dispatch;
 mod logs_tail;
 mod paginate;
+mod s3;
 mod exit;
 
 const USAGE: &str = "\
@@ -61,6 +62,11 @@ pub struct Failure {
 impl Failure {
     pub fn new(code: u8, message: impl std::fmt::Display) -> Self {
         Failure { message: message.to_string(), code, raw: false, service_error_code: None }
+    }
+
+    /// The message alone, for the few commands that format their own error line.
+    pub fn message(&self) -> &str {
+        &self.message
     }
 
     pub fn bare(code: u8, message: impl std::fmt::Display) -> Self {

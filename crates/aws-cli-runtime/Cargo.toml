@@ -18,3 +18,7 @@ sha1 = "0.10"
 [dev-dependencies]
 serde_json.workspace = true
 sha2 = "0.10"
+
+[target.'cfg(unix)'.dependencies]
+# Only for the local UTC offset: `s3 ls` prints local timestamps and std has no tz data.
+libc = "0.2"

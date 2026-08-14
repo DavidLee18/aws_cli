@@ -78,11 +78,24 @@ impl<'a> Client<'a> {
     /// shapes out of it before deciding whether a client is needed at all —
     /// `--generate-cli-skeleton` never builds one.
     pub fn new(model: &'a Model, globals: &Globals) -> Result<Client<'a>, Failure> {
+        Client::for_bucket(model, globals, None)
+    }
+
+    /// As [`Client::new`], but supplying S3's `Bucket` endpoint parameter.
+    ///
+    /// S3's ruleset resolves a *different host* per bucket (the virtual-host form), and
+    /// the host is signed, so the bucket has to be known before the endpoint is resolved.
+    pub fn for_bucket(
+        model: &'a Model,
+        globals: &Globals,
+        bucket: Option<&str>,
+    ) -> Result<Client<'a>, Failure> {
         let protocol = model.protocol().map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
         let region = endpoint::resolve_region(globals.region.as_deref(), None);
         let ep_params = endpoint::EndpointParams {
             region,
             endpoint_url: globals.endpoint_url.clone(),
+            bucket: bucket.map(str::to_string),
             ..Default::default()
         };
         // A ruleset that rejects the inputs, or a missing region, is a configuration
@@ -145,6 +158,92 @@ impl<'a> Client<'a> {
         )
     }
 
+    /// A hand-built request, signed and retried but not routed through the protocol layer.
+    ///
+    /// The `s3` tree uses this rather than `call`: it moves arbitrary binary payloads, and
+    /// the modelled path would base64 a blob member and decode every response as UTF-8.
+    /// Building the handful of S3 requests directly is both safer and clearer than bending
+    /// the generic serializer around them.
+    pub fn send_raw(
+        &self,
+        method: &str,
+        path: &str,
+        query: &str,
+        headers: &[(String, String)],
+        body: Vec<u8>,
+    ) -> Result<http::Response, Failure> {
+        let invocation_id = retry::new_invocation_id();
+        let max_attempts = self.retry.borrow().max_attempts;
+        let mut attempt: u32 = 1;
+
+        loop {
+            let mut extra_headers = headers.to_vec();
+            extra_headers.extend(retry::retry_headers(&invocation_id, attempt, max_attempts));
+
+            let request = http::PreparedRequest {
+                method: method.to_string(),
+                endpoint: self.endpoint.clone(),
+                path: path.to_string(),
+                query: query.to_string(),
+                content_type: None,
+                extra_headers,
+                body_bytes: body.clone(),
+            };
+
+            let timestamp = sigv4::format_timestamp(crate::now_unix());
+            let (signed, _) = if self.no_sign_request {
+                (http::unsigned_headers(&request), None)
+            } else {
+                let (h, s) = http::sign_request(&request, &self.credentials, &timestamp);
+                (h, Some(s))
+            };
+
+            if self.debug {
+                eprintln!("{method} {}{path}?{query}", request.endpoint.url);
+            }
+
+            let sent = http::send(&request, &signed, &self.transport);
+            let delay = match &sent {
+                Err(e) => {
+                    let message = e.to_string();
+                    let timeout = message.contains("timed out") || message.contains("timeout");
+                    self.retry.borrow_mut().next_delay(
+                        attempt,
+                        &retry::Outcome::Transport { timeout },
+                        &self.endpoint.signing_name,
+                    )
+                }
+                Ok(response) => {
+                    let code = if response.status >= 400 {
+                        aws_cli_protocol::xml::parse_error(&response.text()).map(|e| e.code)
+                    } else {
+                        None
+                    };
+                    self.retry.borrow_mut().next_delay(
+                        attempt,
+                        &retry::Outcome::Response {
+                            status: response.status,
+                            error_code: code.as_deref(),
+                        },
+                        &self.endpoint.signing_name,
+                    )
+                }
+            };
+
+            match delay {
+                Some(delay) => {
+                    std::thread::sleep(delay);
+                    attempt += 1;
+                }
+                None => {
+                    let response = sent.map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
+                    self.retry.borrow_mut().record_success(response.status);
+                    return Ok(response);
+                }
+            }
+        }
+    }
+
     /// One round trip, retried in place.
     ///
     /// Takes the already-resolved shapes so the paginating path can issue the same
@@ -183,7 +282,7 @@ impl<'a> Client<'a> {
                 query: wire.query.clone(),
                 content_type: wire.content_type.clone(),
                 extra_headers,
-                body: wire.body.clone(),
+                body_bytes: wire.body.clone().into_bytes(),
             };
 
             // Re-signed each attempt, since the timestamp changes.
@@ -197,7 +296,7 @@ impl<'a> Client<'a> {
 
             if self.debug {
                 eprintln!("endpoint: {}", request.endpoint.url);
-                eprintln!("body: {}", request.body);
+                eprintln!("body: {}", String::from_utf8_lossy(&request.body_bytes));
                 if let Some(signature) = &signature {
                     eprintln!("CanonicalRequest:\n{}", signature.canonical_request);
                     eprintln!("StringToSign:\n{}", signature.string_to_sign);
@@ -223,7 +322,7 @@ impl<'a> Client<'a> {
                         Some(
                             dispatch::parse_error(
                                 self.protocol,
-                                &response.body,
+                                &response.text(),
                                 response.header("x-amzn-errortype").as_deref(),
                             )
                             .0,
@@ -258,7 +357,7 @@ impl<'a> Client<'a> {
         if response.status >= 400 {
             let (code, message) = dispatch::parse_error(
                 self.protocol,
-                &response.body,
+                &response.text(),
                 response.header("x-amzn-errortype").as_deref(),
             );
             // The reference appends the retry count only when the attempt limit was
@@ -280,7 +379,7 @@ impl<'a> Client<'a> {
             self.protocol,
             operation_wire_name,
             output_shape,
-            &response.body,
+            &response.text(),
         )
         .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))
     }

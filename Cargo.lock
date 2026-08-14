@@ -63,6 +63,7 @@ version = "0.1.0"
 dependencies = [
  "aws-cli-model",
  "hmac",
+ "libc",
  "serde",
  "serde_json",
  "sha1",
@@ -79,6 +80,7 @@ dependencies = [
  "aws-cli-output",
  "aws-cli-protocol",
  "aws-cli-runtime",
+ "quick-xml",
  "regex",
  "serde",
  "serde_json",
