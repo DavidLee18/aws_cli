@@ -881,3 +881,43 @@ asserted the wrong thing in the same breath as the code.
   the file to write. `polly synthesize-speech`, `s3api get-object`, `lambda invoke` and
   `kms decrypt` are unusable without it.
   `Model::operation_has_streaming_blob_output` already identifies them.
+
+---
+
+## Streaming output, and the response headers nobody was reading
+
+`customizations/streamingoutputarg.py` gives every operation whose output carries a
+streaming blob a **required trailing positional** naming the file to write. That is why
+`s3api get-object BUCKET KEY out.bin` and `polly synthesize-speech ... out.mp3` take a
+filename with no flag. We rejected it as an unexpected positional, so those commands were
+unusable. The body now goes to the file and the headers become the printed document.
+
+Implementing it exposed three bugs underneath, none of them about streaming:
+
+- **`rest*` responses bind members to headers, and we only ever parsed bodies.**
+  `head-object` prints nine fields, every one of them from a header, and returns no body
+  at all — so we had nothing to parse and failed outright. Header binding now merges with
+  the body in *model member order*, since that order is what the CLI prints.
+- **ureq transparently gunzips.** Its `gzip` feature is on by default, so a gzip-encoded
+  object would have been silently decoded on the way to disk — `s3api get-object` must
+  write the stored bytes unchanged. It also made an empty gzip body fail as "unexpected
+  end of file", which is what first drew attention to it. Now `default-features = false`.
+- **A HEAD response has no body.** It carries the `Content-Length` of the body it
+  describes, so reading one waits for bytes that never arrive.
+
+Verified against real S3: `head-object` and `head-bucket` are byte-identical, and
+`get-object` writes byte-identical file content with matching metadata.
+
+### Known remaining, all pre-existing and separate
+
+- **restXml flattened lists parse empty.** `s3api list-objects-v2` returns
+  `"Contents": []` for a bucket that has objects. The high-level `s3 ls` is unaffected —
+  it parses S3's XML directly rather than through the modelled path — which is why this
+  survived unnoticed. This is the largest correctness gap currently known.
+- **A self-closing root element fails to parse.** `s3api get-bucket-location` in
+  us-east-1 answers `<LocationConstraint/>`; the reference prints
+  `{"LocationConstraint": null}` and we print nothing.
+- `get-object` omits `ChecksumCRC64NVME`/`ChecksumType`: the reference sends
+  `x-amz-checksum-mode: ENABLED` by default and we do not.
+- `rds add-option-to-option-group` / `remove-option-from-option-group` are still missing,
+  so the command they replace is now correctly rejected with nothing standing in for it.

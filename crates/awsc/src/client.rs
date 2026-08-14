@@ -60,6 +60,36 @@ impl Globals {
     }
 }
 
+/// Combine header-bound and body-bound members, keeping the model's member order.
+///
+/// Order is user-visible: the CLI prints members in the order the model declares them,
+/// and a response that mixes header and body bindings must interleave them accordingly.
+fn merge_in_model_order(
+    output_shape: Option<&aws_cli_model::shape::StructureShape>,
+    headers: Value,
+    body: Value,
+) -> Value {
+    let (Some(shape), Value::Object(headers), Value::Object(mut body)) =
+        (output_shape, headers, body)
+    else {
+        return Value::Object(Default::default());
+    };
+    let mut out = serde_json::Map::new();
+    for name in shape.members.keys() {
+        if let Some(value) = headers.get(name) {
+            out.insert(name.clone(), value.clone());
+        } else if let Some(value) = body.remove(name) {
+            out.insert(name.clone(), value);
+        }
+    }
+    // Anything the shape does not declare (ResponseMetadata and friends) keeps its place
+    // at the end rather than being dropped.
+    for (key, value) in body {
+        out.entry(key).or_insert(value);
+    }
+    Value::Object(out)
+}
+
 pub struct Client<'a> {
     pub model: &'a Model,
     pub protocol: Protocol,
@@ -249,6 +279,54 @@ impl<'a> Client<'a> {
         }
     }
 
+    /// As [`Client::call_operation`], but handing back the raw response.
+    ///
+    /// Operations with a streaming blob output write their body to a file rather than
+    /// parsing it, so they need the bytes and headers, not a document.
+    pub fn call_operation_raw(
+        &self,
+        operation_wire_name: &str,
+        op: &aws_cli_model::shape::OperationShape,
+        input_shape: Option<&aws_cli_model::shape::StructureShape>,
+        input: Option<&Value>,
+    ) -> Result<http::Response, Failure> {
+        let wire = dispatch::serialize(
+            &self.model,
+            self.protocol,
+            operation_wire_name,
+            op,
+            input_shape,
+            input,
+        )
+        .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
+
+        let response = self.send_raw(
+            &wire.method,
+            &wire.path,
+            &wire.query,
+            &wire.headers,
+            wire.body.into_bytes(),
+        )?;
+
+        if response.status >= 400 {
+            let (code, message) = dispatch::parse_error(
+                self.protocol,
+                &response.text(),
+                response.header("x-amzn-errortype").as_deref(),
+            );
+            let mut failure = Failure::new(
+                exit::CLIENT_ERROR,
+                format!(
+                    "An error occurred ({code}) when calling the \
+                     {operation_wire_name} operation: {message}"
+                ),
+            );
+            failure.service_error_code = Some(code);
+            return Err(failure);
+        }
+        Ok(response)
+    }
+
     /// One round trip, retried in place.
     ///
     /// Takes the already-resolved shapes so the paginating path can issue the same
@@ -379,13 +457,44 @@ impl<'a> Client<'a> {
             return Err(failure);
         }
 
-        dispatch::parse_response(
-            &self.model,
+        // `rest*` responses bind members to headers as well as the body. `head-object`
+        // has no body at all — every field it prints comes from a header — so parsing
+        // only the body left it with nothing to parse.
+        let from_headers = match (self.protocol, output_shape) {
+            (Protocol::RestJson1 | Protocol::RestXml, Some(shape)) => Some(
+                aws_cli_protocol::http_binding::bind_output_headers(
+                    self.model,
+                    shape,
+                    response.headers(),
+                ),
+            ),
+            _ => None,
+        };
+
+        // A body-less response has nothing for the body parser, and some responses carry
+        // a body with no root element at all (`get-bucket-location` in us-east-1). Where
+        // the headers can still answer, an unparseable body is empty rather than fatal.
+        let parsed_body = dispatch::parse_response(
+            self.model,
             self.protocol,
             operation_wire_name,
             output_shape,
             &response.text(),
-        )
-        .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))
+        );
+        let from_body = match parsed_body {
+            Ok(value) => value,
+            Err(e) if from_headers.is_some() => {
+                if response.bytes.iter().any(|b| !b.is_ascii_whitespace()) && self.debug {
+                    eprintln!("note: body did not parse ({e}); using headers alone");
+                }
+                Value::Object(Default::default())
+            }
+            Err(e) => return Err(Failure::new(exit::GENERAL_ERROR, e)),
+        };
+
+        Ok(match from_headers {
+            Some(headers) => merge_in_model_order(output_shape, headers, from_body),
+            None => from_body,
+        })
     }
 }

@@ -11,7 +11,11 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 hmac = "0.12"
 sha2 = "0.10"
-ureq = { version = "2", features = ["json", "tls"] }
+# `default-features = false` matters: ureq's default `gzip` feature transparently
+# decodes a gzip-encoded response, but the CLI must write the object's stored bytes
+# unchanged -- `s3api get-object` on a gzip-encoded object has to produce the gzip.
+# It also made an empty gzip body fail as "unexpected end of file".
+ureq = { version = "2", default-features = false, features = ["json", "tls"] }
 serde = { workspace = true, features = ["derive"] }
 sha1 = "0.10"
 

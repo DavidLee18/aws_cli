@@ -120,13 +120,6 @@ fn run() -> Result<ExitCode, Failure> {
         return Ok(code);
     }
 
-    if let Some(extra) = parsed.positionals.first() {
-        return Err(Failure::new(
-            exit::PARAM_VALIDATION,
-            format!("unexpected positional argument `{extra}`"),
-        ));
-    }
-
     // An unknown service is argparse's `argument command`, one level up from `argument
     // operation`; the wording differs only in that word.
     let model = load_model(&parsed.service).map_err(|_| {
@@ -247,6 +240,28 @@ fn run() -> Result<ExitCode, Failure> {
         return Ok(exit::code(exit::SUCCESS));
     }
 
+    // Operations whose output is a streaming blob gain a required trailing positional
+    // naming the file to write. The reference injects it universally
+    // (`customizations/streamingoutputarg.py`), which is why `s3api get-object` and
+    // `polly synthesize-speech` take a filename with no flag.
+    let streams_output = model.operation_has_streaming_blob_output(op).unwrap_or(false);
+    let outfile = if streams_output {
+        match parsed.positionals.first() {
+            Some(path) => Some(path.clone()),
+            None if parsed.generate_skeleton.is_none() => {
+                return Err(Failure::new(
+                    exit::PARAM_VALIDATION,
+                    aws_cli_runtime::RuntimeError::ParamValidation(
+                        "the following arguments are required: outfile".to_string(),
+                    ),
+                ))
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+
     // Required flags are enforced here, before model validation, because the reference
     // reports them with argparse's wording and a usage block rather than as a parameter
     // validation failure.
@@ -305,6 +320,28 @@ fn run() -> Result<ExitCode, Failure> {
     let issue = |input: Option<&serde_json::Value>| -> Result<serde_json::Value, Failure> {
         client.call_operation(op_id.name(), op, input_shape, output_shape, input)
     };
+
+    // A streaming download never paginates: the body goes to the file and the headers
+    // become the printed document.
+    if let Some(path) = &outfile {
+        let response = client.call_operation_raw(op_id.name(), op, input_shape, input.as_ref())?;
+        std::fs::write(path, &response.bytes)
+            .map_err(|e| Failure::new(exit::GENERAL_ERROR, format!("{path}: {e}")))?;
+        let document = match output_shape {
+            Some(shape) => aws_cli_protocol::http_binding::bind_output_headers(
+                &model,
+                shape,
+                response.headers(),
+            ),
+            None => serde_json::Value::Object(Default::default()),
+        };
+        match aws_cli_output::render_named(op_id.name(), &document, parsed.output) {
+            Ok(Some(text)) => print!("{text}"),
+            Ok(None) => {}
+            Err(e) => return Err(Failure::new(exit::GENERAL_ERROR, e)),
+        }
+        return Ok(exit::code(exit::SUCCESS));
+    }
 
     let value = paginate::run(&paginate::Settings {
         service: &cli_service,

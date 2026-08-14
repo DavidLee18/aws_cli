@@ -380,3 +380,117 @@ mod tests {
         assert_eq!(bound.query, vec![("acl".to_string(), String::new())]);
     }
 }
+
+/// Build the output document for an operation whose body is a streaming blob.
+///
+/// Such operations write their body to a file, so everything the user sees comes from the
+/// response headers: `s3api get-object` prints `ETag`, `ContentLength` and friends. The
+/// streaming member itself is omitted — it is in the file, not the document.
+pub fn bind_output_headers(
+    model: &Model,
+    shape: &StructureShape,
+    headers: &[(String, String)],
+) -> Value {
+    let lookup = |name: &str| -> Option<&str> {
+        headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    };
+
+    let mut out = serde_json::Map::new();
+    for (member_name, member) in &shape.members {
+        match binding_of(member_name, member) {
+            Binding::Header(header_name) => {
+                if let Some(raw) = lookup(&header_name) {
+                    let target = model.shape(&member.target);
+                    out.insert(member_name.clone(), coerce_header(raw, target));
+                }
+            }
+            Binding::PrefixHeaders(prefix) => {
+                // `Metadata` collects every `x-amz-meta-*` header, keyed by the suffix.
+                let mut map = serde_json::Map::new();
+                for (name, value) in headers {
+                    let lower = name.to_ascii_lowercase();
+                    if let Some(suffix) = lower.strip_prefix(&prefix.to_ascii_lowercase()) {
+                        if !suffix.is_empty() || prefix.is_empty() {
+                            map.insert(suffix.to_string(), Value::String(value.clone()));
+                        }
+                    }
+                }
+                out.insert(member_name.clone(), Value::Object(map));
+            }
+            // The payload is the file; body and query bindings do not apply to a
+            // streaming response.
+            _ => {}
+        }
+    }
+    Value::Object(out)
+}
+
+/// Header values arrive as text; the shape decides what they become.
+fn coerce_header(raw: &str, target: Option<&Shape>) -> Value {
+    match target {
+        Some(Shape::Integer(_)) | Some(Shape::Long(_)) | Some(Shape::Short(_))
+        | Some(Shape::Byte(_)) => {
+            raw.parse::<i64>().map(Value::from).unwrap_or_else(|_| Value::String(raw.into()))
+        }
+        Some(Shape::Float(_)) | Some(Shape::Double(_)) => {
+            raw.parse::<f64>().map(Value::from).unwrap_or_else(|_| Value::String(raw.into()))
+        }
+        Some(Shape::Boolean(_)) => match raw {
+            "true" => Value::Bool(true),
+            "false" => Value::Bool(false),
+            other => Value::String(other.to_string()),
+        },
+        // A header timestamp is an HTTP date; the CLI prints ISO 8601.
+        Some(Shape::Timestamp(_)) => match http_date_to_iso(raw) {
+            Some(iso) => Value::String(iso),
+            None => Value::String(raw.to_string()),
+        },
+        _ => Value::String(raw.to_string()),
+    }
+}
+
+/// `Sun, 01 Feb 2026 14:50:23 GMT` -> `2026-02-01T14:50:23+00:00`.
+///
+/// The CLI's default `cli_timestamp_format` is `iso8601`, so the wire's HTTP date is
+/// reformatted rather than passed through.
+pub fn http_date_to_iso(raw: &str) -> Option<String> {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    // `Day, DD Mon YYYY HH:MM:SS GMT`
+    let rest = raw.split_once(", ").map(|(_, r)| r).unwrap_or(raw);
+    let mut parts = rest.split_whitespace();
+    let day: u32 = parts.next()?.parse().ok()?;
+    let month_name = parts.next()?;
+    let year: i64 = parts.next()?.parse().ok()?;
+    let time = parts.next()?;
+    let month = MONTHS.iter().position(|m| *m == month_name)? + 1;
+    let mut clock = time.split(':');
+    let hour: u32 = clock.next()?.parse().ok()?;
+    let minute: u32 = clock.next()?.parse().ok()?;
+    let second: u32 = clock.next()?.parse().ok()?;
+    Some(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}+00:00"
+    ))
+}
+
+#[cfg(test)]
+mod output_header_tests {
+    use super::*;
+
+    #[test]
+    fn reformats_http_dates() {
+        assert_eq!(
+            http_date_to_iso("Sun, 01 Feb 2026 14:50:23 GMT").as_deref(),
+            Some("2026-02-01T14:50:23+00:00")
+        );
+        assert_eq!(
+            http_date_to_iso("Thu, 13 Aug 2026 21:48:16 GMT").as_deref(),
+            Some("2026-08-13T21:48:16+00:00")
+        );
+        assert_eq!(http_date_to_iso("nonsense"), None);
+    }
+}

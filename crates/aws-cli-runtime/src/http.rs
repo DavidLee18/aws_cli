@@ -50,6 +50,11 @@ impl Response {
         String::from_utf8_lossy(&self.bytes)
     }
 
+    /// Every response header, for the output-header binding.
+    pub fn headers(&self) -> &[(String, String)] {
+        &self.headers
+    }
+
     /// Case-insensitive header lookup.
     pub fn header(&self, name: &str) -> Option<String> {
         self.headers
@@ -215,6 +220,7 @@ pub fn send(
         }
     }
 
+    let head_request = req.method.eq_ignore_ascii_case("HEAD");
     let collect = |resp: ureq::Response| {
         let status = resp.status();
         let names: Vec<String> = resp.headers_names();
@@ -222,6 +228,12 @@ pub fn send(
             .iter()
             .filter_map(|n| resp.header(n).map(|v| (n.clone(), v.to_string())))
             .collect();
+        // A HEAD response carries the headers of the body it describes, including
+        // Content-Length, but sends no body -- reading one waits for bytes that never
+        // arrive and ends as "unexpected end of file".
+        if head_request {
+            return Ok(Response { status, bytes: Vec::new(), headers });
+        }
         let mut bytes = Vec::new();
         std::io::Read::read_to_end(&mut resp.into_reader(), &mut bytes)
             .map(|_| Response { status, bytes, headers })
