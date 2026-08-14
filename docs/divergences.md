@@ -1047,7 +1047,38 @@ reported success either way.
 
 - `--sse-c-copy-source` / `--sse-c-copy-source-key` for `s3 -> s3` copies of
   customer-encrypted objects.
-- `--copy-props`, which decides whether a multipart copy re-fetches the source's metadata
-  and tags. Our copies use `CopyObject` for every size, so the server preserves them and
-  the flag has nothing to change yet; it matters once multipart copy lands.
 - `--request-payer`, `--checksum-algorithm`, `--checksum-mode`, `--expected-size`.
+
+---
+
+## Multipart copy
+
+A `CopyObject` is capped at 5 GiB, and one request for a large object occupies a single
+worker for the whole transfer. Objects at or above the 8 MiB threshold are now copied with
+`UploadPartCopy`, the parts sharing the pool.
+
+Three things a single `CopyObject` gets for free and this has to do explicitly:
+
+- **Pin the source.** Every part carries `x-amz-copy-source-if-match` with the source's
+  ETag, so a source replaced mid-copy fails the transfer instead of silently stitching two
+  different objects together. A `PreconditionFailed` is reported as the reference words
+  it, naming the object rather than the raw condition.
+- **Carry the properties across.** A server-side multipart copy inherits nothing, so
+  content type, the content-* headers and `x-amz-meta-*` are read from the source and set
+  on `CreateMultipartUpload`. This is what `--copy-props` governs in the reference, whose
+  default is to preserve them.
+- **Keep the conditionals off the create.** `CreateMultipartUpload` rejects the
+  copy-source conditionals, so they go only on the part requests.
+
+Verified against real S3 with a 30 MiB object: content SHA-256 identical, metadata
+identical to the reference's own copy of the same object, and the destination ETag is
+`...-4` — the same part count and therefore the same part boundaries the reference
+produced. Recursive copy and `mv` over the threshold both behave.
+
+### Still outstanding on copies
+
+- `--sse-c-copy-source` / `--sse-c-copy-source-key`, for copying an object encrypted with
+  a *different* customer key than the destination.
+- Object tags are not carried across a multipart copy. `--copy-props` in its `default` and
+  `all` modes fetches them with `GetObjectTagging` and reapplies them; ours preserves
+  metadata but not tags.

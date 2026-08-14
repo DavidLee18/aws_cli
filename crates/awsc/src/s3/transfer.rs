@@ -957,6 +957,159 @@ fn execute_deletes(
     });
 }
 
+/// Copy one large object part by part.
+///
+/// Three details that a single `CopyObject` handles for free and this must do explicitly:
+///
+/// - **The source is pinned.** Every `UploadPartCopy` carries
+///   `x-amz-copy-source-if-match` with the source's ETag, so a source replaced mid-copy
+///   fails the transfer rather than silently stitching together two different objects.
+/// - **Nothing is inherited.** A server-side multipart copy does not carry the source's
+///   metadata across, so the properties are read from the source and set on
+///   `CreateMultipartUpload` — this is what `--copy-props` governs in the reference, whose
+///   default is to preserve them.
+/// - **`CreateMultipartUpload` rejects the copy-source conditionals**, so they are only
+///   attached to the part requests.
+fn multipart_copy(
+    conn: &Conn,
+    source_conn: &Conn,
+    source_bucket: &str,
+    item: &Item,
+    options: &Options,
+    pool: &Pool,
+    progress: &Progress,
+) -> Result<(), Failure> {
+    let head = source_conn.send_checked(
+        "HeadObject",
+        "HEAD",
+        &source_conn.object_path(&item.source),
+        "",
+        &sse_c_headers(options),
+        Vec::new(),
+    )?;
+    let source_etag = head.header("etag").unwrap_or_default();
+
+    let mut headers = object_headers(options, &item.dest);
+    // `--metadata-directive` is meaningless here — there is no directive on a multipart
+    // create — and inherited properties are supplied explicitly instead.
+    headers.retain(|(name, _)| name != "x-amz-metadata-directive");
+    if options.metadata.is_empty() {
+        for header in ["cache-control", "content-disposition", "content-encoding", "content-language", "expires"] {
+            if !headers.iter().any(|(n, _)| n == header) {
+                if let Some(value) = head.header(header) {
+                    headers.push((header.to_string(), value));
+                }
+            }
+        }
+        for (name, value) in head.headers() {
+            if let Some(suffix) = name.to_ascii_lowercase().strip_prefix("x-amz-meta-") {
+                headers.push((format!("x-amz-meta-{suffix}"), value.clone()));
+            }
+        }
+    }
+    if options.content_type.is_none() {
+        if let Some(ct) = head.header("content-type") {
+            headers.retain(|(n, _)| n != "content-type");
+            headers.push(("content-type".to_string(), ct));
+        }
+    }
+
+    let path = conn.object_path(&item.dest);
+    let created =
+        conn.send_checked("CreateMultipartUpload", "POST", &path, "uploads=", &headers, Vec::new())?;
+    let upload_id = xml::parse(&created.text())
+        .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?
+        .get("UploadId")
+        .to_string();
+
+    let chunk = chunk_size_for(item.size);
+    let parts: Vec<u64> = (1..=item.size.div_ceil(chunk)).collect();
+    let etags: Mutex<Vec<(u64, String)>> = Mutex::new(Vec::new());
+    let failure: Mutex<Option<Failure>> = Mutex::new(None);
+    let copy_source = format!("/{source_bucket}/{}", super::encode_key(&item.source));
+
+    pool.run(&parts, options.concurrency.is_none(), |part| {
+        if failure.lock().expect("mutex").is_some() {
+            return;
+        }
+        let start = (part - 1) * chunk;
+        let end = (start + chunk).min(item.size) - 1;
+        let result = (|| -> Result<(), Failure> {
+            let mut part_headers = sse_c_headers(options);
+            part_headers.push(("x-amz-copy-source".to_string(), copy_source.clone()));
+            part_headers
+                .push(("x-amz-copy-source-range".to_string(), format!("bytes={start}-{end}")));
+            if !source_etag.is_empty() {
+                part_headers
+                    .push(("x-amz-copy-source-if-match".to_string(), source_etag.clone()));
+            }
+            let response = conn.send_checked(
+                "UploadPartCopy",
+                "PUT",
+                &path,
+                &format!("partNumber={part}&uploadId={}", super::encode_query(&upload_id)),
+                &part_headers,
+                Vec::new(),
+            )?;
+            // The part ETag is in the body here, not a header.
+            let etag = xml::parse(&response.text())
+                .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?
+                .get("ETag")
+                .to_string();
+            etags.lock().expect("mutex").push((*part, etag));
+            pool.record_bytes(end - start + 1);
+            progress.add_bytes(end - start + 1);
+            Ok(())
+        })();
+        if let Err(e) = result {
+            if e.service_error_code.as_deref() == Some("SlowDown") {
+                pool.note_throttle();
+            }
+            *failure.lock().expect("mutex") = Some(e);
+        }
+    });
+
+    if let Some(e) = failure.into_inner().expect("mutex") {
+        let _ = conn.send(
+            "DELETE",
+            &path,
+            &format!("uploadId={}", super::encode_query(&upload_id)),
+            &[],
+            Vec::new(),
+        );
+        // A source that changed underneath us is reported as such rather than as a bare
+        // precondition failure.
+        if e.service_error_code.as_deref() == Some("PreconditionFailed") {
+            return Err(Failure::new(
+                exit::CLIENT_ERROR,
+                format!(
+                    "Contents of stored object \"{}\" in bucket \"{source_bucket}\" did not \
+                     match expected ETag.",
+                    item.source
+                ),
+            ));
+        }
+        return Err(e);
+    }
+
+    let mut collected = etags.into_inner().expect("mutex");
+    collected.sort_by_key(|(n, _)| *n);
+    let mut body = String::from("<CompleteMultipartUpload>");
+    for (number, etag) in &collected {
+        body.push_str(&format!("<Part><PartNumber>{number}</PartNumber><ETag>{etag}</ETag></Part>"));
+    }
+    body.push_str("</CompleteMultipartUpload>");
+    conn.send_checked(
+        "CompleteMultipartUpload",
+        "POST",
+        &path,
+        &format!("uploadId={}", super::encode_query(&upload_id)),
+        &sse_c_headers(options),
+        body.into_bytes(),
+    )?;
+    Ok(())
+}
+
 /// One server-side copy.
 fn copy_object(
     conn: &Conn,
@@ -1727,8 +1880,31 @@ fn copy(
         return Ok(exit::code(exit::SUCCESS));
     }
 
+    // A `CopyObject` is capped at 5 GiB, and a single request for a large object ties up
+    // one worker for the whole transfer. Anything at or above the multipart threshold is
+    // copied part by part with `UploadPartCopy`, with the parts sharing the pool.
+    let (large, small): (Vec<&Item>, Vec<&Item>) =
+        items.iter().partition(|i| i.size >= MULTIPART_THRESHOLD);
+
     let pool = Pool::new(options.concurrency);
-    pool.run(&items, options.concurrency.is_none(), |item| {
+    for item in large {
+        let result = multipart_copy(conn, source_conn, source_bucket, item, options, &pool, &progress);
+        finish(
+            &progress,
+            &outcome,
+            options,
+            word,
+            result,
+            &format!("s3://{source_bucket}/{}", item.source),
+            &format!("s3://{}", display_key(conn, &item.dest)),
+        );
+        if verb == Verb::Move {
+            let _ =
+                source_conn.send("DELETE", &source_conn.object_path(&item.source), "", &[], Vec::new());
+        }
+    }
+
+    pool.run(&small, options.concurrency.is_none(), |item| {
         let result = (|| -> Result<(), Failure> {
             let mut headers = object_headers(options, &item.dest);
             headers.push((
