@@ -8,6 +8,7 @@ pub mod bucket;
 pub mod conn;
 pub mod pool;
 pub mod progress;
+pub mod sync;
 pub mod transfer;
 pub mod ls;
 pub mod uri;
@@ -122,6 +123,7 @@ pub fn dispatch(parsed: &Parsed, globals: &Globals) -> Result<std::process::Exit
         "cp" => transfer::cp(parsed, globals),
         "mv" => transfer::mv(parsed, globals),
         "rm" => transfer::rm(parsed, globals),
+        "sync" => sync::run(parsed, globals),
         "mb" => bucket::mb(parsed, globals),
         "rb" => bucket::rb(parsed, globals),
         "presign" => bucket::presign(parsed, globals),

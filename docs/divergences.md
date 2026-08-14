@@ -738,3 +738,53 @@ Run against a scratch prefix and cleaned up afterwards:
   nothing) and `rm --recursive` all behave.
 - Cleanup verified: the scratch prefix lists zero objects afterwards from both CLIs, and
   the rest of the bucket is untouched.
+
+### `sync`
+
+A sorted merge-join over both listings, keyed on each entry's path relative to its root.
+Actions come out in key order, so deletes interleave with transfers rather than forming a
+separate phase — which is what the reference does.
+
+Three rules that are easy to get backwards, all covered by tests:
+
+- **The time test is asymmetric.** An upload is skipped when the destination is *at least
+  as new* as the source (`dest - src >= 0`); a download is skipped when the local file is
+  *no newer* than the object (`dest - src <= 0`). A local file newer than the object
+  therefore triggers a download — surprising, but correct.
+- **There is no tolerance.** Not a second, not a millisecond.
+- **Downloads stamp the local mtime to the object's `LastModified`.** Without it a clean
+  download leaves the local file newer than the object and the next sync repeats the whole
+  transfer.
+
+`--size-only` replaces the comparison entirely; `--exact-timestamps` tightens *only* the
+download case to require equality, leaving uploads alone. When both are given the
+reference lets `--exact-timestamps` win, which is reproduced. `--delete` removes objects on
+an upload and local *files* on a download, and only for entries that survived the filters.
+
+### A prefix is not a path
+
+`ListObjectsV2` takes a raw string prefix, so `s3://bucket/mut` also matches `mut2/...`.
+Every `dir_op` command — `cp --recursive`, `rm --recursive`, and all of `sync` — must
+append the separator. Without it a sync of one prefix silently pulled in a sibling's
+objects and wrote them into the destination. Found by giving two prefixes names where one
+was a prefix of the other; a test corpus of unrelated names would never have shown it.
+
+### Verified against real S3
+
+Both directions, with mutual agreement checked at each step — after our sync the reference
+reports nothing to do, and vice versa:
+
+| case | result |
+|---|---|
+| first sync uploads everything | 3 uploads |
+| repeat is a no-op | 0, and the reference agrees |
+| one file modified | exactly 1 re-uploaded |
+| sibling prefix isolation | 3 files, not 6 |
+| download round-trip | trees identical (`diff -r`) |
+| `--delete` up / down | object removed / local file removed |
+| `--exact-timestamps` | older local file downloads; default does not |
+| `--size-only` | mtime change ignored |
+
+The local fake server could not settle these: it returned a fixed `LastModified`, and once
+that was fixed the reference's own sync-download no-ops against it. Real S3 was the only
+usable oracle.

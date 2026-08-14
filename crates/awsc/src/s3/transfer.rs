@@ -12,7 +12,7 @@
 //! ten concurrent requests, the `upload:`/`download:`/`copy:`/`move:`/`delete:` result
 //! lines, and the exit-code rule (1 if anything failed, 2 if only warnings).
 
-use super::conn::Conn;
+pub use super::conn::Conn;
 use super::pool::Pool;
 use super::progress::Progress;
 use super::{param_error, uri::Location, xml};
@@ -45,6 +45,10 @@ pub struct Options {
     pub sse: Option<String>,
     pub content_type: Option<String>,
     pub excludes: Vec<(bool, String)>,
+    /// `--delete`, sync only.
+    pub delete: bool,
+    /// How entries present on both sides are compared, sync only.
+    pub strategy: super::sync::Strategy,
 }
 
 impl Options {
@@ -61,6 +65,8 @@ impl Options {
             sse: None,
             content_type: None,
             excludes: Vec::new(),
+            delete: false,
+            strategy: super::sync::Strategy::SizeAndTime,
         };
         let tokens = &parsed.extras;
         let mut i = 0;
@@ -104,11 +110,29 @@ impl Options {
                 // The last matching rule wins, so order is preserved.
                 "--exclude" => options.excludes.push((false, take(&mut i).unwrap_or_default())),
                 "--include" => options.excludes.push((true, take(&mut i).unwrap_or_default())),
+                // sync-only flags. `--size-only` and `--exact-timestamps` both claim the
+                // same slot; the reference lets the later registration win, which makes
+                // --exact-timestamps beat --size-only when both are given.
+                "--delete" => options.delete = true,
+                "--size-only" => {
+                    if options.strategy != super::sync::Strategy::ExactTimestamps {
+                        options.strategy = super::sync::Strategy::SizeOnly;
+                    }
+                }
+                "--exact-timestamps" => {
+                    options.strategy = super::sync::Strategy::ExactTimestamps
+                }
                 other => return Err(param_error(format!("Unknown options: {other}"))),
             }
             i += 1;
         }
         Ok((options, parsed.positionals.clone()))
+    }
+
+    /// Sync accepts the same flags; the distinction exists so `cp` keeps rejecting
+    /// `--delete` and friends as unknown options, exactly as the reference does.
+    pub fn parse_for_sync(parsed: &Parsed) -> Result<(Options, Vec<String>), Failure> {
+        Options::parse(parsed)
     }
 }
 
@@ -160,12 +184,18 @@ fn guess_content_type(key: &str) -> Option<String> {
 }
 
 /// One object to move.
-struct Item {
+pub struct Item {
     /// Local path or S3 key on the source side.
-    source: String,
+    pub source: String,
     /// S3 key or local path on the destination side.
-    dest: String,
-    size: u64,
+    pub dest: String,
+    pub size: u64,
+    /// Last modification, as seconds since the epoch.
+    ///
+    /// Sub-second precision is kept for local files and lost for S3 objects, whose
+    /// `LastModified` is whole seconds. `sync` compares these directly with no tolerance,
+    /// exactly as the reference does.
+    pub modified: f64,
 }
 
 /// The chunk size for an object, doubled until it fits within S3's 10,000-part limit.
@@ -190,14 +220,21 @@ pub fn rm(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Verb {
+pub enum Verb {
     Copy,
     Move,
     Remove,
+    Sync,
 }
 
 fn run(parsed: &Parsed, globals: &Globals, verb: Verb) -> Result<ExitCode, Failure> {
     let (options, paths) = Options::parse(parsed)?;
+    // Only sync understands these.
+    for flag in ["--delete", "--size-only", "--exact-timestamps"] {
+        if parsed.extras.iter().any(|t| t == flag || t.starts_with(&format!("{flag}="))) {
+            return Err(param_error(format!("Unknown options: {flag}")));
+        }
+    }
 
     let expected = if verb == Verb::Remove { 1 } else { 2 };
     // Too few positionals is argparse's "arguments are required" with a usage block; too
@@ -292,7 +329,7 @@ fn run(parsed: &Parsed, globals: &Globals, verb: Verb) -> Result<ExitCode, Failu
 /// the reference prefixes each pattern with the root and matches the full path. So
 /// `--exclude "sub/*"` only excludes `sub/` directly under the source, not a `sub/`
 /// nested deeper.
-fn included(path: &str, root: &str, rules: &[(bool, String)]) -> bool {
+pub fn included(path: &str, root: &str, rules: &[(bool, String)]) -> bool {
     let mut include = true;
     for (is_include, pattern) in rules {
         if glob_match(&anchor(root, pattern), path) {
@@ -385,13 +422,13 @@ fn match_class(pattern: &[char], start: usize, candidate: char) -> Option<(bool,
 /// Result accounting, which drives the exit code: 1 if anything failed, 2 if only
 /// warnings, 0 otherwise.
 #[derive(Default)]
-struct Outcome {
-    failed: AtomicU64,
-    warned: AtomicU64,
+pub struct Outcome {
+    pub failed: AtomicU64,
+    pub warned: AtomicU64,
 }
 
 impl Outcome {
-    fn code(&self) -> ExitCode {
+    pub fn code(&self) -> ExitCode {
         if self.failed.load(Ordering::Relaxed) > 0 {
             exit::code(1)
         } else if self.warned.load(Ordering::Relaxed) > 0 {
@@ -433,17 +470,18 @@ fn report_failure(progress: &Progress, options: &Options, line: &str) {
     eprintln!("{line}");
 }
 
-fn verb_word(verb: Verb, uploading: bool) -> &'static str {
+pub fn verb_word(verb: Verb, uploading: bool) -> &'static str {
     match verb {
         Verb::Move => "move",
         Verb::Remove => "delete",
-        Verb::Copy if uploading => "upload",
-        Verb::Copy => "download",
+        // `sync` reports the underlying operation, not the word `sync`.
+        Verb::Copy | Verb::Sync if uploading => "upload",
+        Verb::Copy | Verb::Sync => "download",
     }
 }
 
 /// Walk a local directory, or yield the single file.
-fn scan_local(root: &str, recursive: bool) -> Result<Vec<Item>, Failure> {
+pub fn scan_local(root: &str, recursive: bool) -> Result<Vec<Item>, Failure> {
     let path = std::path::Path::new(root);
     let io = |e: std::io::Error| Failure::new(exit::GENERAL_ERROR, e);
     if !recursive {
@@ -452,6 +490,7 @@ fn scan_local(root: &str, recursive: bool) -> Result<Vec<Item>, Failure> {
             source: root.to_string(),
             dest: String::new(),
             size: meta.len(),
+            modified: mtime_seconds(&meta),
         }]);
     }
     let mut out = Vec::new();
@@ -473,6 +512,7 @@ fn scan_local(root: &str, recursive: bool) -> Result<Vec<Item>, Failure> {
                     source: entry_path.to_string_lossy().into_owned(),
                     dest: relative,
                     size: meta.len(),
+                    modified: mtime_seconds(&meta),
                 });
             }
         }
@@ -482,8 +522,308 @@ fn scan_local(root: &str, recursive: bool) -> Result<Vec<Item>, Failure> {
     Ok(out)
 }
 
+/// Scan a local tree that may not exist yet — a sync destination often does not.
+pub fn scan_local_if_present(root: &str) -> Result<Vec<Item>, Failure> {
+    if !std::path::Path::new(root).exists() {
+        return Ok(Vec::new());
+    }
+    scan_local(root, true)
+}
+
+/// Execute a sync plan whose transfers are uploads.
+pub fn sync_upload(
+    conn: &Conn,
+    plan: Vec<super::sync::Action>,
+    key: &str,
+    options: &Options,
+    bucket: &str,
+) -> Result<ExitCode, Failure> {
+    let mut uploads = Vec::new();
+    let mut deletes = Vec::new();
+    for action in plan {
+        if action.delete {
+            deletes.push(action.item);
+        } else {
+            let mut item = action.item;
+            item.dest = join_key(key, &item.dest);
+            uploads.push(item);
+        }
+    }
+
+    let total: u64 = uploads.iter().map(|i| i.size).sum();
+    let count = (uploads.len() + deletes.len()) as u64;
+    let progress = Progress::new(count, total, options.progress && !options.quiet);
+    let outcome = Outcome::default();
+
+    if options.dryrun {
+        for item in &uploads {
+            println!(
+                "(dryrun) upload: {} to s3://{}",
+                display_local(&item.source),
+                display_key(conn, &item.dest)
+            );
+        }
+        for item in &deletes {
+            println!("(dryrun) delete: s3://{bucket}/{}", item.source);
+        }
+        return Ok(exit::code(exit::SUCCESS));
+    }
+
+    execute_uploads(conn, &uploads, options, "upload", &progress, &outcome)?;
+    execute_deletes(conn, &deletes, options, &progress, &outcome);
+    progress.clear();
+    Ok(outcome.code())
+}
+
+/// Execute a sync plan whose transfers are downloads.
+pub fn sync_download(
+    conn: &Conn,
+    plan: Vec<super::sync::Action>,
+    local: &str,
+    options: &Options,
+    bucket: &str,
+) -> Result<ExitCode, Failure> {
+    let mut downloads = Vec::new();
+    let mut deletes = Vec::new();
+    for action in plan {
+        if action.delete {
+            deletes.push(action.item);
+        } else {
+            let mut item = action.item;
+            item.dest = format!("{}/{}", local.trim_end_matches('/'), item.dest);
+            downloads.push(item);
+        }
+    }
+
+    let total: u64 = downloads.iter().map(|i| i.size).sum();
+    let count = (downloads.len() + deletes.len()) as u64;
+    let progress = Progress::new(count, total, options.progress && !options.quiet);
+    let outcome = Outcome::default();
+
+    if options.dryrun {
+        for item in &downloads {
+            println!(
+                "(dryrun) download: s3://{bucket}/{} to {}",
+                item.source,
+                display_local(&item.dest)
+            );
+        }
+        for item in &deletes {
+            println!("(dryrun) delete: {}", display_local(&item.source));
+        }
+        return Ok(exit::code(exit::SUCCESS));
+    }
+
+    let pool = Pool::new(options.concurrency);
+    pool.run(&downloads, options.concurrency.is_none(), |item| {
+        let result = get_object(conn, item, &progress, &pool).and_then(|_| {
+            // Stamp the local mtime to the object's LastModified. Without this a clean
+            // download leaves the local file newer than the object, and the next sync
+            // would download it all over again.
+            set_mtime(&item.dest, item.modified);
+            Ok(())
+        });
+        finish(
+            &progress,
+            &outcome,
+            options,
+            "download",
+            result,
+            &format!("s3://{bucket}/{}", item.source),
+            &display_local(&item.dest),
+        );
+    });
+
+    // `sync --delete` on a download removes local files, not objects.
+    for item in &deletes {
+        let result = std::fs::remove_file(&item.source)
+            .map_err(|e| Failure::new(exit::GENERAL_ERROR, e));
+        match result {
+            Ok(()) => {
+                if !options.quiet && !options.only_show_errors {
+                    progress.println(&format!("delete: {}", display_local(&item.source)));
+                }
+                progress.finish_file();
+            }
+            Err(e) => {
+                outcome.failed.fetch_add(1, Ordering::Relaxed);
+                if !options.quiet {
+                    progress.clear();
+                    eprintln!("delete failed: {} {}", display_local(&item.source), e.message());
+                }
+                progress.finish_file();
+            }
+        }
+    }
+
+    progress.clear();
+    Ok(outcome.code())
+}
+
+/// Execute a sync plan whose transfers are server-side copies.
+pub fn sync_copy(
+    conn: &Conn,
+    source_conn: &Conn,
+    plan: Vec<super::sync::Action>,
+    key: &str,
+    options: &Options,
+    source_bucket: &str,
+) -> Result<ExitCode, Failure> {
+    let mut copies = Vec::new();
+    let mut deletes = Vec::new();
+    for action in plan {
+        if action.delete {
+            deletes.push(action.item);
+        } else {
+            let mut item = action.item;
+            item.dest = join_key(key, &item.dest);
+            copies.push(item);
+        }
+    }
+
+    let total: u64 = copies.iter().map(|i| i.size).sum();
+    let count = (copies.len() + deletes.len()) as u64;
+    let progress = Progress::new(count, total, options.progress && !options.quiet);
+    let outcome = Outcome::default();
+
+    if options.dryrun {
+        for item in &copies {
+            println!(
+                "(dryrun) copy: s3://{source_bucket}/{} to s3://{}",
+                item.source,
+                display_key(conn, &item.dest)
+            );
+        }
+        for item in &deletes {
+            println!("(dryrun) delete: s3://{}", display_key(conn, &item.source));
+        }
+        return Ok(exit::code(exit::SUCCESS));
+    }
+
+    let pool = Pool::new(options.concurrency);
+    pool.run(&copies, options.concurrency.is_none(), |item| {
+        let result = copy_object(conn, source_bucket, item, options).inspect(|_| {
+            pool.record_bytes(item.size);
+            progress.add_bytes(item.size);
+        });
+        finish(
+            &progress,
+            &outcome,
+            options,
+            "copy",
+            result,
+            &format!("s3://{source_bucket}/{}", item.source),
+            &format!("s3://{}", display_key(conn, &item.dest)),
+        );
+    });
+    let _ = source_conn;
+    execute_deletes(conn, &deletes, options, &progress, &outcome);
+    progress.clear();
+    Ok(outcome.code())
+}
+
+/// Delete a set of objects.
+fn execute_deletes(
+    conn: &Conn,
+    items: &[Item],
+    options: &Options,
+    progress: &Progress,
+    outcome: &Outcome,
+) {
+    let pool = Pool::new(options.concurrency);
+    pool.run(items, options.concurrency.is_none(), |item| {
+        let result = conn
+            .send_checked(
+                "DeleteObject",
+                "DELETE",
+                &conn.object_path(&item.source),
+                "",
+                &[],
+                Vec::new(),
+            )
+            .map(|_| ());
+        let target = format!("s3://{}", display_key(conn, &item.source));
+        match result {
+            Ok(()) => {
+                if !options.quiet && !options.only_show_errors {
+                    progress.println(&format!("delete: {target}"));
+                }
+                progress.finish_file();
+            }
+            Err(failure) => {
+                outcome.failed.fetch_add(1, Ordering::Relaxed);
+                if !options.quiet {
+                    progress.clear();
+                    eprintln!("delete failed: {target} {}", failure.message());
+                }
+                progress.finish_file();
+            }
+        }
+    });
+}
+
+/// One server-side copy.
+fn copy_object(
+    conn: &Conn,
+    source_bucket: &str,
+    item: &Item,
+    options: &Options,
+) -> Result<(), Failure> {
+    let mut headers = object_headers(options, &item.dest);
+    headers.push((
+        "x-amz-copy-source".to_string(),
+        format!("/{source_bucket}/{}", super::encode_key(&item.source)),
+    ));
+    conn.send_checked("CopyObject", "PUT", &conn.object_path(&item.dest), "", &headers, Vec::new())?;
+    Ok(())
+}
+
+/// Set a file's modification time, best effort.
+fn set_mtime(path: &str, seconds: f64) {
+    #[cfg(unix)]
+    {
+        let Ok(c_path) = std::ffi::CString::new(path) else { return };
+        let times = [
+            libc::timeval { tv_sec: seconds as libc::time_t, tv_usec: 0 },
+            libc::timeval { tv_sec: seconds as libc::time_t, tv_usec: 0 },
+        ];
+        // SAFETY: `c_path` is NUL-terminated and `times` is a two-element array, which is
+        // what `utimes` expects. A failure only means the timestamp is left alone.
+        unsafe {
+            libc::utimes(c_path.as_ptr(), times.as_ptr());
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (path, seconds);
+}
+
+/// A file's modification time in seconds since the epoch.
+///
+/// An unreadable time becomes the epoch, matching the reference, which substitutes
+/// `EPOCH_TIME` and warns rather than skipping the file.
+fn mtime_seconds(meta: &std::fs::Metadata) -> f64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// A recursive S3 source is a *directory* prefix, so it gains a trailing slash.
+///
+/// Without it, `s3://bucket/mut` also matches `mut2/...`: ListObjectsV2 takes a raw string
+/// prefix, not a path. The reference appends the separator for every `dir_op` command,
+/// which is `cp --recursive`, `rm --recursive` and all of `sync`.
+pub fn dir_prefix(key: &str) -> String {
+    if key.is_empty() || key.ends_with('/') {
+        key.to_string()
+    } else {
+        format!("{key}/")
+    }
+}
+
 /// List every object under a prefix.
-fn scan_s3(conn: &Conn, prefix: &str) -> Result<Vec<Item>, Failure> {
+pub fn scan_s3(conn: &Conn, prefix: &str) -> Result<Vec<Item>, Failure> {
     let mut out = Vec::new();
     let mut token: Option<String> = None;
     loop {
@@ -506,6 +846,9 @@ fn scan_s3(conn: &Conn, prefix: &str) -> Result<Vec<Item>, Failure> {
             out.push(Item {
                 dest: relative.to_string(),
                 size: content.get("Size").parse().unwrap_or_default(),
+                modified: super::ls::parse_iso8601(content.get("LastModified"))
+                    .map(|s| s as f64)
+                    .unwrap_or(0.0),
                 source: key,
             });
         }
@@ -518,7 +861,7 @@ fn scan_s3(conn: &Conn, prefix: &str) -> Result<Vec<Item>, Failure> {
 }
 
 /// A 404 from `HeadObject` has an empty body, so the reference supplies the wording.
-fn missing_key_message(failure: Failure, key: &str) -> Failure {
+pub fn missing_key_message(failure: Failure, key: &str) -> Failure {
     if failure.service_error_code.as_deref() != Some("404") {
         return failure;
     }
@@ -535,7 +878,7 @@ fn missing_key_message(failure: Failure, key: &str) -> Failure {
 
 /// `os.path.abspath`: prepend the working directory and fold away `.`/`..`, without
 /// resolving symlinks.
-fn abspath(path: &str) -> String {
+pub fn abspath(path: &str) -> String {
     let raw = std::path::Path::new(path);
     let joined = if raw.is_absolute() {
         raw.to_path_buf()
@@ -564,7 +907,7 @@ fn abspath(path: &str) -> String {
 ///
 /// `os.path.join(os.path.relpath(dirname, '.'), basename)`, so a file in the current
 /// directory shows as `./name` and one elsewhere climbs with `../`.
-fn display_local(path: &str) -> String {
+pub fn display_local(path: &str) -> String {
     let absolute = std::path::Path::new(path);
     let absolute = if absolute.is_absolute() {
         absolute.to_path_buf()
@@ -589,7 +932,7 @@ fn display_local(path: &str) -> String {
 }
 
 /// Join a destination prefix and a relative path, tolerating a missing separator.
-fn join_key(prefix: &str, relative: &str) -> String {
+pub fn join_key(prefix: &str, relative: &str) -> String {
     if relative.is_empty() {
         return prefix.to_string();
     }
@@ -647,6 +990,20 @@ fn upload(
         return Ok(exit::code(exit::SUCCESS));
     }
 
+    execute_uploads(conn, &items, options, word, &progress, &outcome)?;
+    progress.clear();
+    Ok(outcome.code())
+}
+
+/// Upload a planned set of items. Shared by `cp`/`mv` and `sync`.
+pub fn execute_uploads(
+    conn: &Conn,
+    items: &[Item],
+    options: &Options,
+    word: &str,
+    progress: &Progress,
+    outcome: &Outcome,
+) -> Result<(), Failure> {
     // Open a multipart upload for each large object, then queue every part alongside the
     // small objects so one pool serves them all.
     let large: Vec<usize> = (0..items.len())
@@ -681,10 +1038,10 @@ fn upload(
                     Ok(()) => {
                         pool.record_bytes(items[*item].size);
                         progress.add_bytes(items[*item].size);
-                        report_item(&progress, &outcome, options, word, Ok(()), &items[*item], conn);
+                        report_item(progress, outcome, options, word, Ok(()), &items[*item], conn);
                     }
                     Err(e) => report_item(
-                        &progress, &outcome, options, word, Err(e), &items[*item], conn,
+                        progress, outcome, options, word, Err(e), &items[*item], conn,
                     ),
                 }
             }
@@ -737,11 +1094,9 @@ fn upload(
                 complete_upload(conn, item, upload, &parts)
             }
         };
-        report_item(&progress, &outcome, options, word, result, item, conn);
+        report_item(progress, outcome, options, word, result, item, conn);
     }
-
-    progress.clear();
-    Ok(outcome.code())
+    Ok(())
 }
 
 /// An in-flight multipart upload.
@@ -853,7 +1208,7 @@ fn report_item(
     );
 }
 
-fn display_key(conn: &Conn, key: &str) -> String {
+pub fn display_key(conn: &Conn, key: &str) -> String {
     // The bucket is in the host under virtual-host addressing; recover it for display.
     let host = &conn.endpoint.host;
     let bucket = if conn.endpoint.path_prefix.is_empty() {
@@ -934,7 +1289,7 @@ fn download(
 ) -> Result<ExitCode, Failure> {
     let mut items = if options.recursive {
         let root = format!("{bucket}/{}", key.trim_end_matches('/'));
-        let mut found = scan_s3(conn, key)?;
+        let mut found = scan_s3(conn, &dir_prefix(key))?;
         found.retain(|i| included(&format!("{bucket}/{}", i.source), &root, &options.excludes));
         found
     } else {
@@ -943,7 +1298,7 @@ fn download(
             .map_err(|e| missing_key_message(e, key))?;
         let size =
             head.header("content-length").and_then(|v| v.parse().ok()).unwrap_or_default();
-        vec![Item { source: key.to_string(), dest: String::new(), size }]
+        vec![Item { source: key.to_string(), dest: String::new(), size, modified: 0.0 }]
     };
 
     if options.recursive {
@@ -1080,7 +1435,7 @@ fn download(
     Ok(outcome.code())
 }
 
-fn create_parent(path: &str) -> Result<(), Failure> {
+pub fn create_parent(path: &str) -> Result<(), Failure> {
     if let Some(parent) = std::path::Path::new(path).parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
@@ -1122,7 +1477,7 @@ fn copy(
 ) -> Result<ExitCode, Failure> {
     let mut items = if options.recursive {
         let root = format!("{source_bucket}/{}", source_key.trim_end_matches('/'));
-        let mut found = scan_s3(source_conn, source_key)?;
+        let mut found = scan_s3(source_conn, &dir_prefix(source_key))?;
         found.retain(|i| {
             included(&format!("{source_bucket}/{}", i.source), &root, &options.excludes)
         });
@@ -1142,7 +1497,12 @@ fn copy(
             )
             .map_err(|e| missing_key_message(e, source_key))?;
         let size = head.header("content-length").and_then(|v| v.parse().ok()).unwrap_or_default();
-        vec![Item { source: source_key.to_string(), dest: dest_key.to_string(), size }]
+        vec![Item {
+            source: source_key.to_string(),
+            dest: dest_key.to_string(),
+            size,
+            modified: 0.0,
+        }]
     };
     items.retain(|i| !i.source.ends_with('/'));
 
@@ -1186,11 +1546,11 @@ fn remove(conn: &Conn, key: &str, options: &Options) -> Result<ExitCode, Failure
     let items = if options.recursive {
         let bucket = display_key(conn, "");
         let root = format!("{}{}", bucket, key.trim_end_matches('/'));
-        let mut found = scan_s3(conn, key)?;
+        let mut found = scan_s3(conn, &dir_prefix(key))?;
         found.retain(|i| included(&format!("{bucket}{}", i.source), &root, &options.excludes));
         found
     } else {
-        vec![Item { source: key.to_string(), dest: String::new(), size: 0 }]
+        vec![Item { source: key.to_string(), dest: String::new(), size: 0, modified: 0.0 }]
     };
 
     let progress = Progress::new(items.len() as u64, 0, options.progress && !options.quiet);

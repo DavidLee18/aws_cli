@@ -11,11 +11,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
 OBJECTS = {}          # (bucket, key) -> bytes
+MTIMES  = {}          # (bucket, key) -> epoch seconds, so sync can be exercised
 UPLOADS = {}          # upload_id -> {(part): bytes}
 LOCK = threading.Lock()
 COUNTER = [0]
 INFLIGHT = [0]
 PEAK = [0]
+
+def iso(bucket, key):
+    t = MTIMES.get((bucket, key), 0)
+    return time.strftime('%Y-%m-%dT%H:%M:%S.000Z', time.gmtime(t))
+
 
 def xml_escape(s):
     return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
@@ -76,10 +82,12 @@ class Handler(BaseHTTPRequestHandler):
                     return self._error(404, 'NoSuchKey', 'The specified key does not exist.')
                 data = OBJECTS[(sb, sk)]
                 OBJECTS[(bucket, key)] = data
+                MTIMES[(bucket, key)] = time.time()
                 body = ('<?xml version="1.0"?><CopyObjectResult><ETag>"%s"</ETag>'
                         '</CopyObjectResult>' % hashlib.md5(data).hexdigest()).encode()
                 return self._send(200, body, {'Content-Type': 'application/xml'})
             OBJECTS[(bucket, key)] = data
+            MTIMES[(bucket, key)] = time.time()
         self._send(200, b'', {'ETag': '"%s"' % hashlib.md5(data).hexdigest()})
 
     def do_POST(self):
@@ -99,6 +107,7 @@ class Handler(BaseHTTPRequestHandler):
                 uid = q['uploadId'][0]
                 parts = UPLOADS.pop(uid, {})
                 OBJECTS[(bucket, key)] = b''.join(parts[n] for n in sorted(parts))
+                MTIMES[(bucket, key)] = time.time()
                 body = ('<?xml version="1.0"?><CompleteMultipartUploadResult>'
                         '<Bucket>%s</Bucket><Key>%s</Key></CompleteMultipartUploadResult>'
                         % (bucket, xml_escape(key))).encode()
@@ -112,7 +121,9 @@ class Handler(BaseHTTPRequestHandler):
         if data is None:
             return self._send(404)
         self._send(200, b'', {'Content-Length': str(len(data)),
-                              'Last-Modified': 'Thu, 13 Aug 2026 21:48:16 GMT'})
+                              'Last-Modified': time.strftime(
+                                  '%a, %d %b %Y %H:%M:%S GMT',
+                                  time.gmtime(MTIMES.get((bucket, key), 0)))})
 
     def do_GET(self):
         bucket, key, q = self._split()
@@ -134,8 +145,8 @@ class Handler(BaseHTTPRequestHandler):
                         prefixes.add(prefix + rest.split(delim)[0] + delim)
                         continue
                     out.append('<Contents><Key>%s</Key><Size>%d</Size>'
-                               '<LastModified>2026-08-13T21:48:16.000Z</LastModified></Contents>'
-                               % (xml_escape(k), len(OBJECTS[(bucket, k)])))
+                               '<LastModified>%s</LastModified></Contents>'
+                               % (xml_escape(k), len(OBJECTS[(bucket, k)]), iso(bucket, k)))
                 for p in sorted(prefixes):
                     out.append('<CommonPrefixes><Prefix>%s</Prefix></CommonPrefixes>' % xml_escape(p))
                 out.append('</ListBucketResult>')
@@ -158,6 +169,7 @@ class Handler(BaseHTTPRequestHandler):
                 UPLOADS.pop(q['uploadId'][0], None)
                 return self._send(204)
             OBJECTS.pop((bucket, key), None)
+            MTIMES.pop((bucket, key), None)
         self._send(204)
 
 if __name__ == '__main__':

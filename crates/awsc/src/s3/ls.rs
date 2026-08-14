@@ -289,7 +289,7 @@ fn last_modified(iso: &str) -> String {
 }
 
 /// S3 returns `2026-08-13T21:48:16.000Z`; a fractional part and the `Z` are both optional.
-fn parse_iso8601(value: &str) -> Option<i64> {
+pub fn parse_iso8601(value: &str) -> Option<i64> {
     let bytes = value.as_bytes();
     if bytes.len() < 19 || bytes[4] != b'-' || bytes[7] != b'-' || bytes[10] != b'T' {
         return None;
