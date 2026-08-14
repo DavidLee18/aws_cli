@@ -1002,3 +1002,42 @@ argparse's own extras accumulation: `--aa 1 --bb 2 --cc 3` prints
 `--aa, --bb, 2, --cc, 3, 1`. One and two unknown flags match exactly; beyond that the same
 set appears in a different order. Reproducing it means porting argparse's option-scanning
 loop, which is a lot of machinery for the ordering of an error message nobody parses.
+
+---
+
+## The remaining `s3` transfer flags
+
+`--metadata`, `--metadata-directive`, `--cache-control`, `--content-disposition`,
+`--content-encoding`, `--content-language`, `--expires`, `--website-redirect`, `--grants`,
+`--sse-kms-key-id`, `--sse-c`, `--sse-c-key`, `--follow-symlinks` /
+`--no-follow-symlinks`, and the streaming forms `cp - s3://...` and `cp s3://... -`.
+
+Verified against real S3: uploading with `--metadata Key1=v1,Key2=v2 --content-type
+text/plain --cache-control max-age=60` produces a `head-object` identical to the
+reference's, and the streaming forms round-trip stdin to stdout.
+
+`--sse-c` and `--grants` could only be verified as far as S3's own rejection — the test
+bucket blocks SSE-C uploads and disallows ACLs — so the headers demonstrably reach the
+service and are understood, but no end-to-end round trip was possible here. SSE-C sends
+the key base64-encoded with its MD5 alongside, which is how S3 detects a key mangled in
+transit.
+
+### `DirEntry::metadata` does not follow symlinks
+
+`std::fs::DirEntry::metadata` deliberately does *not* traverse symlinks, unlike
+`std::fs::metadata`. Following is the CLI's **default**, so a symlinked file was being
+skipped from every recursive upload: the reference copied two files where we copied one.
+The link is now resolved explicitly, and a broken link is skipped rather than failing the
+whole walk.
+
+This was only visible by counting files against the reference — the transfer succeeded and
+reported success either way.
+
+### Still outstanding
+
+- `--sse-c-copy-source` / `--sse-c-copy-source-key` for `s3 -> s3` copies of
+  customer-encrypted objects.
+- `--copy-props`, which decides whether a multipart copy re-fetches the source's metadata
+  and tags. Our copies use `CopyObject` for every size, so the server preserves them and
+  the flag has nothing to change yet; it matters once multipart copy lands.
+- `--request-payer`, `--checksum-algorithm`, `--checksum-mode`, `--expected-size`.

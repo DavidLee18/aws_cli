@@ -16,6 +16,9 @@ aws-cli-runtime = { workspace = true }
 aws-cli-output = { workspace = true }
 serde_json = { workspace = true }
 regex = "1"
+# Only for SSE-C: S3 requires the customer key's MD5 alongside the key itself.
+md-5 = "0.10"
+base64ct = { version = "1", features = ["alloc"] }
 quick-xml = { workspace = true }
 serde = { workspace = true }
 

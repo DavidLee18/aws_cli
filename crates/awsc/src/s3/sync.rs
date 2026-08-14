@@ -83,7 +83,7 @@ pub fn run(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> {
             let client = Client::for_bucket(&model, globals, Some(bucket))?;
             let conn = transfer::Conn::from_client(&client, globals);
             let root = transfer::abspath(local);
-            let mut left = transfer::scan_local(local, true)?;
+            let mut left = transfer::scan_local(local, true, options.follow_symlinks)?;
             left.retain(|i| transfer::included(&i.source, &root, &options.excludes));
             let right = transfer::scan_s3(&conn, &transfer::dir_prefix(key))?;
             let plan = plan(&left, &right, options.strategy, Verb::Sync, true, options.delete);

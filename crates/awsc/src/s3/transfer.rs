@@ -44,6 +44,24 @@ pub struct Options {
     pub acl: Option<String>,
     pub sse: Option<String>,
     pub content_type: Option<String>,
+    pub cache_control: Option<String>,
+    pub content_disposition: Option<String>,
+    pub content_encoding: Option<String>,
+    pub content_language: Option<String>,
+    pub expires: Option<String>,
+    pub website_redirect: Option<String>,
+    /// `--metadata`, user metadata sent as `x-amz-meta-*`.
+    pub metadata: Vec<(String, String)>,
+    /// `--metadata-directive`, COPY or REPLACE. Copies only.
+    pub metadata_directive: Option<String>,
+    /// `--grants`, each `Permission=Grantee_Type=Grantee_ID`.
+    pub grants: Vec<String>,
+    pub sse_kms_key_id: Option<String>,
+    /// `--sse-c` and `--sse-c-key`: customer-provided encryption.
+    pub sse_c: Option<String>,
+    pub sse_c_key: Option<String>,
+    /// `--follow-symlinks` is the default; `--no-follow-symlinks` turns it off.
+    pub follow_symlinks: bool,
     pub excludes: Vec<(bool, String)>,
     /// `--delete`, sync only.
     pub delete: bool,
@@ -64,6 +82,19 @@ impl Options {
             acl: None,
             sse: None,
             content_type: None,
+            cache_control: None,
+            content_disposition: None,
+            content_encoding: None,
+            content_language: None,
+            expires: None,
+            website_redirect: None,
+            metadata: Vec::new(),
+            metadata_directive: None,
+            grants: Vec::new(),
+            sse_kms_key_id: None,
+            sse_c: None,
+            sse_c_key: None,
+            follow_symlinks: true,
             excludes: Vec::new(),
             delete: false,
             strategy: super::sync::Strategy::SizeAndTime,
@@ -107,6 +138,39 @@ impl Options {
                 "--acl" => options.acl = take(&mut i),
                 "--sse" => options.sse = Some(take(&mut i).unwrap_or_else(|| "AES256".into())),
                 "--content-type" => options.content_type = take(&mut i),
+                "--cache-control" => options.cache_control = take(&mut i),
+                "--content-disposition" => options.content_disposition = take(&mut i),
+                "--content-encoding" => options.content_encoding = take(&mut i),
+                "--content-language" => options.content_language = take(&mut i),
+                "--expires" => options.expires = take(&mut i),
+                "--website-redirect" => options.website_redirect = take(&mut i),
+                "--metadata-directive" => options.metadata_directive = take(&mut i),
+                "--sse-kms-key-id" => options.sse_kms_key_id = take(&mut i),
+                "--sse-c" => {
+                    options.sse_c = Some(take(&mut i).unwrap_or_else(|| "AES256".into()))
+                }
+                "--sse-c-key" => options.sse_c_key = take(&mut i),
+                "--follow-symlinks" => options.follow_symlinks = true,
+                "--no-follow-symlinks" => options.follow_symlinks = false,
+                // `--grants a=b=c d=e=f` takes every following non-flag token.
+                "--grants" => {
+                    if let Some(first) = inline.clone() {
+                        options.grants.push(first);
+                    }
+                    while let Some(next) = tokens.get(i + 1) {
+                        if next.starts_with("--") {
+                            break;
+                        }
+                        options.grants.push(next.clone());
+                        i += 1;
+                    }
+                }
+                // `--metadata` is a map: either `KeyName1=string,KeyName2=string`
+                // shorthand or a JSON object.
+                "--metadata" => {
+                    let raw = take(&mut i).unwrap_or_default();
+                    options.metadata = parse_metadata(&raw)?;
+                }
                 // The last matching rule wins, so order is preserved.
                 "--exclude" => options.excludes.push((false, take(&mut i).unwrap_or_default())),
                 "--include" => options.excludes.push((true, take(&mut i).unwrap_or_default())),
@@ -136,6 +200,52 @@ impl Options {
     }
 }
 
+/// `--metadata` takes either `Key=value,Key2=value2` shorthand or a JSON object.
+fn parse_metadata(raw: &str) -> Result<Vec<(String, String)>, Failure> {
+    let trimmed = raw.trim();
+    if trimmed.starts_with('{') {
+        let parsed: serde_json::Map<String, serde_json::Value> = serde_json::from_str(trimmed)
+            .map_err(|_| param_error("Error parsing parameter '--metadata': Invalid JSON received."))?;
+        return Ok(parsed
+            .into_iter()
+            .map(|(k, v)| (k, v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string())))
+            .collect());
+    }
+    let mut out = Vec::new();
+    for pair in trimmed.split(',').filter(|p| !p.is_empty()) {
+        let Some((key, value)) = pair.split_once('=') else {
+            // The shorthand parser reports the position it gave up at, with a caret under
+            // the offending input on the following lines.
+            return Err(param_error(format!(
+                "Error parsing parameter '--metadata': Expected: '=', received: 'EOF' \
+                 for input:\n {pair}\n{}^",
+                " ".repeat(pair.len())
+            )));
+        };
+        out.push((key.to_string(), value.to_string()));
+    }
+    Ok(out)
+}
+
+/// The SSE-C headers: the key travels base64-encoded with its MD5 alongside, which S3
+/// uses to detect a key mangled in transit.
+fn sse_c_headers(options: &Options) -> Vec<(String, String)> {
+    let (Some(algorithm), Some(key)) = (&options.sse_c, &options.sse_c_key) else {
+        return Vec::new();
+    };
+    use base64ct::{Base64, Encoding};
+    use md5::{Digest, Md5};
+    let raw = key.as_bytes();
+    vec![
+        ("x-amz-server-side-encryption-customer-algorithm".into(), algorithm.clone()),
+        ("x-amz-server-side-encryption-customer-key".into(), Base64::encode_string(raw)),
+        (
+            "x-amz-server-side-encryption-customer-key-md5".into(),
+            Base64::encode_string(&Md5::digest(raw)),
+        ),
+    ]
+}
+
 /// Per-object metadata headers, shared by uploads and copies.
 fn object_headers(options: &Options, key: &str) -> Vec<(String, String)> {
     let mut headers = Vec::new();
@@ -147,6 +257,43 @@ fn object_headers(options: &Options, key: &str) -> Vec<(String, String)> {
     }
     if let Some(sse) = &options.sse {
         headers.push(("x-amz-server-side-encryption".into(), sse.clone()));
+    }
+    if let Some(kms) = &options.sse_kms_key_id {
+        headers.push(("x-amz-server-side-encryption-aws-kms-key-id".into(), kms.clone()));
+    }
+    headers.extend(sse_c_headers(options));
+    for (header, value) in [
+        ("cache-control", &options.cache_control),
+        ("content-disposition", &options.content_disposition),
+        ("content-encoding", &options.content_encoding),
+        ("content-language", &options.content_language),
+        ("expires", &options.expires),
+        ("x-amz-website-redirect-location", &options.website_redirect),
+        ("x-amz-metadata-directive", &options.metadata_directive),
+    ] {
+        if let Some(value) = value {
+            headers.push((header.to_string(), value.clone()));
+        }
+    }
+    for (name, value) in &options.metadata {
+        headers.push((format!("x-amz-meta-{name}"), value.clone()));
+    }
+    // `Permission=Grantee_Type=Grantee_ID`, one header per permission.
+    for grant in &options.grants {
+        let mut parts = grant.splitn(3, '=');
+        let (Some(permission), Some(kind), Some(id)) =
+            (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        let header = match permission {
+            "read" => "x-amz-grant-read",
+            "readacl" => "x-amz-grant-read-acp",
+            "writeacl" => "x-amz-grant-write-acp",
+            "full" => "x-amz-grant-full-control",
+            _ => continue,
+        };
+        headers.push((header.to_string(), format!("{kind}={id}")));
     }
     let content_type = options.content_type.clone().or_else(|| guess_content_type(key));
     if let Some(ct) = content_type {
@@ -278,6 +425,40 @@ fn run(parsed: &Parsed, globals: &Globals, verb: Verb) -> Result<ExitCode, Failu
 
     let outcome = (|| -> Result<ExitCode, Failure> {
     match (&source, &dest, verb) {
+        // Streaming forms: `cp - s3://...` reads stdin, `cp s3://... -` writes stdout.
+        // Both suppress the result line, as the reference does by forcing
+        // `only_show_errors` — stdout belongs to the object, not to progress reporting.
+        (Location::Stream, Location::S3 { bucket, key }, _) => {
+            if options.recursive {
+                return Err(param_error(
+                    "Streaming currently is only compatible with non-recursive cp commands",
+                ));
+            }
+            let client = Client::for_bucket(&model, globals, Some(bucket))?;
+            let conn = Conn::from_client(&client, globals);
+            let mut body = Vec::new();
+            std::io::Read::read_to_end(&mut std::io::stdin(), &mut body)
+                .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
+            let headers = object_headers(&options, key);
+            conn.send_checked("PutObject", "PUT", &conn.object_path(key), "", &headers, body)?;
+            Ok(exit::code(exit::SUCCESS))
+        }
+        (Location::S3 { bucket, key }, Location::Stream, _) => {
+            if options.recursive {
+                return Err(param_error(
+                    "Streaming currently is only compatible with non-recursive cp commands",
+                ));
+            }
+            let _ = bucket;
+            let client = Client::for_bucket(&model, globals, Some(bucket))?;
+            let conn = Conn::from_client(&client, globals);
+            let response = conn
+                .send_checked("GetObject", "GET", &conn.object_path(key), "", &[], Vec::new())
+                .map_err(|e| missing_key_message(e, key))?;
+            std::io::Write::write_all(&mut std::io::stdout(), &response.bytes)
+                .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
+            Ok(exit::code(exit::SUCCESS))
+        }
         (Location::S3 { bucket, key }, _, Verb::Remove) => {
             let client = Client::for_bucket(&model, globals, Some(bucket))?;
             let conn = Conn::from_client(&client, globals);
@@ -481,7 +662,7 @@ pub fn verb_word(verb: Verb, uploading: bool) -> &'static str {
 }
 
 /// Walk a local directory, or yield the single file.
-pub fn scan_local(root: &str, recursive: bool) -> Result<Vec<Item>, Failure> {
+pub fn scan_local(root: &str, recursive: bool, follow_symlinks: bool) -> Result<Vec<Item>, Failure> {
     let path = std::path::Path::new(root);
     let io = |e: std::io::Error| Failure::new(exit::GENERAL_ERROR, e);
     if !recursive {
@@ -499,7 +680,14 @@ pub fn scan_local(root: &str, recursive: bool) -> Result<Vec<Item>, Failure> {
         for entry in std::fs::read_dir(&dir).map_err(io)? {
             let entry = entry.map_err(io)?;
             let entry_path = entry.path();
-            let meta = entry.metadata().map_err(io)?;
+            // `DirEntry::metadata` does NOT traverse symlinks, unlike `fs::metadata` —
+            // following is the default, so the link has to be resolved explicitly.
+            // A broken link is skipped rather than failing the whole walk.
+            let link_meta = std::fs::symlink_metadata(&entry_path).map_err(io)?;
+            if link_meta.file_type().is_symlink() && !follow_symlinks {
+                continue;
+            }
+            let Ok(meta) = std::fs::metadata(&entry_path) else { continue };
             if meta.is_dir() {
                 stack.push(entry_path);
             } else if meta.is_file() {
@@ -527,7 +715,7 @@ pub fn scan_local_if_present(root: &str) -> Result<Vec<Item>, Failure> {
     if !std::path::Path::new(root).exists() {
         return Ok(Vec::new());
     }
-    scan_local(root, true)
+    scan_local(root, true, true)
 }
 
 /// Execute a sync plan whose transfers are uploads.
@@ -954,7 +1142,7 @@ fn upload(
     options: &Options,
     verb: Verb,
 ) -> Result<ExitCode, Failure> {
-    let mut items = scan_local(local, options.recursive)?;
+    let mut items = scan_local(local, options.recursive, options.follow_symlinks)?;
     if !options.recursive {
         let base = std::path::Path::new(local)
             .file_name()
