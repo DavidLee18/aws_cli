@@ -163,6 +163,27 @@ the reference while building the STS vertical slice.
   - `boto_truncate_amount` is how many items of the cut page were already returned; a
     resume skips exactly those, and offsets compose across successive resumes.
 
+- **Argument layer** — implemented: the **shorthand parser** (a port of the
+  recursive-descent grammar, including the backtracking that makes `foo=a,b,c=d` split
+  into `foo=[a,b]` plus `c=d`), `file://`/`fileb://` expansion **before** shorthand or
+  JSON parsing, the JSON short-circuit (a value starting with `[` or `{` disables
+  shorthand entirely, with no fallback if the JSON then fails), model-driven scalar
+  coercion, `--cli-input-json`/`--cli-input-yaml`, and `--generate-cli-skeleton input`.
+
+  `--cli-input-*` is a **shallow, top-level-key-only, non-clobbering fill**: command-line
+  arguments win, and a key an argument set discards the document's value wholesale rather
+  than deep-merging.
+
+  Refused rather than approximated: `--generate-cli-skeleton yaml-input` (annotates every
+  member with `# [REQUIRED] <documentation>`) and `output` (runs full parameter
+  validation before stubbing the response — we have no validation layer). The two
+  hardcoded shorthand back-compat cases (the `firehose`/`workspaces`/`elb`
+  list-of-single-member expansion, and the `{"Value": x}` form) are also not ported.
+
+- **Parameter validation** is not implemented — the reference validates min/max lengths,
+  patterns and required members client-side before calling. We let the service reject
+  bad input instead, which changes both the message and the exit code.
+
 - **Retries** are not implemented (the reference defaults to `standard` mode).
 
 

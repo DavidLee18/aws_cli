@@ -1,7 +1,8 @@
 //! Command-line parsing and model-driven parameter binding.
 
 use aws_cli_model::shape::StructureShape;
-use aws_cli_model::{naming, Model, Shape};
+use aws_cli_model::{naming, Model, Shape, ShapeId};
+use aws_cli_protocol::shorthand;
 use aws_cli_output::Format;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
@@ -36,6 +37,9 @@ pub struct Parsed {
     pub ca_bundle: Option<String>,
     pub read_timeout: Option<u64>,
     pub connect_timeout: Option<u64>,
+    /// `--cli-input-json` / `--cli-input-yaml`, already read from disk if `file://`.
+    pub cli_input: Option<String>,
+    pub generate_skeleton: Option<String>,
 }
 
 pub fn parse(argv: &[String]) -> Result<Outcome, String> {
@@ -80,6 +84,8 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
         ca_bundle: None,
         read_timeout: None,
         connect_timeout: None,
+        cli_input: None,
+        generate_skeleton: None,
     };
 
     let mut i = 2;
@@ -154,6 +160,26 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
                 let _ = take_value()?;
             }
             "--no-cli-pager" => {}
+            "--cli-input-json" | "--cli-input-yaml" => {
+                if parsed.cli_input.is_some() {
+                    return Err("Only one --cli-input- parameter may be specified.".to_string());
+                }
+                parsed.cli_input = Some(take_value()?);
+            }
+            "--generate-cli-skeleton" => {
+                // `nargs='?'` with `const='input'`: a bare flag means `input`.
+                let mode = if inline.is_some() {
+                    take_value()?
+                } else if argv.get(i + 1).is_some_and(|n| {
+                    matches!(n.as_str(), "input" | "output" | "yaml-input")
+                }) {
+                    i += 1;
+                    argv[i].clone()
+                } else {
+                    "input".to_string()
+                };
+                parsed.generate_skeleton = Some(mode);
+            }
             "--help" => return Ok(Outcome::Help),
             other => {
                 // Operation parameters are resolved against the model later; store the
@@ -213,27 +239,201 @@ pub fn build_input(
         };
         let member = &shape.members[*member_name];
 
-        let value = match model.shape(&member.target) {
-            Some(Shape::Boolean(_)) => Value::Bool(!negated),
-            Some(Shape::Integer(_) | Shape::Long(_) | Shape::Short(_) | Shape::Byte(_)) => {
-                let v = raw.as_deref().ok_or_else(|| format!("{flag} requires a value"))?;
-                Value::from(v.parse::<i64>().map_err(|_| format!("{flag}: `{v}` is not an integer"))?)
-            }
-            Some(Shape::Float(_) | Shape::Double(_)) => {
-                let v = raw.as_deref().ok_or_else(|| format!("{flag} requires a value"))?;
-                Value::from(v.parse::<f64>().map_err(|_| format!("{flag}: `{v}` is not a number"))?)
-            }
-            Some(Shape::List(_) | Shape::Set(_)) => {
-                let v = raw.as_deref().ok_or_else(|| format!("{flag} requires a value"))?;
-                Value::Array(v.split_whitespace().map(|s| Value::String(s.to_string())).collect())
-            }
-            _ => Value::String(
-                raw.clone().ok_or_else(|| format!("{flag} requires a value"))?,
-            ),
-        };
+        // Booleans take no value at all.
+        if matches!(model.shape(&member.target), Some(Shape::Boolean(_))) {
+            out.insert((*member_name).clone(), Value::Bool(!negated));
+            continue;
+        }
+        let raw_value = raw.as_deref().ok_or_else(|| format!("{flag} requires a value"))?;
+
+        // `file://` and `fileb://` are expanded FIRST, before shorthand or JSON parsing —
+        // that is why `--tags file://tags.json` works: the loaded text starts with `[`,
+        // which then trips the JSON path below.
+        let expanded = expand_paramfile(raw_value).map_err(|e| format!("{flag}: {e}"))?;
+
+        let value = bind_value(model, &member.target, &expanded, flag)?;
         out.insert((*member_name).clone(), value);
     }
     Ok(Some(Value::Object(out)))
+}
+
+/// Expand a `file://` or `fileb://` reference. Anything else is returned unchanged.
+///
+/// These are the ONLY schemes v2 supports — `http://` and `s3://` existed in v1 and were
+/// removed.
+pub fn expand_paramfile(value: &str) -> Result<String, String> {
+    let (prefix, binary) = if let Some(rest) = value.strip_prefix("fileb://") {
+        (rest, true)
+    } else if let Some(rest) = value.strip_prefix("file://") {
+        (rest, false)
+    } else {
+        return Ok(value.to_string());
+    };
+
+    let path = shellexpand(prefix);
+    let bytes = std::fs::read(&path)
+        .map_err(|e| format!("Unable to load paramfile {value}: {e}"))?;
+    if binary {
+        // Binary content is carried as-is; the blob layer decides the encoding.
+        return Ok(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    String::from_utf8(bytes).map_err(|_| {
+        format!(
+            "Unable to load paramfile {value}: file contents could not be decoded. \
+             If this is a binary file, please use the fileb:// prefix instead of file://"
+        )
+    })
+}
+
+/// `~` and `$VAR` expansion, as the reference applies before opening.
+fn shellexpand(path: &str) -> String {
+    let expanded = match path.strip_prefix("~/") {
+        Some(rest) => match std::env::var("HOME") {
+            Ok(home) => format!("{home}/{rest}"),
+            Err(_) => path.to_string(),
+        },
+        None => path.to_string(),
+    };
+    expanded
+}
+
+/// Turn one raw argument value into JSON, choosing between JSON, shorthand and scalar
+/// coercion the way the reference does.
+fn bind_value(
+    model: &Model,
+    target: &ShapeId,
+    raw: &str,
+    flag: &str,
+) -> Result<Value, String> {
+    let shape = model.shape(target);
+
+    // A value that looks like JSON disables shorthand ENTIRELY for this argument — and
+    // there is no fallback if the JSON then fails to parse.
+    let looks_like_json = raw.trim_start().starts_with('[') || raw.trim_start().starts_with('{');
+    if looks_like_json {
+        return serde_json::from_str(raw).map_err(|e| {
+            format!("Error parsing parameter '{flag}': Invalid JSON: {e}\nJSON received: {raw}")
+        });
+    }
+
+    match shape {
+        Some(Shape::Structure(_) | Shape::Union(_) | Shape::Map(_)) => {
+            let parsed = shorthand::parse(raw)
+                .map_err(|e| format!("Error parsing parameter '{flag}': {e}"))?;
+            Ok(coerce(model, target, parsed))
+        }
+        Some(Shape::List(list) | Shape::Set(list)) => {
+            // A list of complex members takes shorthand; a list of scalars is just
+            // whitespace-separated values.
+            let member_is_complex = matches!(
+                model.shape(&list.member.target),
+                Some(Shape::Structure(_) | Shape::Union(_) | Shape::List(_) | Shape::Map(_))
+            );
+            if member_is_complex {
+                let parsed = shorthand::parse(raw)
+                    .map_err(|e| format!("Error parsing parameter '{flag}': {e}"))?;
+                Ok(coerce(model, target, parsed))
+            } else {
+                let member_target = list.member.target.clone();
+                Ok(Value::Array(
+                    raw.split_whitespace()
+                        .map(|s| coerce_scalar(model, &member_target, s))
+                        .collect(),
+                ))
+            }
+        }
+        _ => Ok(coerce_scalar(model, target, raw)),
+    }
+}
+
+/// Apply the model to a shorthand-parsed value: coerce scalars and wrap a bare value
+/// where the shape wants a list.
+fn coerce(model: &Model, target: &ShapeId, value: Value) -> Value {
+    match model.shape(target) {
+        Some(Shape::Structure(s) | Shape::Union(s)) => match value {
+            Value::Object(map) => Value::Object(
+                map.into_iter()
+                    .map(|(k, v)| {
+                        let coerced = match s.members.get(&k) {
+                            Some(member) => coerce(model, &member.target, v),
+                            None => v,
+                        };
+                        (k, coerced)
+                    })
+                    .collect(),
+            ),
+            other => other,
+        },
+        Some(Shape::List(list) | Shape::Set(list)) => {
+            let member_target = list.member.target.clone();
+            match value {
+                Value::Array(items) => Value::Array(
+                    items.into_iter().map(|v| coerce(model, &member_target, v)).collect(),
+                ),
+                // A bare value where a list is wanted becomes a one-element list.
+                single => Value::Array(vec![coerce(model, &member_target, single)]),
+            }
+        }
+        Some(Shape::Map(map_shape)) => {
+            let value_target = map_shape.value.target.clone();
+            match value {
+                Value::Object(map) => Value::Object(
+                    map.into_iter().map(|(k, v)| (k, coerce(model, &value_target, v))).collect(),
+                ),
+                other => other,
+            }
+        }
+        _ => match value {
+            Value::String(s) => coerce_scalar(model, target, &s),
+            other => other,
+        },
+    }
+}
+
+/// Scalar coercion. Note the boolean rule: inside shorthand only the literal `true`/
+/// `false` (case-insensitive) convert; anything else stays a string and is rejected
+/// later, which is what the reference does.
+fn coerce_scalar(model: &Model, target: &ShapeId, raw: &str) -> Value {
+    match model.shape(target) {
+        Some(Shape::Integer(_) | Shape::Long(_) | Shape::Short(_) | Shape::Byte(_)) => {
+            raw.parse::<i64>().map(Value::from).unwrap_or_else(|_| Value::String(raw.into()))
+        }
+        Some(Shape::Float(_) | Shape::Double(_)) => {
+            raw.parse::<f64>().map(Value::from).unwrap_or_else(|_| Value::String(raw.into()))
+        }
+        Some(Shape::Boolean(_)) => {
+            if raw.eq_ignore_ascii_case("true") {
+                Value::Bool(true)
+            } else if raw.eq_ignore_ascii_case("false") {
+                Value::Bool(false)
+            } else {
+                Value::String(raw.to_string())
+            }
+        }
+        _ => Value::String(raw.to_string()),
+    }
+}
+
+/// Merge a `--cli-input-json`/`-yaml` document into the built parameters.
+///
+/// A **shallow, top-level-key-only, non-clobbering fill**: command-line arguments win,
+/// and there is no recursion into nested structures. If an argument set a top-level key,
+/// the document's value for that key is discarded wholesale.
+pub fn merge_cli_input(built: &mut Value, document: &Value) -> Result<(), String> {
+    let Some(doc) = document.as_object() else {
+        return Err(format!(
+            "Invalid type: expecting map, received {}",
+            if document.is_array() { "list" } else { "scalar" }
+        ));
+    };
+    if !built.is_object() {
+        *built = Value::Object(Default::default());
+    }
+    let target = built.as_object_mut().expect("just ensured object");
+    for (key, value) in doc {
+        target.entry(key.clone()).or_insert_with(|| value.clone());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -285,4 +485,93 @@ mod tests {
         assert!(parse(&argv(&["sts"])).is_err());
         assert!(parse(&argv(&["sts", "get-caller-identity", "--output", "xml"])).is_err());
     }
+}
+
+/// Build a `--generate-cli-skeleton` document from a shape.
+///
+/// Placeholder values follow botocore's `ArgumentGenerator`: `""` for strings (or the
+/// first enum value), `0`, `0.0`, `true`, `1970-01-01T00:00:00` for timestamps, `null`
+/// for blobs, and a **one-element** list. Recursion is guarded by a shape-name stack that
+/// stops on the second re-entry, which is what terminates recursive models.
+pub fn generate_skeleton(
+    model: &Model,
+    shape: Option<&StructureShape>,
+    use_member_names: bool,
+) -> Value {
+    let Some(shape) = shape else { return Value::Object(Default::default()) };
+    let mut stack = Vec::new();
+    skeleton_structure(model, shape, use_member_names, &mut stack)
+}
+
+fn skeleton_structure(
+    model: &Model,
+    shape: &StructureShape,
+    use_member_names: bool,
+    stack: &mut Vec<String>,
+) -> Value {
+    let mut out = serde_json::Map::new();
+    for (name, member) in &shape.members {
+        out.insert(
+            name.clone(),
+            skeleton_value(model, &member.target, name, use_member_names, stack),
+        );
+    }
+    Value::Object(out)
+}
+
+fn skeleton_value(
+    model: &Model,
+    target: &ShapeId,
+    member_name: &str,
+    use_member_names: bool,
+    stack: &mut Vec<String>,
+) -> Value {
+    let key = target.to_string();
+    // Stop on the SECOND re-entry of a shape, as botocore does.
+    if stack.iter().filter(|s| **s == key).count() > 1 {
+        return Value::Object(Default::default());
+    }
+    stack.push(key);
+    let value = match model.shape(target) {
+        Some(Shape::Structure(s) | Shape::Union(s)) => {
+            skeleton_structure(model, s, use_member_names, stack)
+        }
+        Some(Shape::List(list) | Shape::Set(list)) => Value::Array(vec![skeleton_value(
+            model,
+            &list.member.target,
+            member_name,
+            use_member_names,
+            stack,
+        )]),
+        Some(Shape::Map(map_shape)) => {
+            let mut m = serde_json::Map::new();
+            m.insert(
+                "KeyName".to_string(),
+                skeleton_value(model, &map_shape.value.target, member_name, use_member_names, stack),
+            );
+            Value::Object(m)
+        }
+        Some(Shape::Integer(_) | Shape::Long(_) | Shape::Short(_) | Shape::Byte(_)) => {
+            Value::from(0)
+        }
+        Some(Shape::Float(_) | Shape::Double(_)) => Value::from(0.0),
+        Some(Shape::Boolean(_)) => Value::Bool(true),
+        Some(Shape::Timestamp(_)) => Value::String("1970-01-01T00:00:00".to_string()),
+        Some(Shape::Enum(e)) => {
+            // The first enum value, as botocore uses.
+            let first = e.members.keys().next().cloned().unwrap_or_default();
+            Value::String(first)
+        }
+        Some(Shape::String(_)) => {
+            if use_member_names {
+                Value::String(member_name.to_string())
+            } else {
+                Value::String(String::new())
+            }
+        }
+        // Blobs and document types fall off the end of botocore's if-chain as null.
+        _ => Value::Null,
+    };
+    stack.pop();
+    value
 }

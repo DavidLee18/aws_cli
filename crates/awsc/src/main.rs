@@ -88,10 +88,62 @@ fn run() -> Result<ExitCode, Failure> {
     let output_shape =
         model.operation_output(op).map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
 
+    // --generate-cli-skeleton short-circuits the API call entirely, exit 0.
+    if let Some(mode) = &parsed.generate_skeleton {
+        match mode.as_str() {
+            "input" => {}
+            // `yaml-input` annotates every member with `# [REQUIRED] <docs>`, and
+            // `output` runs full parameter validation before stubbing the response.
+            // Neither is implemented, and emitting a plausible-but-different document is
+            // worse than refusing.
+            "yaml-input" => {
+                return Err(Failure::new(
+                    exit::GENERAL_ERROR,
+                    "--generate-cli-skeleton yaml-input is not implemented yet \
+                     (it annotates each member with its documentation)",
+                ))
+            }
+            "output" => {
+                return Err(Failure::new(
+                    exit::GENERAL_ERROR,
+                    "--generate-cli-skeleton output is not implemented yet \
+                     (it validates parameters before stubbing the response)",
+                ))
+            }
+            other => {
+                return Err(Failure::new(
+                    exit::PARAM_VALIDATION,
+                    format!("invalid --generate-cli-skeleton value `{other}`"),
+                ))
+            }
+        }
+        let skeleton = args::generate_skeleton(&model, input_shape, false);
+        match aws_cli_output::render_named(op_id.name(), &skeleton, parsed.output) {
+            Ok(Some(text)) => print!("{text}"),
+            Ok(None) => {}
+            Err(e) => return Err(Failure::new(exit::GENERAL_ERROR, e)),
+        }
+        return Ok(exit::code(exit::SUCCESS));
+    }
+
     // Unknown flags are rejected here rather than dropped: silently ignoring a parameter
     // the user supplied would send a request they did not ask for.
-    let input = args::build_input(&model, input_shape, &parsed.parameters)
+    let mut input = args::build_input(&model, input_shape, &parsed.parameters)
         .map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
+
+    // --cli-input-json/yaml fills in top-level keys the command line did not set. The
+    // command line wins, and the fill is shallow: a key set by an argument discards the
+    // document's value for it wholesale.
+    if let Some(raw) = &parsed.cli_input {
+        let text = args::expand_paramfile(raw)
+            .map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
+        let document: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|_| Failure::new(exit::PARAM_VALIDATION, "Invalid JSON received."))?;
+        let mut built = input.take().unwrap_or_else(|| serde_json::Value::Object(Default::default()));
+        args::merge_cli_input(&mut built, &document)
+            .map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
+        input = Some(built);
+    }
 
     // The ruleset decides the endpoint, and may supply a signing region that differs
     // from the client region. A region is still required: services without a global

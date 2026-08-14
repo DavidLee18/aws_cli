@@ -62,11 +62,10 @@ Crates are added as they are implemented.
 |---|---|---|
 | `aws-cli-model` | **implemented** | Smithy AST loader, shape index, botocore-compatible naming, overlays |
 | `aws-cli-conformance` | **implemented** | Differential testing against the reference CLI |
-| `aws-cli-protocol` | **all six** ✅ | awsQuery, ec2Query, awsJson 1.0/1.1, restJson1, restXml, plus pagination and response fix-ups |
+| `aws-cli-protocol` | **all six** ✅ | awsQuery, ec2Query, awsJson 1.0/1.1, restJson1, restXml, plus pagination, shorthand and response fix-ups |
 | `aws-cli-runtime` | **partial** | sigv4 ✅, endpoint rulesets ✅ (14,112/14,112 AWS conformance cases), credentials ✅ (env, static, SSO + refresh, assume-role, credential_process, IMDSv2, container) |
 | `aws-cli-output` | **all six** ✅ | `json`, `text`, `table`, `yaml`, `yaml-stream`, `off`, plus `--query` (JMESPath) |
 | `awsc` | **runs** | The binary: dispatch, global args, exit codes |
-| `aws-cli-args` | planned | Shorthand syntax, `--cli-input-json`, `--generate-cli-skeleton` |
 | `aws-cli-custom` | planned | The hand-written customisations as behaviour |
 
 ```console
@@ -192,8 +191,9 @@ Remaining, roughly in the order that unblocks the most usage:
 9. ~~`--query` and most global arguments~~ ✅ — JMESPath filtering, `--no-sign-request`,
    timeouts; `--cli-binary-format` and `--cli-error-format` remain
 10. ~~Output formats~~ ✅ — all six, verified byte-identical across a format matrix
-11. **Argument layer** — shorthand syntax (`Name=x,Values=y`), `--cli-input-json`,
-    `--generate-cli-skeleton`; every operation advertises these three flags
+11. ~~Argument layer~~ ✅ — shorthand parser, `file://`/`fileb://`, `--cli-input-json`,
+    `--generate-cli-skeleton input`; `yaml-input`/`output` modes and client-side
+    parameter validation remain
 12. **Waiter runtime** — 379 `wait` subcommands are in the surface but do not run
 13. **Retries** — the reference defaults to `standard` mode
 14. **Customisations as behaviour** — 103 custom commands, `s3 cp`/`sync` first
