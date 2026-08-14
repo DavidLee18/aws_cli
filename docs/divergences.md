@@ -834,3 +834,50 @@ would actually accept.
 
 Worth remembering: a conformance harness that shares no code with the thing it checks can
 only report on what it re-derives.
+
+---
+
+## One command table, two consumers
+
+The binary and the conformance harness were deriving the command surface independently.
+Both were individually reasonable and they disagreed, and the harness reported "no
+divergences" the whole time — a harness that re-derives the surface can only check its own
+derivation.
+
+`aws_cli_model::command_table` is now that derivation, applying removals, operation
+renames, aliases and replacements. The binary resolves commands through it and the surface
+builder enumerates through it, so they agree by construction rather than by two
+implementations happening to match.
+
+`tests/binary_agrees_with_surface.rs` is the guard: for every vendored model it asserts
+that every command the binary would accept is one the reference has. It found a fifth
+instance the moment it ran — `rds modify-option-group`, which v2 replaces with
+`add-option-to-option-group` and `remove-option-from-option-group`.
+
+Fixed by this:
+
+| command | before | now |
+|---|---|---|
+| `signin create-oauth2-token-with-iam` | rejected | accepted |
+| `signin create-o-auth2-token-with-iam` | accepted | rejected (rename replaces) |
+| `cloudwatch get-otel-enrichment` | rejected | accepted, output byte-identical live |
+| `cloudwatch get-o-tel-enrichment` | accepted | still accepted (alias keeps both) |
+| `rds modify-option-group` | accepted | rejected (replaced) |
+
+### A mistake worth recording
+
+The first version keyed the table to *wire* names, which broke every command in the
+binary: `Model::operation` is indexed by the derived CLI name, not the wire name. Caught
+immediately by running real commands rather than trusting the unit tests, which had
+asserted the wrong thing in the same breath as the code.
+
+### Still outstanding
+
+- `rds add-option-to-option-group` / `remove-option-from-option-group`: the two commands
+  that replace `modify-option-group`. They proxy `ModifyOptionGroup` with
+  `--options-to-include` / `--options-to-remove` both renamed to `--options`.
+- The universal streaming `outfile` positional (`customizations/streamingoutputarg.py`):
+  any operation whose output carries a streaming blob gains a required positional naming
+  the file to write. `polly synthesize-speech`, `s3api get-object`, `lambda invoke` and
+  `kms decrypt` are unusable without it.
+  `Model::operation_has_streaming_blob_output` already identifies them.

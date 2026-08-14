@@ -147,10 +147,18 @@ fn run() -> Result<ExitCode, Failure> {
     let cli_service =
         model.cli_service_name().map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
 
-    // v2 deletes some commands outright. The model still carries them, so they have to
-    // be rejected here or we would accept a command the reference does not know. An
-    // unknown operation is reported the same way, since argparse cannot tell the
-    // difference between a command that never existed and one that was removed.
+    // The command table applies every name-level customization: removals, renames and
+    // aliases. It is the same derivation the conformance harness uses, so the two cannot
+    // disagree about which commands exist.
+    let table = aws_cli_model::command_table::build(
+        &model,
+        aws_cli_model::surface_overlays::get(),
+        aws_cli_model::surface_overlays::custom_surface(),
+    )
+    .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
+
+    // An unknown operation and a removed one are reported identically, since argparse
+    // cannot tell the difference between a command that never existed and one v2 deleted.
     let unknown_operation = || {
         Failure::new(
             exit::PARAM_VALIDATION,
@@ -163,11 +171,8 @@ fn run() -> Result<ExitCode, Failure> {
             ),
         )
     };
-    if aws_cli_model::surface_overlays::is_removed(&cli_service, &parsed.operation) {
-        return Err(unknown_operation());
-    }
-
-    let (op_id, op) = model.operation(&parsed.operation).map_err(|_| unknown_operation())?;
+    let wire_name = table.resolve(&parsed.operation).ok_or_else(unknown_operation)?;
+    let (op_id, op) = model.operation(wire_name).map_err(|_| unknown_operation())?;
     let input_shape =
         model.operation_input(op).map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
     let output_shape =

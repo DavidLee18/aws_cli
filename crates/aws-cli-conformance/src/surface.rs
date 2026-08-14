@@ -89,6 +89,11 @@ impl Surface {
         let cli_name = model.cli_service_name().map_err(|e| e.to_string())?;
 
         // Phase 1: generic derivation for every surviving modeled operation.
+        //
+        // Removals come from the shared command table, so the harness and the binary
+        // agree by construction rather than by two implementations happening to match.
+        let table = aws_cli_model::command_table::build(&model, customizations, custom_surface)
+            .map_err(|e| e.to_string())?;
         let mut base_args: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for op_name in model.operation_names().map(|s| s.to_string()).collect::<Vec<_>>() {
             if customizations.is_removed(&cli_name, &op_name)
@@ -96,6 +101,12 @@ impl Surface {
             {
                 continue;
             }
+            debug_assert!(
+                table.names.values().any(|w| naming::to_cli_name(w) == op_name)
+                    || table.contains(&op_name)
+                    || custom_surface.is_replaced(&cli_name, &op_name),
+                "{cli_name} {op_name} survived the harness filter but not the command table"
+            );
             let args = operation_arguments(&model, &cli_name, &op_name, paginators)?;
             base_args.insert(op_name, args);
         }

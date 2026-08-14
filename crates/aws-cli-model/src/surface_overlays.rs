@@ -25,6 +25,16 @@ pub fn get() -> &'static Customizations {
     &EMBEDDED
 }
 
+static EMBEDDED_SURFACE: LazyLock<crate::custom_surface::CustomSurface> = LazyLock::new(|| {
+    let text = include_str!("../../../data/custom-surface.json");
+    serde_json::from_str(text).expect("embedded data/custom-surface.json is malformed")
+});
+
+/// The per-service surface customizations, embedded for the binary.
+pub fn custom_surface() -> &'static crate::custom_surface::CustomSurface {
+    &EMBEDDED_SURFACE
+}
+
 /// Whether the reference removes this command from the service.
 pub fn is_removed(service: &str, operation: &str) -> bool {
     EMBEDDED.is_removed(service, operation)
