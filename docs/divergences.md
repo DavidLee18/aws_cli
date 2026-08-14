@@ -624,3 +624,50 @@ Bugs this work surfaced in code already committed:
 
 Known gaps: `--sse-c`, `--grants`, `--metadata`, `--metadata-directive`, `--copy-props`,
 `--follow-symlinks`, and the streaming forms (`cp - s3://...`). `sync` is not implemented.
+
+### Concurrency: one queue, adaptive workers
+
+Small objects and individual parts of large ones sit in the **same** work queue. An earlier
+version ran them in separate phases, which left the pool idle whenever the current phase
+was thin — a single large file among small ones got the pool to itself only after every
+small file had finished. Now a 40 MiB object's five parts and forty small files are all
+just jobs.
+
+The worker count **adapts**. It starts at the reference's fixed ten, samples throughput
+every 150 ms, and ramps while throughput is still improving, up to a ceiling derived from
+the machine (`available_parallelism × 4`, clamped to 8–64). It never drops below ten
+unless the service returns `SlowDown`, which lifts the floor restriction entirely — the
+service is the authority. `--concurrency N` pins it and disables the ramp.
+
+Two mistakes worth recording, both caught by measurement rather than reading:
+
+- **The controller first steered on bytes/second.** That is a useless signal for a
+  directory of small files: throughput stays near zero however many workers run, so the
+  controller concluded it was over-provisioned and ratcheted itself down to a single
+  worker — making a 40-file upload *three times slower* than the reference. It now steers
+  on completed jobs per second, which rises with concurrency in both regimes.
+- **A pool with no floor is a pool that can be worse than a constant.** Adapting has to be
+  strictly an improvement on not adapting.
+
+Measured against the local server with 100 ms of injected latency, release build:
+
+| workload | ours | reference |
+|---|---|---|
+| 40 small files | 0.65 s (peak 24 in flight) | 1.29 s (peak 10) |
+| 40 MiB upload, 5 parts | 2.41 s (peak 6) | 2.36 s (peak 5) |
+| 40 MiB download | 0.44 s (peak 6) | 2.69 s (peak 1) |
+
+Note the debug build is *not* representative for uploads: SigV4 hashes the payload, and
+unoptimised SHA-256 over 40 MiB dominates everything else (7.6 s versus 2.4 s).
+
+### A 9-second bug on every s3 command
+
+`models/` is named by aws-sdk-rust's conventions, so `s3api` lives in `s3.json` and `logs`
+in `cloudwatch-logs.json`. When the obvious filename missed, `load_model` scanned the
+whole directory — 431 models, 200 MB of JSON, each parsed until the right one appeared.
+That cost **9 seconds of CPU on every invocation** of `s3`, `logs` and `configservice`,
+and it was invisible while only argument handling was being tested.
+
+The scan result is now cached in `models/.awsc-model-index.json` and rebuilt whenever a
+lookup misses, so it is self-healing if models are added or replaced. First call 9 s,
+every call after 0.28 s.

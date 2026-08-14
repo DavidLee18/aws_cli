@@ -13,13 +13,14 @@
 //! lines, and the exit-code rule (1 if anything failed, 2 if only warnings).
 
 use super::conn::Conn;
+use super::pool::Pool;
 use super::progress::Progress;
 use super::{param_error, uri::Location, xml};
 use crate::args::Parsed;
 use crate::client::{Client, Globals};
 use crate::exit;
 use crate::Failure;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::process::ExitCode;
 
@@ -37,7 +38,8 @@ pub struct Options {
     pub quiet: bool,
     pub only_show_errors: bool,
     pub progress: bool,
-    pub concurrency: usize,
+    /// `None` means adapt at runtime; `Some(n)` pins the worker count.
+    pub concurrency: Option<usize>,
     pub storage_class: Option<String>,
     pub acl: Option<String>,
     pub sse: Option<String>,
@@ -53,7 +55,7 @@ impl Options {
             quiet: false,
             only_show_errors: false,
             progress: true,
-            concurrency: MAX_CONCURRENT_REQUESTS,
+            concurrency: None,
             storage_class: None,
             acl: None,
             sse: None,
@@ -84,6 +86,17 @@ impl Options {
                 "--quiet" => options.quiet = true,
                 "--only-show-errors" => options.only_show_errors = true,
                 "--no-progress" => options.progress = false,
+                // Pins the pool; without it the worker count adapts to measured
+                // throughput. The reference's fixed default is the fallback when the
+                // value cannot be read.
+                "--concurrency" | "--max-concurrent-requests" => {
+                    options.concurrency = Some(
+                        take(&mut i)
+                            .and_then(|v| v.parse().ok())
+                            .filter(|n| *n > 0)
+                            .unwrap_or(MAX_CONCURRENT_REQUESTS),
+                    )
+                }
                 "--storage-class" => options.storage_class = take(&mut i),
                 "--acl" => options.acl = take(&mut i),
                 "--sse" => options.sse = Some(take(&mut i).unwrap_or_else(|| "AES256".into())),
@@ -389,26 +402,19 @@ impl Outcome {
     }
 }
 
-/// Run `work` over `items` on a pool of `concurrency` threads.
-fn in_parallel<T: Sync>(
-    items: &[T],
-    concurrency: usize,
-    work: impl Fn(&T) + Sync,
-) {
-    if items.is_empty() {
-        return;
-    }
-    let next = AtomicUsize::new(0);
-    let workers = concurrency.max(1).min(items.len());
-    std::thread::scope(|scope| {
-        for _ in 0..workers {
-            scope.spawn(|| loop {
-                let index = next.fetch_add(1, Ordering::Relaxed);
-                let Some(item) = items.get(index) else { return };
-                work(item);
-            });
-        }
-    });
+/// One unit of transferable work.
+///
+/// Small objects and individual parts of large ones sit in the **same** queue, so a single
+/// large file saturates the pool on its own and a mix of one big file and many small ones
+/// keeps every worker busy. Splitting them into separate phases, as an earlier version
+/// did, left the pool idle whenever the current phase was thin.
+enum Job {
+    /// A whole object, below the multipart threshold.
+    Whole { item: usize },
+    /// One part of a multipart upload.
+    Part { item: usize, part: u64, upload: usize },
+    /// One byte range of a download.
+    Range { item: usize, index: u64 },
 }
 
 /// Print a result line unless the mode suppresses it.
@@ -602,12 +608,15 @@ fn upload(
 ) -> Result<ExitCode, Failure> {
     let mut items = scan_local(local, options.recursive)?;
     if !options.recursive {
-        // A single file keeps its basename when the destination ends in `/`.
         let base = std::path::Path::new(local)
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let target = if key.is_empty() || key.ends_with('/') { join_key(key, &base) } else { key.to_string() };
+        let target = if key.is_empty() || key.ends_with('/') {
+            join_key(key, &base)
+        } else {
+            key.to_string()
+        };
         items[0].dest = target;
     } else {
         // Local root, absolutised, with no trailing separator — the form the reference
@@ -622,34 +631,226 @@ fn upload(
     }
 
     let total_bytes: u64 = items.iter().map(|i| i.size).sum();
-    let progress = Progress::new(items.len() as u64, total_bytes, options.progress && !options.quiet);
+    let progress =
+        Progress::new(items.len() as u64, total_bytes, options.progress && !options.quiet);
     let outcome = Outcome::default();
     let word = verb_word(verb, true);
 
     if options.dryrun {
         for item in &items {
-            println!("(dryrun) {word}: {} to s3://{}", display_local(&item.source), display_key(conn, &item.dest));
+            println!(
+                "(dryrun) {word}: {} to s3://{}",
+                display_local(&item.source),
+                display_key(conn, &item.dest)
+            );
         }
         return Ok(exit::code(exit::SUCCESS));
     }
 
-    // Large objects get the whole pool to themselves so a single big file is fast; many
-    // small ones run file-at-a-time across the pool.
-    let (large, small): (Vec<&Item>, Vec<&Item>) =
-        items.iter().partition(|i| i.size >= MULTIPART_THRESHOLD);
+    // Open a multipart upload for each large object, then queue every part alongside the
+    // small objects so one pool serves them all.
+    let large: Vec<usize> = (0..items.len())
+        .filter(|i| items[*i].size >= MULTIPART_THRESHOLD)
+        .collect();
+    let uploads: Vec<Upload> = large
+        .iter()
+        .map(|index| begin_upload(conn, *index, &items[*index], options))
+        .collect::<Result<Vec<_>, _>>()?;
 
-    in_parallel(&small, options.concurrency, |item| {
-        let result = put_object(conn, item, options);
-        finish(&progress, &outcome, options, word, result, &display_local(&item.source), &format!("s3://{}", display_key(conn, &item.dest)));
+    let mut jobs: Vec<Job> = (0..items.len())
+        .filter(|i| items[*i].size < MULTIPART_THRESHOLD)
+        .map(|item| Job::Whole { item })
+        .collect();
+    for (upload_index, upload) in uploads.iter().enumerate() {
+        let item = &items[upload.item];
+        let parts = item.size.div_ceil(upload.chunk);
+        for part in 1..=parts {
+            jobs.push(Job::Part { item: upload.item, part, upload: upload_index });
+        }
+    }
+
+    let pool = Pool::new(options.concurrency);
+    let failures: Mutex<Vec<(usize, Failure)>> = Mutex::new(Vec::new());
+    let etags: Mutex<Vec<(usize, u64, String)>> = Mutex::new(Vec::new());
+
+    pool.run(&jobs, options.concurrency.is_none(), |job| {
+        match job {
+            Job::Whole { item } => {
+                let result = put_object(conn, &items[*item], options);
+                match result {
+                    Ok(()) => {
+                        pool.record_bytes(items[*item].size);
+                        progress.add_bytes(items[*item].size);
+                        report_item(&progress, &outcome, options, word, Ok(()), &items[*item], conn);
+                    }
+                    Err(e) => report_item(
+                        &progress, &outcome, options, word, Err(e), &items[*item], conn,
+                    ),
+                }
+            }
+            Job::Part { item, part, upload } => {
+                let upload = &uploads[*upload];
+                if failures.lock().expect("mutex").iter().any(|(i, _)| i == item) {
+                    return;
+                }
+                let offset = (part - 1) * upload.chunk;
+                let length = upload.chunk.min(items[*item].size - offset);
+                match upload_part(conn, &items[*item], upload, *part, offset, length) {
+                    Ok(etag) => {
+                        etags.lock().expect("mutex").push((*item, *part, etag));
+                        pool.record_bytes(length);
+                        progress.add_bytes(length);
+                    }
+                    Err(e) => {
+                        if e.service_error_code.as_deref() == Some("SlowDown") {
+                            pool.note_throttle();
+                        }
+                        failures.lock().expect("mutex").push((*item, e));
+                    }
+                }
+            }
+            Job::Range { .. } => unreachable!("uploads never queue ranges"),
+        }
     });
 
-    for item in large {
-        let result = multipart_upload(conn, item, options, &progress);
-        finish(&progress, &outcome, options, word, result, &display_local(&item.source), &format!("s3://{}", display_key(conn, &item.dest)));
+    // Finish or abort each multipart upload now every part has been attempted.
+    let failed = failures.into_inner().expect("mutex");
+    let collected = etags.into_inner().expect("mutex");
+    for upload in &uploads {
+        let item = &items[upload.item];
+        let result = match failed.iter().find(|(i, _)| *i == upload.item) {
+            Some((_, _)) => {
+                abort_upload(conn, item, upload);
+                Err(failed
+                    .iter()
+                    .find(|(i, _)| *i == upload.item)
+                    .map(|(_, e)| Failure::new(e.exit_code(), e.message()))
+                    .expect("failure present"))
+            }
+            None => {
+                let mut parts: Vec<(u64, String)> = collected
+                    .iter()
+                    .filter(|(i, _, _)| *i == upload.item)
+                    .map(|(_, n, tag)| (*n, tag.clone()))
+                    .collect();
+                parts.sort_by_key(|(n, _)| *n);
+                complete_upload(conn, item, upload, &parts)
+            }
+        };
+        report_item(&progress, &outcome, options, word, result, item, conn);
     }
 
     progress.clear();
     Ok(outcome.code())
+}
+
+/// An in-flight multipart upload.
+struct Upload {
+    item: usize,
+    id: String,
+    chunk: u64,
+    path: String,
+}
+
+fn begin_upload(
+    conn: &Conn,
+    index: usize,
+    item: &Item,
+    options: &Options,
+) -> Result<Upload, Failure> {
+    let path = conn.object_path(&item.dest);
+    let headers = object_headers(options, &item.dest);
+    let created = conn.send_checked(
+        "CreateMultipartUpload",
+        "POST",
+        &path,
+        "uploads=",
+        &headers,
+        Vec::new(),
+    )?;
+    let id = xml::parse(&created.text())
+        .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?
+        .get("UploadId")
+        .to_string();
+    Ok(Upload { item: index, id, chunk: chunk_size_for(item.size), path })
+}
+
+fn upload_part(
+    conn: &Conn,
+    item: &Item,
+    upload: &Upload,
+    part: u64,
+    offset: u64,
+    length: u64,
+) -> Result<String, Failure> {
+    let mut file =
+        std::fs::File::open(&item.source).map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
+    let mut buffer = vec![0u8; length as usize];
+    read_exact_at(&mut file, &mut buffer, offset)?;
+    let response = conn.send_checked(
+        "UploadPart",
+        "PUT",
+        &upload.path,
+        &format!("partNumber={part}&uploadId={}", super::encode_key(&upload.id)),
+        &[],
+        buffer,
+    )?;
+    Ok(response.header("etag").unwrap_or_default())
+}
+
+fn complete_upload(
+    conn: &Conn,
+    _item: &Item,
+    upload: &Upload,
+    parts: &[(u64, String)],
+) -> Result<(), Failure> {
+    let mut body = String::from("<CompleteMultipartUpload>");
+    for (number, etag) in parts {
+        body.push_str(&format!(
+            "<Part><PartNumber>{number}</PartNumber><ETag>{etag}</ETag></Part>"
+        ));
+    }
+    body.push_str("</CompleteMultipartUpload>");
+    conn.send_checked(
+        "CompleteMultipartUpload",
+        "POST",
+        &upload.path,
+        &format!("uploadId={}", super::encode_key(&upload.id)),
+        &[],
+        body.into_bytes(),
+    )?;
+    Ok(())
+}
+
+/// Abort so a failed upload leaves no parts behind accruing storage charges.
+fn abort_upload(conn: &Conn, _item: &Item, upload: &Upload) {
+    let _ = conn.send(
+        "DELETE",
+        &upload.path,
+        &format!("uploadId={}", super::encode_key(&upload.id)),
+        &[],
+        Vec::new(),
+    );
+}
+
+fn report_item(
+    progress: &Progress,
+    outcome: &Outcome,
+    options: &Options,
+    word: &str,
+    result: Result<(), Failure>,
+    item: &Item,
+    conn: &Conn,
+) {
+    finish(
+        progress,
+        outcome,
+        options,
+        word,
+        result,
+        &display_local(&item.source),
+        &format!("s3://{}", display_key(conn, &item.dest)),
+    );
 }
 
 fn display_key(conn: &Conn, key: &str) -> String {
@@ -689,86 +890,6 @@ fn put_object(conn: &Conn, item: &Item, options: &Options) -> Result<(), Failure
     let body = std::fs::read(&item.source).map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
     let headers = object_headers(options, &item.dest);
     conn.send_checked("PutObject", "PUT", &conn.object_path(&item.dest), "", &headers, body)?;
-    Ok(())
-}
-
-fn multipart_upload(
-    conn: &Conn,
-    item: &Item,
-    options: &Options,
-    progress: &Progress,
-) -> Result<(), Failure> {
-    let path = conn.object_path(&item.dest);
-    let headers = object_headers(options, &item.dest);
-    let created =
-        conn.send_checked("CreateMultipartUpload", "POST", &path, "uploads=", &headers, Vec::new())?;
-    let upload_id = xml::parse(&created.text())
-        .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?
-        .get("UploadId")
-        .to_string();
-
-    let chunk = chunk_size_for(item.size);
-    let part_count = item.size.div_ceil(chunk);
-    let parts: Vec<u64> = (1..=part_count).collect();
-    let etags: Mutex<Vec<(u64, String)>> = Mutex::new(Vec::new());
-    let failure: Mutex<Option<Failure>> = Mutex::new(None);
-
-    in_parallel(&parts, options.concurrency, |part| {
-        if failure.lock().expect("mutex").is_some() {
-            return;
-        }
-        let offset = (part - 1) * chunk;
-        let length = chunk.min(item.size - offset);
-        let result = (|| -> Result<(), Failure> {
-            let mut file = std::fs::File::open(&item.source)
-                .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
-            let mut buffer = vec![0u8; length as usize];
-            read_exact_at(&mut file, &mut buffer, offset)?;
-            let response = conn.send_checked(
-                "UploadPart",
-                "PUT",
-                &path,
-                &format!("partNumber={part}&uploadId={}", super::encode_key(&upload_id)),
-                &[],
-                buffer,
-            )?;
-            let etag = response.header("etag").unwrap_or_default();
-            etags.lock().expect("mutex").push((*part, etag));
-            progress.add_bytes(length);
-            Ok(())
-        })();
-        if let Err(e) = result {
-            *failure.lock().expect("mutex") = Some(e);
-        }
-    });
-
-    if let Some(e) = failure.into_inner().expect("mutex") {
-        // Leave no partial upload behind paying storage.
-        let _ = conn.send(
-            "DELETE",
-            &path,
-            &format!("uploadId={}", super::encode_key(&upload_id)),
-            &[],
-            Vec::new(),
-        );
-        return Err(e);
-    }
-
-    let mut collected = etags.into_inner().expect("mutex");
-    collected.sort_by_key(|(n, _)| *n);
-    let mut body = String::from("<CompleteMultipartUpload>");
-    for (number, etag) in &collected {
-        body.push_str(&format!("<Part><PartNumber>{number}</PartNumber><ETag>{etag}</ETag></Part>"));
-    }
-    body.push_str("</CompleteMultipartUpload>");
-    conn.send_checked(
-        "CompleteMultipartUpload",
-        "POST",
-        &path,
-        &format!("uploadId={}", super::encode_key(&upload_id)),
-        &[],
-        body.into_bytes(),
-    )?;
     Ok(())
 }
 
@@ -814,17 +935,14 @@ fn download(
     let mut items = if options.recursive {
         let root = format!("{bucket}/{}", key.trim_end_matches('/'));
         let mut found = scan_s3(conn, key)?;
-        // S3 paths are matched as `bucket/key`, which is the form the root takes too.
         found.retain(|i| included(&format!("{bucket}/{}", i.source), &root, &options.excludes));
         found
     } else {
         let head = conn
             .send_checked("HeadObject", "HEAD", &conn.object_path(key), "", &[], Vec::new())
             .map_err(|e| missing_key_message(e, key))?;
-        let size = head
-            .header("content-length")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or_default();
+        let size =
+            head.header("content-length").and_then(|v| v.parse().ok()).unwrap_or_default();
         vec![Item { source: key.to_string(), dest: String::new(), size }]
     };
 
@@ -844,28 +962,111 @@ fn download(
     }
 
     let total_bytes: u64 = items.iter().map(|i| i.size).sum();
-    let progress = Progress::new(items.len() as u64, total_bytes, options.progress && !options.quiet);
+    let progress =
+        Progress::new(items.len() as u64, total_bytes, options.progress && !options.quiet);
     let outcome = Outcome::default();
     let word = verb_word(verb, false);
 
     if options.dryrun {
         for item in &items {
-            println!("(dryrun) {word}: s3://{bucket}/{} to {}", item.source, display_local(&item.dest));
+            println!(
+                "(dryrun) {word}: s3://{bucket}/{} to {}",
+                item.source,
+                display_local(&item.dest)
+            );
         }
         return Ok(exit::code(exit::SUCCESS));
     }
 
-    let (large, small): (Vec<&Item>, Vec<&Item>) =
-        items.iter().partition(|i| i.size >= MULTIPART_THRESHOLD);
+    // Preallocate the large files, then queue every range next to the small files so one
+    // pool serves both — a single large object gets the whole pool to itself.
+    let mut jobs: Vec<Job> = Vec::new();
+    let mut handles: Vec<Option<std::fs::File>> = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        if item.size < MULTIPART_THRESHOLD {
+            handles.push(None);
+            jobs.push(Job::Whole { item: index });
+            continue;
+        }
+        create_parent(&item.dest)?;
+        let file =
+            std::fs::File::create(&item.dest).map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
+        file.set_len(item.size).map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
+        handles.push(Some(file));
+        let chunk = chunk_size_for(item.size);
+        for range in 0..item.size.div_ceil(chunk) {
+            jobs.push(Job::Range { item: index, index: range });
+        }
+    }
 
-    in_parallel(&small, options.concurrency, |item| {
-        let result = get_object(conn, item, &progress);
-        finish(&progress, &outcome, options, word, result, &format!("s3://{bucket}/{}", item.source), &display_local(&item.dest));
+    let pool = Pool::new(options.concurrency);
+    let failures: Mutex<Vec<(usize, Failure)>> = Mutex::new(Vec::new());
+
+    pool.run(&jobs, options.concurrency.is_none(), |job| match job {
+        Job::Whole { item } => {
+            let result = get_object(conn, &items[*item], &progress, &pool);
+            finish(
+                &progress,
+                &outcome,
+                options,
+                word,
+                result,
+                &format!("s3://{bucket}/{}", items[*item].source),
+                &display_local(&items[*item].dest),
+            );
+        }
+        Job::Range { item, index } => {
+            if failures.lock().expect("mutex").iter().any(|(i, _)| i == item) {
+                return;
+            }
+            let chunk = chunk_size_for(items[*item].size);
+            let start = index * chunk;
+            let end = (start + chunk).min(items[*item].size) - 1;
+            let file = handles[*item].as_ref().expect("large items have a handle");
+            let result = (|| -> Result<(), Failure> {
+                let headers = vec![("range".to_string(), format!("bytes={start}-{end}"))];
+                let response = conn.send_checked(
+                    "GetObject",
+                    "GET",
+                    &conn.object_path(&items[*item].source),
+                    "",
+                    &headers,
+                    Vec::new(),
+                )?;
+                write_all_at(file, &response.bytes, start)?;
+                pool.record_bytes(response.bytes.len() as u64);
+                progress.add_bytes(response.bytes.len() as u64);
+                Ok(())
+            })();
+            if let Err(e) = result {
+                if e.service_error_code.as_deref() == Some("SlowDown") {
+                    pool.note_throttle();
+                }
+                failures.lock().expect("mutex").push((*item, e));
+            }
+        }
+        Job::Part { .. } => unreachable!("downloads never queue upload parts"),
     });
 
-    for item in large {
-        let result = ranged_download(conn, item, options, &progress);
-        finish(&progress, &outcome, options, word, result, &format!("s3://{bucket}/{}", item.source), &display_local(&item.dest));
+    // Report each large file once every one of its ranges has been attempted.
+    let failed = failures.into_inner().expect("mutex");
+    for (index, item) in items.iter().enumerate() {
+        if item.size < MULTIPART_THRESHOLD {
+            continue;
+        }
+        let result = match failed.iter().find(|(i, _)| *i == index) {
+            Some((_, e)) => Err(Failure::new(e.exit_code(), e.message())),
+            None => Ok(()),
+        };
+        finish(
+            &progress,
+            &outcome,
+            options,
+            word,
+            result,
+            &format!("s3://{bucket}/{}", item.source),
+            &display_local(&item.dest),
+        );
     }
 
     progress.clear();
@@ -881,54 +1082,26 @@ fn create_parent(path: &str) -> Result<(), Failure> {
     Ok(())
 }
 
-fn get_object(conn: &Conn, item: &Item, progress: &Progress) -> Result<(), Failure> {
-    let response =
-        conn.send_checked("GetObject", "GET", &conn.object_path(&item.source), "", &[], Vec::new())?;
+fn get_object(
+    conn: &Conn,
+    item: &Item,
+    progress: &Progress,
+    pool: &Pool,
+) -> Result<(), Failure> {
+    let response = conn.send_checked(
+        "GetObject",
+        "GET",
+        &conn.object_path(&item.source),
+        "",
+        &[],
+        Vec::new(),
+    )?;
     create_parent(&item.dest)?;
     std::fs::write(&item.dest, &response.bytes)
         .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
+    pool.record_bytes(response.bytes.len() as u64);
     progress.add_bytes(response.bytes.len() as u64);
     Ok(())
-}
-
-fn ranged_download(
-    conn: &Conn,
-    item: &Item,
-    options: &Options,
-    progress: &Progress,
-) -> Result<(), Failure> {
-    create_parent(&item.dest)?;
-    let file = std::fs::File::create(&item.dest)
-        .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
-    file.set_len(item.size).map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
-
-    let chunk = chunk_size_for(item.size);
-    let ranges: Vec<u64> = (0..item.size.div_ceil(chunk)).collect();
-    let failure: Mutex<Option<Failure>> = Mutex::new(None);
-    let path = conn.object_path(&item.source);
-
-    in_parallel(&ranges, options.concurrency, |index| {
-        if failure.lock().expect("mutex").is_some() {
-            return;
-        }
-        let start = index * chunk;
-        let end = (start + chunk).min(item.size) - 1;
-        let result = (|| -> Result<(), Failure> {
-            let headers = vec![("range".to_string(), format!("bytes={start}-{end}"))];
-            let response = conn.send_checked("GetObject", "GET", &path, "", &headers, Vec::new())?;
-            write_all_at(&file, &response.bytes, start)?;
-            progress.add_bytes(response.bytes.len() as u64);
-            Ok(())
-        })();
-        if let Err(e) = result {
-            *failure.lock().expect("mutex") = Some(e);
-        }
-    });
-
-    match failure.into_inner().expect("mutex") {
-        Some(e) => Err(e),
-        None => Ok(()),
-    }
 }
 
 fn copy(
@@ -978,7 +1151,8 @@ fn copy(
         return Ok(exit::code(exit::SUCCESS));
     }
 
-    in_parallel(&items, options.concurrency, |item| {
+    let pool = Pool::new(options.concurrency);
+    pool.run(&items, options.concurrency.is_none(), |item| {
         let result = (|| -> Result<(), Failure> {
             let mut headers = object_headers(options, &item.dest);
             headers.push((
@@ -1022,7 +1196,8 @@ fn remove(conn: &Conn, key: &str, options: &Options) -> Result<ExitCode, Failure
         return Ok(exit::code(exit::SUCCESS));
     }
 
-    in_parallel(&items, options.concurrency, |item| {
+    let pool = Pool::new(options.concurrency);
+    pool.run(&items, options.concurrency.is_none(), |item| {
         let result = conn
             .send_checked("DeleteObject", "DELETE", &conn.object_path(&item.source), "", &[], Vec::new())
             .map(|_| ());

@@ -3,7 +3,10 @@
 Not a conformance oracle -- it exists so uploads, downloads, multipart and ranged reads
 can be verified for real rather than only in dry-run.
 """
-import re, sys, threading, hashlib
+import re, sys, threading, hashlib, time, os
+
+# Optional artificial latency, so concurrency shows up as wall-clock time.
+DELAY = float(os.environ.get('FAKE_S3_DELAY', '0'))
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
@@ -11,6 +14,8 @@ OBJECTS = {}          # (bucket, key) -> bytes
 UPLOADS = {}          # upload_id -> {(part): bytes}
 LOCK = threading.Lock()
 COUNTER = [0]
+INFLIGHT = [0]
+PEAK = [0]
 
 def xml_escape(s):
     return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
@@ -18,6 +23,18 @@ def xml_escape(s):
 class Handler(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
     def log_message(self, *a): pass
+
+    def handle_one_request(self):
+        with LOCK:
+            INFLIGHT[0] += 1
+            PEAK[0] = max(PEAK[0], INFLIGHT[0])
+        try:
+            if DELAY:
+                time.sleep(DELAY)
+            BaseHTTPRequestHandler.handle_one_request(self)
+        finally:
+            with LOCK:
+                INFLIGHT[0] -= 1
 
     def _split(self):
         u = urlparse(self.path)
@@ -99,6 +116,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         bucket, key, q = self._split()
+        if self.path.startswith('/__peak'):
+            body = str(PEAK[0]).encode()
+            PEAK[0] = 0
+            return self._send(200, body)
         with LOCK:
             if 'list-type' in q:
                 prefix = q.get('prefix', [''])[0]

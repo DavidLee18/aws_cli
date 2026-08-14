@@ -6,6 +6,7 @@
 
 pub mod bucket;
 pub mod conn;
+pub mod pool;
 pub mod progress;
 pub mod transfer;
 pub mod ls;

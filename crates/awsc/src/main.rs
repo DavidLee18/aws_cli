@@ -309,25 +309,61 @@ pub fn now_unix() -> i64 {
 /// Locate and load a service model by CLI service name.
 ///
 /// `models/` is named by aws-sdk-rust's conventions, not the CLI's — `logs` lives in
-/// `cloudwatch-logs.json` — so the fast path tries the obvious filename and the fallback
-/// resolves each candidate's own CLI name rather than guessing.
+/// `cloudwatch-logs.json` and `s3api` in `s3.json` — so a name that does not match its
+/// filename needs a lookup.
+///
+/// Scanning the directory to find it costs ~9 seconds: 431 models, 200 MB of JSON, every
+/// one parsed until the right one turns up. That was being paid on *every* invocation of
+/// `s3`, `logs` and `configservice`. The scan result is therefore cached in the models
+/// directory and reused, and rebuilt whenever a lookup misses.
 pub fn load_model(cli_service: &str) -> Result<Model, String> {
     let dir = models_dir();
+
+    // The obvious filename, which is right for most services.
     let direct = dir.join(format!("{cli_service}.json"));
-    if let Ok(bytes) = std::fs::read(&direct) {
-        if let Ok(model) = Model::from_json(&bytes) {
-            if model.cli_service_name().is_ok_and(|n| n == cli_service) {
-                return Ok(model);
-            }
+    if let Some(model) = try_load(&direct, cli_service) {
+        return Ok(model);
+    }
+
+    // The cached index, which covers the rest without touching the other models.
+    if let Some(file) = index_lookup(&dir, cli_service) {
+        if let Some(model) = try_load(&dir.join(&file), cli_service) {
+            return Ok(model);
         }
     }
 
-    let entries = std::fs::read_dir(&dir).map_err(|e| {
-        format!(
-            "cannot read models directory {} ({e}); run scripts/fetch-models.sh",
-            dir.display()
-        )
+    // A miss means the index is absent or stale: rebuild it, then answer from it.
+    let index = build_index(&dir)?;
+    let found = index.get(cli_service).and_then(|file| try_load(&dir.join(file), cli_service));
+    write_index(&dir, &index);
+    found.ok_or_else(|| format!("unknown service `{cli_service}`"))
+}
+
+/// Load `path` only if it really is the service we want.
+fn try_load(path: &std::path::Path, cli_service: &str) -> Option<Model> {
+    let bytes = std::fs::read(path).ok()?;
+    let model = Model::from_json(&bytes).ok()?;
+    model.cli_service_name().is_ok_and(|n| n == cli_service).then_some(model)
+}
+
+fn index_path(dir: &std::path::Path) -> std::path::PathBuf {
+    dir.join(".awsc-model-index.json")
+}
+
+fn index_lookup(dir: &std::path::Path, cli_service: &str) -> Option<String> {
+    let bytes = std::fs::read(index_path(dir)).ok()?;
+    let map: std::collections::BTreeMap<String, String> = serde_json::from_slice(&bytes).ok()?;
+    map.get(cli_service).cloned()
+}
+
+/// Parse every model once, recording which file each CLI service name lives in.
+fn build_index(
+    dir: &std::path::Path,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let entries = std::fs::read_dir(dir).map_err(|e| {
+        format!("cannot read models directory {} ({e}); run scripts/fetch-models.sh", dir.display())
     })?;
+    let mut index = std::collections::BTreeMap::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().is_none_or(|e| e != "json") {
@@ -335,11 +371,19 @@ pub fn load_model(cli_service: &str) -> Result<Model, String> {
         }
         let Ok(bytes) = std::fs::read(&path) else { continue };
         let Ok(model) = Model::from_json(&bytes) else { continue };
-        if model.cli_service_name().is_ok_and(|n| n == cli_service) {
-            return Ok(model);
+        let Ok(name) = model.cli_service_name() else { continue };
+        if let Some(file) = path.file_name() {
+            index.insert(name, file.to_string_lossy().into_owned());
         }
     }
-    Err(format!("unknown service `{cli_service}`"))
+    Ok(index)
+}
+
+/// Best-effort: a read-only models directory just means the scan repeats.
+fn write_index(dir: &std::path::Path, index: &std::collections::BTreeMap<String, String>) {
+    if let Ok(text) = serde_json::to_string(index) {
+        let _ = std::fs::write(index_path(dir), text);
+    }
 }
 
 fn models_dir() -> std::path::PathBuf {
