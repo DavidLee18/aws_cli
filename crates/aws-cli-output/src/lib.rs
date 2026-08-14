@@ -1,11 +1,12 @@
 //! Output formatting.
 //!
-//! The reference supports `json`, `text`, `table`, `yaml`, `yaml-stream` and `off`
-//! (`data/cli.json`). `json` and `text` are implemented; the rest are stubbed explicitly
-//! so an unimplemented format fails loudly instead of silently printing JSON.
+//! All six formats the reference offers (`data/cli.json`) are implemented: `json`,
+//! `text`, `table`, `yaml`, `yaml-stream` and `off`.
 
 pub mod query;
+pub mod table;
 pub mod text;
+pub mod yaml;
 
 use serde_json::Value;
 
@@ -57,6 +58,15 @@ pub struct UnsupportedFormat(pub &'static str);
 /// `None` means "print nothing at all", which is what the reference does for an empty
 /// result.
 pub fn render(value: &Value, format: Format) -> Result<Option<String>, UnsupportedFormat> {
+    render_named("", value, format)
+}
+
+/// Render, supplying the operation name that the `table` format uses as its title.
+pub fn render_named(
+    operation: &str,
+    value: &Value,
+    format: Format,
+) -> Result<Option<String>, UnsupportedFormat> {
     match format {
         Format::Off => Ok(None),
         Format::Json => {
@@ -73,9 +83,9 @@ pub fn render(value: &Value, format: Format) -> Result<Option<String>, Unsupport
             Ok(Some(text))
         }
         Format::Text => Ok(text::render(value)),
-        Format::Table => Err(UnsupportedFormat("table")),
-        Format::Yaml => Err(UnsupportedFormat("yaml")),
-        Format::YamlStream => Err(UnsupportedFormat("yaml-stream")),
+        Format::Table => Ok(table::render(operation, value)),
+        Format::Yaml => Ok(yaml::render(value)),
+        Format::YamlStream => Ok(yaml::render_stream_page(value)),
     }
 }
 
@@ -99,8 +109,21 @@ mod tests {
         assert_eq!(render(&json!({"a": 1}), Format::Off).unwrap(), None);
     }
 
+    /// Every format the reference offers is now implemented, so nothing should refuse.
     #[test]
-    fn unimplemented_formats_fail_loudly() {
-        assert!(render(&json!({"a": 1}), Format::Table).is_err());
+    fn every_format_renders() {
+        let v = json!({"a": 1});
+        for format in [
+            Format::Json,
+            Format::Text,
+            Format::Table,
+            Format::Yaml,
+            Format::YamlStream,
+            Format::Off,
+        ] {
+            assert!(render(&v, format).is_ok(), "{format:?} should render");
+        }
+        // `off` deliberately prints nothing.
+        assert_eq!(render(&v, Format::Off).unwrap(), None);
     }
 }

@@ -167,8 +167,20 @@ the reference while building the STS vertical slice.
 
 
 
-- **Output formats** — `json` and `text` are implemented; `table`, `yaml` and
-  `yaml-stream` fail loudly rather than silently emitting JSON.
+- **Output formats** ✅ — all six (`json`, `text`, `table`, `yaml`, `yaml-stream`, `off`),
+  verified byte-identical live across a 20-case format matrix.
+
+  Non-obvious details reproduced:
+
+  - **table**: the title is the **API** operation name (`GetCallerIdentity`), not the CLI
+    spelling. The terminal width does not cap the table — it only decides whether a wide
+    single-row section is reformatted into two-column `[header, value]` rows; after that
+    the table renders at its natural width and can overflow. A dict with exactly one
+    scalar key gets that vertical form with no header row.
+  - **yaml**: keys sorted, sequence dashes **flush with the parent key** rather than
+    indented under it, single quotes (with `''` doubling), timestamp-shaped strings
+    quoted so they do not read back as dates, and plain scalars folded at the first space
+    **past** column 80 with continuations at the scalar's own indent.
 
   `text` reproduces the unobvious rules: keys are never printed, scalars are emitted
   **sorted by key name** (not model order), a nested container is labelled with its own

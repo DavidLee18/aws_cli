@@ -207,7 +207,9 @@ fn run() -> Result<ExitCode, Failure> {
         None => value,
     };
 
-    match aws_cli_output::render(&value, parsed.output) {
+    // The table titles itself with the API operation name (`GetCallerIdentity`), not the
+    // CLI spelling (`get-caller-identity`).
+    match aws_cli_output::render_named(op_id.name(), &value, parsed.output) {
         Ok(Some(text)) => print!("{text}"),
         Ok(None) => {}
         Err(e) => return Err(Failure::new(exit::GENERAL_ERROR, e)),
