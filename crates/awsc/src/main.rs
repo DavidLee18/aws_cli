@@ -4,15 +4,15 @@
 //! model, binds the operation's arguments from its input shape, serializes, signs, sends
 //! and formats. Nothing here is specific to any one service.
 //!
-//! Scope today is the vertical slice: the `awsQuery` protocol end to end. Other
-//! protocols are recognised and refused explicitly rather than mis-serialized.
+//! All six AWS wire protocols are dispatched from `dispatch.rs`; `rpcv2Cbor` is
+//! recognised and refused explicitly rather than mis-serialized.
 
-use aws_cli_model::{Model, Protocol};
-use aws_cli_protocol::{query, xml};
+use aws_cli_model::Model;
 use aws_cli_runtime::{credentials, endpoint, http, sigv4};
 use std::process::ExitCode;
 
 mod args;
+mod dispatch;
 mod exit;
 
 const USAGE: &str = "\
@@ -74,16 +74,6 @@ fn run() -> Result<ExitCode, Failure> {
         .map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
 
     let protocol = model.protocol().map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
-    if protocol != Protocol::AwsQuery {
-        return Err(Failure::new(
-            exit::GENERAL_ERROR,
-            format!(
-                "service `{}` uses the {protocol:?} protocol, which is not implemented \
-                 yet (this build supports awsQuery)",
-                parsed.service
-            ),
-        ));
-    }
 
     let (op_id, op) = model
         .operation(&parsed.operation)
@@ -98,12 +88,15 @@ fn run() -> Result<ExitCode, Failure> {
     let input = args::build_input(&model, input_shape, &parsed.parameters)
         .map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
 
-    let api_version = &model
-        .service()
-        .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?
-        .version;
-    let body = query::serialize(&model, op_id.name(), api_version, input_shape, input.as_ref())
-        .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
+    let wire = dispatch::serialize(
+        &model,
+        protocol,
+        op_id.name(),
+        op,
+        input_shape,
+        input.as_ref(),
+    )
+    .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
 
     // The ruleset decides the endpoint, and may supply a signing region that differs
     // from the client region. A region is still required: services without a global
@@ -138,10 +131,13 @@ fn run() -> Result<ExitCode, Failure> {
         })?;
 
     let request = http::PreparedRequest {
-        method: "POST".to_string(),
+        method: wire.method,
         endpoint: ep,
-        content_type: "application/x-www-form-urlencoded; charset=utf-8".to_string(),
-        body,
+        path: wire.path,
+        query: wire.query,
+        content_type: wire.content_type,
+        extra_headers: wire.headers,
+        body: wire.body,
     };
 
     let timestamp = sigv4::format_timestamp(now_unix());
@@ -159,11 +155,11 @@ fn run() -> Result<ExitCode, Failure> {
         http::send(&request, &headers).map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
 
     if response.status >= 400 {
-        let (code, message) = match xml::parse_error(&response.body) {
-            Some(e) => (e.code, e.message),
-            // An unparseable error body still has to surface something useful.
-            None => ("Unknown".to_string(), response.body.clone()),
-        };
+        let (code, message) = dispatch::parse_error(
+            protocol,
+            &response.body,
+            response.header("x-amzn-errortype").as_deref(),
+        );
         return Err(Failure::new(
             exit::CLIENT_ERROR,
             aws_cli_runtime::RuntimeError::Service {
@@ -174,8 +170,9 @@ fn run() -> Result<ExitCode, Failure> {
         ));
     }
 
-    let value = xml::parse_response(&model, op_id.name(), output_shape, &response.body)
-        .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
+    let value =
+        dispatch::parse_response(&model, protocol, op_id.name(), output_shape, &response.body)
+            .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
 
     match aws_cli_output::render(&value, parsed.output) {
         Ok(Some(text)) => println!("{text}"),

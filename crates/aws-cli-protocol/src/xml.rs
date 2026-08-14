@@ -176,6 +176,12 @@ fn parse_value(
             }
             Value::Object(out)
         }
+        // Timestamps are re-rendered in the CLI's print format rather than passed
+        // through, so `...54.000Z` from S3 prints as `...54+00:00` like the reference.
+        Shape::Timestamp(_) => match crate::shapes::parse_timestamp(&element.text) {
+            Some(unix) => Value::String(crate::shapes::format_cli_output(unix)),
+            None => Value::String(element.text.clone()),
+        },
         Shape::Boolean(_) => Value::Bool(element.text == "true"),
         Shape::Integer(_) | Shape::Long(_) | Shape::Short(_) | Shape::Byte(_) => element
             .text

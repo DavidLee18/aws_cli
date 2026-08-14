@@ -1,10 +1,18 @@
 //! Wire-protocol serialization and parsing.
 //!
-//! One module per AWS protocol; the model's `Protocol` enum selects which. Only
-//! `awsQuery` (plus its XML responses) is implemented so far — enough for the STS
-//! vertical slice. The remaining five follow the same shape-driven pattern.
+//! One module per AWS protocol, plus shared layers: `shapes` (timestamps, blobs,
+//! member naming), `http_binding` (the `rest*` URI/query/header/payload rules) and
+//! `json` (the body encoding shared by all three JSON protocols).
+//!
+//! Implemented: `awsQuery`, `ec2Query`, `awsJson1_0`, `awsJson1_1`, `restJson1`,
+//! `restXml`. Not implemented: `rpcv2Cbor`.
 
+pub mod aws_json;
+pub mod ec2_query;
+pub mod http_binding;
+pub mod json;
 pub mod query;
+pub mod shapes;
 pub mod xml;
 
 #[derive(Debug, thiserror::Error)]
@@ -15,4 +23,6 @@ pub enum ProtocolError {
     TypeMismatch { path: String, expected: &'static str },
     #[error("malformed XML response: {0}")]
     Xml(String),
+    #[error("{0} is not implemented yet")]
+    Unsupported(String),
 }

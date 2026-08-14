@@ -122,7 +122,36 @@ the reference while building the STS vertical slice.
 
 ### Outstanding
 
+- **Protocols** — all six AWS wire protocols are implemented and verified
+  **byte-identical against live AWS**: `awsQuery` (sts), `ec2Query` (ec2),
+  `awsJson1_0` (dynamodb), `awsJson1_1` (logs), `restJson1` (lambda), `restXml` (s3api).
+  `rpcv2Cbor` is refused by name.
+
+  Three details that would silently corrupt requests if guessed:
+
+  - **Request bodies are rendered with Python's `json.dumps` separators** (`", "` /
+    `": "`), not compact JSON. The body is hashed into the SigV4 signature, so a compact
+    encoding signs a different request.
+  - **`targetPrefix` cannot be derived.** The Smithy models omit it; the service shape
+    name matches for 149 of 152 awsJson services but not for `cloudtrail`,
+    `codeconnections` or `codestar-connections`, which use a fully-qualified prefix.
+    Vendored in `data/protocol-metadata.json`.
+  - **S3 requires an explicit `x-amz-content-sha256` header**, unlike every other
+    service, which accepts the payload hash appearing only inside the canonical request.
+
+  Reproduced botocore behaviours that differ from the Smithy spec: `awsJson` ignores the
+  `X-Amzn-Errortype` header (only `restJson1` reads it); `restXml` sends no
+  `Content-Type`; error codes are normalised colon-first then hash-last. Blobs are NOT
+  base64-decoded on output, because the CLI replaces botocore's decoder with `identity`.
+
 - **Retries** are not implemented (the reference defaults to `standard` mode).
+
+- **Pagination is not implemented.** Auto-pagination changes output: `build_full_result()`
+  merges pages and emits the paginator's `non_aggregate_keys` even when the service
+  omitted them, so `s3api list-buckets` prints `"Prefix": null` where we print nothing.
+  Our output matches the reference's `--no-paginate` exactly. The data is already
+  vendored (`data/paginators.json`) and the semantics are specified in
+  `docs/pagination-runtime.md`.
 
 - **Output formats** — only `json`. `text`, `table`, `yaml`, `yaml-stream` fail loudly.
 

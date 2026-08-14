@@ -62,7 +62,7 @@ Crates are added as they are implemented.
 |---|---|---|
 | `aws-cli-model` | **implemented** | Smithy AST loader, shape index, botocore-compatible naming, overlays |
 | `aws-cli-conformance` | **implemented** | Differential testing against the reference CLI |
-| `aws-cli-protocol` | **awsQuery** | Serialise/deserialise; restXml, restJson1, awsJson 1.0/1.1, ec2Query to follow |
+| `aws-cli-protocol` | **all six** ✅ | awsQuery, ec2Query, awsJson 1.0/1.1, restJson1, restXml — each verified byte-identical live |
 | `aws-cli-runtime` | **partial** | sigv4 ✅, endpoint rulesets ✅ (14,112/14,112 AWS conformance cases), credentials ✅ (env, static, SSO + refresh, assume-role, credential_process, IMDSv2, container) |
 | `aws-cli-output` | **json** | `text`/`table`/`yaml` fail loudly rather than silently emitting JSON |
 | `awsc` | **runs** | The binary: dispatch, global args, exit codes |
@@ -138,6 +138,7 @@ Generated artefacts, and whether they are checked in:
 | `data/service-names.json` | **yes** | `scripts/extract-service-names.py` | `include_str!`'d into the binary — required to build |
 | `data/paginators.json` | **yes** (642KB) | `scripts/extract-paginators.py` | botocore paginator overlay; which ops paginate is *not* derivable from Smithy |
 | `data/partitions.json` | **yes** (7KB) | `scripts/extract-partitions.py` | `aws.partition` table + the no-region global-endpoint fallback |
+| `data/protocol-metadata.json` | **yes** | `scripts/extract-protocol-metadata.py` | awsJson `targetPrefix`; not derivable from the Smithy models |
 | `data/customizations.json` | **yes** (9KB) | `scripts/extract-customizations.py` | argrename/removals/alias tables, extracted from the customization modules |
 | `data/custom-surface.json` | **yes** (57KB) | `scripts/extract-custom-surface.py` | per-op arg patches, custom commands, botocore waiter catalogue (re-runs merge; see `--no-merge`) |
 | `tests/golden/reference-surface.json` | **yes** (5.9MB) | `scripts/extract-reference-surface.py` | Lets CI run conformance without an awscli install, and makes surface changes reviewable in diffs |
@@ -182,7 +183,7 @@ This is an independent project and is not affiliated with or endorsed by AWS.
    own suite, **14,112/14,112 cases across all 431 services**
 6. ~~Credential chain~~ ✅ — env, static, SSO (+ OIDC refresh), assume-role (chaining,
    `credential_source`, web identity), `credential_process`, IMDSv2, container
-7. Remaining five protocols
+7. ~~Remaining five protocols~~ ✅ — all six verified byte-identical against live AWS
 8. Output formatters and `--query`
 9. Pagination/waiter *runtimes* (specs: `docs/pagination-runtime.md`; data already vendored)
 10. Customisations as behaviour (surface already data-complete), `s3` transfer manager first
