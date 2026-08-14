@@ -586,3 +586,41 @@ threshold and chunk size, 10 concurrent requests, the `--exclude`/`--include` ch
 the *last* matching rule wins and `*` crosses `/`, and the sync comparator's asymmetric
 time rule (upload skips when `dest >= src`, download skips when `local <= s3`, with no
 tolerance). Exit codes there are their own rule: 1 for any failure, 2 for warnings only.
+
+### `cp`, `mv`, `rm`
+
+Verified end to end against a local S3 server (`scripts/fake-s3-server.py`): recursive
+upload, download and s3→s3 copy all round-trip with identical SHA-256, including a 25 MiB
+object that exercises the multipart and ranged-download paths. Argument handling, filter
+semantics and error output match the reference across twenty cases.
+
+**Three deliberate UI departures**, requested and worth stating plainly:
+
+1. **The source is scanned in full before any transfer starts**, so progress totals are
+   exact. The reference streams its listing into the transfer and shows `~`-prefixed
+   estimates plus `(calculating...)` until listing finishes. Ours costs one extra listing
+   pass; it buys a real percentage from the first frame.
+2. **Parts of a single large object transfer concurrently.** The reference parallelises
+   across files but walks one file's parts in order, so a single big file is slow. Ours
+   gives a large object the whole pool.
+3. **The progress line is clamped to the terminal width.** The reference pads to the
+   previous line's length and relies on `\r`; on a narrow terminal that line wraps, `\r`
+   returns to the start of only the last screen row, and the bar smears down the screen
+   leaving duplicate rows. Measuring the width (via `ioctl`, then `COLUMNS`, then 80) and
+   truncating means exactly one row is rewritten in place.
+
+Bugs this work surfaced in code already committed:
+
+- **`object_path` double-counted the endpoint's path prefix.** The transport builds its
+  URL from `endpoint.url`, which already contains the path-style bucket, and the signer
+  adds the prefix separately — so including it in the request path too sent
+  `/bucket/bucket/key`. Objects uploaded fine and then could not be found.
+- **Filter patterns are anchored to the source root**, not matched against the relative
+  key. `--exclude "sub/*"` excludes only the `sub/` directly beneath the source. Getting
+  this wrong silently transferred files the user excluded.
+- **`abspath`, not `canonicalize`.** Resolving symlinks rewrites `/tmp` to `/private/tmp`
+  on macOS, after which no pattern matched anything, because the scanned paths keep the
+  name the user typed.
+
+Known gaps: `--sse-c`, `--grants`, `--metadata`, `--metadata-directive`, `--copy-props`,
+`--follow-symlinks`, and the streaming forms (`cp - s3://...`). `sync` is not implemented.

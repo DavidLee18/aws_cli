@@ -80,6 +80,7 @@ dependencies = [
  "aws-cli-output",
  "aws-cli-protocol",
  "aws-cli-runtime",
+ "libc",
  "quick-xml",
  "regex",
  "serde",

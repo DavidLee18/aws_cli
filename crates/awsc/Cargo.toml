@@ -18,3 +18,7 @@ serde_json = { workspace = true }
 regex = "1"
 quick-xml = { workspace = true }
 serde = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+# Terminal width for the transfer progress line.
+libc = "0.2"

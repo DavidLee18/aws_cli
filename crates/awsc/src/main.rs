@@ -64,6 +64,11 @@ impl Failure {
         Failure { message: message.to_string(), code, raw: false, service_error_code: None }
     }
 
+    /// The exit code this failure carries.
+    pub fn exit_code(&self) -> u8 {
+        self.code
+    }
+
     /// The message alone, for the few commands that format their own error line.
     pub fn message(&self) -> &str {
         &self.message

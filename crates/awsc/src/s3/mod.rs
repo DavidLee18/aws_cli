@@ -5,6 +5,9 @@
 //! writes plain text to stdout rather than going through `--output`.
 
 pub mod bucket;
+pub mod conn;
+pub mod progress;
+pub mod transfer;
 pub mod ls;
 pub mod uri;
 pub mod xml;
@@ -105,6 +108,9 @@ pub fn service_error(operation: &str, response: &aws_cli_runtime::http::Response
 pub fn dispatch(parsed: &Parsed, globals: &Globals) -> Result<std::process::ExitCode, Failure> {
     match parsed.operation.as_str() {
         "ls" => ls::run(parsed, globals),
+        "cp" => transfer::cp(parsed, globals),
+        "mv" => transfer::mv(parsed, globals),
+        "rm" => transfer::rm(parsed, globals),
         "mb" => bucket::mb(parsed, globals),
         "rb" => bucket::rb(parsed, globals),
         "presign" => bucket::presign(parsed, globals),
