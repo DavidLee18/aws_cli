@@ -62,7 +62,7 @@ Crates are added as they are implemented.
 |---|---|---|
 | `aws-cli-model` | **implemented** | Smithy AST loader, shape index, botocore-compatible naming, overlays |
 | `aws-cli-conformance` | **implemented** | Differential testing against the reference CLI |
-| `aws-cli-protocol` | **all six** ✅ | awsQuery, ec2Query, awsJson 1.0/1.1, restJson1, restXml — each verified byte-identical live |
+| `aws-cli-protocol` | **all six** ✅ | awsQuery, ec2Query, awsJson 1.0/1.1, restJson1, restXml, plus pagination and response fix-ups |
 | `aws-cli-runtime` | **partial** | sigv4 ✅, endpoint rulesets ✅ (14,112/14,112 AWS conformance cases), credentials ✅ (env, static, SSO + refresh, assume-role, credential_process, IMDSv2, container) |
 | `aws-cli-output` | **json** | `text`/`table`/`yaml` fail loudly rather than silently emitting JSON |
 | `awsc` | **runs** | The binary: dispatch, global args, exit codes |
@@ -186,11 +186,11 @@ This is an independent project and is not affiliated with or endorsed by AWS.
 
 Remaining, roughly in the order that unblocks the most usage:
 
-8. **Pagination runtime** — 3,279 operations auto-paginate; without it, output differs
-   from the reference for every one of them (data vendored, semantics in
-   `docs/pagination-runtime.md`)
-9. **Global arguments** — 13 of the reference's 19 are unimplemented; `--query`
-   (JMESPath) and `--no-paginate` matter most
+8. ~~Pagination runtime~~ ✅ — 3,279 paginating operations, with `--no-paginate`,
+   `--max-items`, `--page-size` and `--starting-token`; resume tokens interoperate with
+   the reference in both directions
+9. **Global arguments** — 10 of the reference's 19 remain; `--query` (JMESPath) matters
+   most
 10. **Output formats** — `text`, `table`, `yaml`, `yaml-stream` (currently fail loudly)
 11. **Argument layer** — shorthand syntax (`Name=x,Values=y`), `--cli-input-json`,
     `--generate-cli-skeleton`; every operation advertises these three flags

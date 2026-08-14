@@ -11,7 +11,9 @@ pub mod aws_json;
 pub mod ec2_query;
 pub mod http_binding;
 pub mod json;
+pub mod pagination;
 pub mod query;
+pub mod response_fixups;
 pub mod shapes;
 pub mod xml;
 

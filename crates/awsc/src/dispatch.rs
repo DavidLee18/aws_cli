@@ -6,7 +6,9 @@
 
 use aws_cli_model::shape::{OperationShape, StructureShape};
 use aws_cli_model::{Model, Protocol};
-use aws_cli_protocol::{aws_json, ec2_query, http_binding, json, query, xml, ProtocolError};
+use aws_cli_protocol::{
+    aws_json, ec2_query, http_binding, json, query, response_fixups, xml, ProtocolError,
+};
 use serde_json::Value;
 
 /// Everything needed to issue the HTTP request, independent of protocol.
@@ -177,7 +179,25 @@ fn serialize_rest(
 }
 
 /// Parse a successful response body into the JSON the CLI prints.
+///
+/// Applies the per-service `after-call` fix-ups afterwards, since those change what is
+/// printed even though they sit outside the protocol.
 pub fn parse_response(
+    model: &Model,
+    protocol: Protocol,
+    operation_wire_name: &str,
+    output_shape: Option<&StructureShape>,
+    body: &str,
+) -> Result<Value, ProtocolError> {
+    let mut value = parse_body(model, protocol, operation_wire_name, output_shape, body)?;
+    if let Some(shape) = output_shape {
+        // IAM policy documents arrive URL-encoded; the reference decodes them.
+        response_fixups::decode_policy_documents(model, shape, &mut value);
+    }
+    Ok(value)
+}
+
+fn parse_body(
     model: &Model,
     protocol: Protocol,
     operation_wire_name: &str,

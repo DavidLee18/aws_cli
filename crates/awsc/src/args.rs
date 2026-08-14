@@ -24,6 +24,11 @@ pub struct Parsed {
     pub endpoint_url: Option<String>,
     pub output: Format,
     pub debug: bool,
+    /// `--no-paginate`; auto-pagination is on by default for paginated operations.
+    pub no_paginate: bool,
+    pub max_items: Option<usize>,
+    pub page_size: Option<i64>,
+    pub starting_token: Option<String>,
 }
 
 pub fn parse(argv: &[String]) -> Result<Outcome, String> {
@@ -58,6 +63,10 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
         endpoint_url: None,
         output: Format::Json,
         debug: false,
+        no_paginate: false,
+        max_items: None,
+        page_size: None,
+        starting_token: None,
     };
 
     let mut i = 2;
@@ -90,6 +99,20 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
                     .ok_or_else(|| format!("invalid --output `{v}`"))?;
             }
             "--debug" => parsed.debug = true,
+            // Pagination controls are injected into every paginated operation, so they
+            // are parsed here rather than bound to a model member.
+            "--no-paginate" => parsed.no_paginate = true,
+            "--max-items" => {
+                let v = take_value()?;
+                parsed.max_items =
+                    Some(v.parse().map_err(|_| format!("--max-items: `{v}` is not a number"))?);
+            }
+            "--page-size" => {
+                let v = take_value()?;
+                parsed.page_size =
+                    Some(v.parse().map_err(|_| format!("--page-size: `{v}` is not a number"))?);
+            }
+            "--starting-token" => parsed.starting_token = Some(take_value()?),
             "--help" => return Ok(Outcome::Help),
             other => {
                 // Operation parameters are resolved against the model later; store the

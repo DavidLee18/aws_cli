@@ -144,14 +144,28 @@ the reference while building the STS vertical slice.
   `Content-Type`; error codes are normalised colon-first then hash-last. Blobs are NOT
   base64-decoded on output, because the CLI replaces botocore's decoder with `identity`.
 
+- **Pagination** ✅ — auto-pagination for the 3,279 operations that need it, verified
+  byte-identical live including `--no-paginate`, `--max-items`, `--page-size` and
+  `--starting-token`.
+
+  Details that are not guessable:
+
+  - `non_aggregate_keys` come from the **first page only** and are emitted even when
+    absent, which is why `s3api list-buckets` prints `"Prefix": null`.
+  - Result keys accumulate **by type**: lists concatenate, integers **sum** (dynamodb
+    `Count`), strings **concatenate** (rds `LogFileData`), maps and structures keep the
+    first page and drop the rest.
+  - Only `result_keys[0]` — the primary — counts against `--max-items` or gets truncated;
+    secondary keys accumulate in full.
+  - `NextToken` is **botocore's own token**, `base64(json.dumps({input_token: value, ...,
+    boto_truncate_amount: n}))`, not the raw service token. Verified interoperable in both
+    directions: the tokens are byte-identical and each CLI resumes from the other's.
+  - `boto_truncate_amount` is how many items of the cut page were already returned; a
+    resume skips exactly those, and offsets compose across successive resumes.
+
 - **Retries** are not implemented (the reference defaults to `standard` mode).
 
-- **Pagination is not implemented.** Auto-pagination changes output: `build_full_result()`
-  merges pages and emits the paginator's `non_aggregate_keys` even when the service
-  omitted them, so `s3api list-buckets` prints `"Prefix": null` where we print nothing.
-  Our output matches the reference's `--no-paginate` exactly. The data is already
-  vendored (`data/paginators.json`) and the semantics are specified in
-  `docs/pagination-runtime.md`.
+
 
 - **Output formats** — only `json`. `text`, `table`, `yaml`, `yaml-stream` fail loudly.
 

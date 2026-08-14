@@ -10,6 +10,7 @@ pub mod customizations;
 pub mod model;
 pub mod naming;
 pub mod paginators;
+pub mod protocol_metadata;
 pub mod service_names;
 pub mod shape;
 pub mod shape_id;

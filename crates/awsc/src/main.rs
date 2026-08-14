@@ -13,6 +13,7 @@ use std::process::ExitCode;
 
 mod args;
 mod dispatch;
+mod paginate;
 mod exit;
 
 const USAGE: &str = "\
@@ -74,6 +75,10 @@ fn run() -> Result<ExitCode, Failure> {
         .map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
 
     let protocol = model.protocol().map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
+    // The paginator overlay is keyed by CLI service name, which is not always the
+    // name the user typed (aliases) nor the model filename.
+    let cli_service =
+        model.cli_service_name().map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
 
     let (op_id, op) = model
         .operation(&parsed.operation)
@@ -130,49 +135,65 @@ fn run() -> Result<ExitCode, Failure> {
             Failure::new(code, e)
         })?;
 
-    let request = http::PreparedRequest {
-        method: wire.method,
-        endpoint: ep,
-        path: wire.path,
-        query: wire.query,
-        content_type: wire.content_type,
-        extra_headers: wire.headers,
-        body: wire.body,
+    // One round trip. Kept as a closure so pagination can issue it repeatedly with a
+    // different token injected, without re-resolving credentials or the endpoint.
+    let issue = |input: Option<&serde_json::Value>| -> Result<serde_json::Value, Failure> {
+        let wire = dispatch::serialize(&model, protocol, op_id.name(), op, input_shape, input)
+            .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
+
+        let request = http::PreparedRequest {
+            method: wire.method,
+            endpoint: ep.clone(),
+            path: wire.path,
+            query: wire.query,
+            content_type: wire.content_type,
+            extra_headers: wire.headers,
+            body: wire.body,
+        };
+
+        let timestamp = sigv4::format_timestamp(now_unix());
+        let (headers, signature) = http::sign_request(&request, &creds, &timestamp);
+
+        if parsed.debug {
+            eprintln!("endpoint: {}", request.endpoint.url);
+            eprintln!("body: {}", request.body);
+            eprintln!("CanonicalRequest:\n{}", signature.canonical_request);
+            eprintln!("StringToSign:\n{}", signature.string_to_sign);
+            eprintln!("Signature:\n{}", signature.signature);
+        }
+
+        let response =
+            http::send(&request, &headers).map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
+
+        if response.status >= 400 {
+            let (code, message) = dispatch::parse_error(
+                protocol,
+                &response.body,
+                response.header("x-amzn-errortype").as_deref(),
+            );
+            return Err(Failure::new(
+                exit::CLIENT_ERROR,
+                aws_cli_runtime::RuntimeError::Service {
+                    code,
+                    message,
+                    operation: op_id.name().to_string(),
+                },
+            ));
+        }
+
+        dispatch::parse_response(&model, protocol, op_id.name(), output_shape, &response.body)
+            .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))
     };
 
-    let timestamp = sigv4::format_timestamp(now_unix());
-    let (headers, signature) = http::sign_request(&request, &creds, &timestamp);
-
-    if parsed.debug {
-        eprintln!("endpoint: {}", request.endpoint.url);
-        eprintln!("body: {}", request.body);
-        eprintln!("CanonicalRequest:\n{}", signature.canonical_request);
-        eprintln!("StringToSign:\n{}", signature.string_to_sign);
-        eprintln!("Signature:\n{}", signature.signature);
-    }
-
-    let response =
-        http::send(&request, &headers).map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
-
-    if response.status >= 400 {
-        let (code, message) = dispatch::parse_error(
-            protocol,
-            &response.body,
-            response.header("x-amzn-errortype").as_deref(),
-        );
-        return Err(Failure::new(
-            exit::CLIENT_ERROR,
-            aws_cli_runtime::RuntimeError::Service {
-                code,
-                message,
-                operation: op_id.name().to_string(),
-            },
-        ));
-    }
-
-    let value =
-        dispatch::parse_response(&model, protocol, op_id.name(), output_shape, &response.body)
-            .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
+    let value = paginate::run(&paginate::Settings {
+        service: &cli_service,
+        operation: &parsed.operation,
+        input: input.clone(),
+        no_paginate: parsed.no_paginate,
+        max_items: parsed.max_items,
+        page_size: parsed.page_size,
+        starting_token: parsed.starting_token.clone(),
+    }, issue)?;
 
     match aws_cli_output::render(&value, parsed.output) {
         Ok(Some(text)) => println!("{text}"),

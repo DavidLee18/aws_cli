@@ -57,7 +57,15 @@ pub fn content_type(protocol: Protocol) -> &'static str {
     }
 }
 
-/// The `targetPrefix` for a service, from its protocol trait.
+/// The `targetPrefix` for a service.
+///
+/// Resolution order, and the order matters:
+///
+/// 1. the protocol trait's own `targetPrefix`, if a model ever carries one;
+/// 2. the vendored table keyed by `sdkId`, which is the authority — see
+///    [`aws_cli_model::protocol_metadata`] for why it cannot be derived;
+/// 3. the service shape name, correct for 149 of 152 services and the only option for a
+///    service newer than the vendored table.
 pub fn target_prefix(model: &Model, protocol: Protocol) -> Option<String> {
     let traits = &model.service().ok()?.traits;
     let trait_id = match protocol {
@@ -65,14 +73,22 @@ pub fn target_prefix(model: &Model, protocol: Protocol) -> Option<String> {
         Protocol::AwsJson1_1 => "aws.protocols#awsJson1_1",
         _ => return None,
     };
-    traits
+    if let Some(from_trait) = traits
         .get(trait_id)
         .and_then(|v| v.get("targetPrefix"))
         .and_then(|v| v.as_str())
-        .map(str::to_string)
-        // Smithy models often omit targetPrefix, in which case the service shape's own
-        // name is the prefix.
-        .or_else(|| Some(model.service_id().name().to_string()))
+    {
+        return Some(from_trait.to_string());
+    }
+    if let Some(vendored) = model
+        .sdk_id()
+        .ok()
+        .flatten()
+        .and_then(aws_cli_model::protocol_metadata::target_prefix)
+    {
+        return Some(vendored.to_string());
+    }
+    Some(model.service_id().name().to_string())
 }
 
 /// Parse a successful response body.
