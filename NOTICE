@@ -1,0 +1,42 @@
+aws-cli-rs
+Copyright (c) 2026 David Lee
+
+This project is licensed under the MIT License (see LICENSE).
+
+--------------------------------------------------------------------------------
+Third-party material
+--------------------------------------------------------------------------------
+
+The MIT licence above covers the source code in this repository. Some checked-in
+DATA FILES are generated from Apache-2.0 licensed AWS projects and remain subject
+to that licence and its attribution requirement. They are derivative works of:
+
+  AWS CLI / botocore
+  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+  Licensed under the Apache License, Version 2.0
+  https://github.com/aws/aws-cli
+
+      data/service-names.json
+      data/paginators.json
+      data/partitions.json
+      data/customizations.json
+      data/custom-surface.json
+      data/protocol-metadata.json
+      tests/golden/reference-surface.json
+
+  AWS SDK for Rust (Smithy service models)
+  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+  Licensed under the Apache License, Version 2.0
+  https://github.com/awslabs/aws-sdk-rust
+
+      models/*.json  (not checked in; fetched by scripts/fetch-models.sh)
+
+A copy of the Apache License, Version 2.0 is available at:
+https://www.apache.org/licenses/LICENSE-2.0
+
+Each generated file carries a `_comment` field naming the script that produced it.
+The credentials in tests/golden/sigv4-sts-get-caller-identity.json are the example
+key pair published in AWS's SigV4 documentation, not real credentials.
+
+This is an independent project. It is not affiliated with, endorsed by, or
+sponsored by Amazon Web Services.

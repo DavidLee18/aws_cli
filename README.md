@@ -153,17 +153,16 @@ Tests that need `models/` skip cleanly when it is absent, so a fresh clone passe
 
 ## Licence and attribution
 
-This project is Apache-2.0 (see `LICENSE`).
+The source code is **MIT** licensed (see `LICENSE`).
 
-The checked-in files under `data/` and `tests/golden/` are **generated from AWS's own
-tooling** and are derivative of it:
+The checked-in files under `data/` and `tests/golden/` are generated from AWS's own
+tooling, so they are derivative works of **Apache-2.0** projects and keep that licence
+along with its attribution requirement — see `NOTICE` for the full list:
 
-- `data/partitions.json`, `data/paginators.json`, `data/customizations.json`,
-  `data/custom-surface.json`, `data/service-names.json` and
-  `tests/golden/reference-surface.json` are extracted from
-  [botocore / AWS CLI v2](https://github.com/aws/aws-cli) (Apache-2.0).
+- `data/*.json` and `tests/golden/reference-surface.json` are extracted from
+  [botocore / AWS CLI v2](https://github.com/aws/aws-cli).
 - `models/` (not checked in) comes from
-  [awslabs/aws-sdk-rust](https://github.com/awslabs/aws-sdk-rust) (Apache-2.0).
+  [awslabs/aws-sdk-rust](https://github.com/awslabs/aws-sdk-rust).
 
 Each generated file carries a `_comment` naming the script that produced it. The
 credentials in `tests/golden/sigv4-sts-get-caller-identity.json` are the example key pair
@@ -184,6 +183,18 @@ This is an independent project and is not affiliated with or endorsed by AWS.
 6. ~~Credential chain~~ ✅ — env, static, SSO (+ OIDC refresh), assume-role (chaining,
    `credential_source`, web identity), `credential_process`, IMDSv2, container
 7. ~~Remaining five protocols~~ ✅ — all six verified byte-identical against live AWS
-8. Output formatters and `--query`
-9. Pagination/waiter *runtimes* (specs: `docs/pagination-runtime.md`; data already vendored)
-10. Customisations as behaviour (surface already data-complete), `s3` transfer manager first
+
+Remaining, roughly in the order that unblocks the most usage:
+
+8. **Pagination runtime** — 3,279 operations auto-paginate; without it, output differs
+   from the reference for every one of them (data vendored, semantics in
+   `docs/pagination-runtime.md`)
+9. **Global arguments** — 13 of the reference's 19 are unimplemented; `--query`
+   (JMESPath) and `--no-paginate` matter most
+10. **Output formats** — `text`, `table`, `yaml`, `yaml-stream` (currently fail loudly)
+11. **Argument layer** — shorthand syntax (`Name=x,Values=y`), `--cli-input-json`,
+    `--generate-cli-skeleton`; every operation advertises these three flags
+12. **Waiter runtime** — 379 `wait` subcommands are in the surface but do not run
+13. **Retries** — the reference defaults to `standard` mode
+14. **Customisations as behaviour** — 103 custom commands, `s3 cp`/`sync` first
+15. `rpcv2Cbor`, SSO login flow, `help` output
