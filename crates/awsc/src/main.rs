@@ -93,16 +93,6 @@ fn run() -> Result<ExitCode, Failure> {
     let input = args::build_input(&model, input_shape, &parsed.parameters)
         .map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
 
-    let wire = dispatch::serialize(
-        &model,
-        protocol,
-        op_id.name(),
-        op,
-        input_shape,
-        input.as_ref(),
-    )
-    .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
-
     // The ruleset decides the endpoint, and may supply a signing region that differs
     // from the client region. A region is still required: services without a global
     // endpoint produce a rule error otherwise, which is reported as configuration (253)
@@ -135,6 +125,13 @@ fn run() -> Result<ExitCode, Failure> {
             Failure::new(code, e)
         })?;
 
+    let transport = http::Transport {
+        verify_ssl: parsed.verify_ssl,
+        ca_bundle: parsed.ca_bundle.clone(),
+        read_timeout: parsed.read_timeout,
+        connect_timeout: parsed.connect_timeout,
+    };
+
     // One round trip. Kept as a closure so pagination can issue it repeatedly with a
     // different token injected, without re-resolving credentials or the endpoint.
     let issue = |input: Option<&serde_json::Value>| -> Result<serde_json::Value, Failure> {
@@ -152,18 +149,25 @@ fn run() -> Result<ExitCode, Failure> {
         };
 
         let timestamp = sigv4::format_timestamp(now_unix());
-        let (headers, signature) = http::sign_request(&request, &creds, &timestamp);
+        let (headers, signature) = if parsed.no_sign_request {
+            (http::unsigned_headers(&request), None)
+        } else {
+            let (h, s) = http::sign_request(&request, &creds, &timestamp);
+            (h, Some(s))
+        };
 
         if parsed.debug {
             eprintln!("endpoint: {}", request.endpoint.url);
             eprintln!("body: {}", request.body);
-            eprintln!("CanonicalRequest:\n{}", signature.canonical_request);
-            eprintln!("StringToSign:\n{}", signature.string_to_sign);
-            eprintln!("Signature:\n{}", signature.signature);
+            if let Some(signature) = &signature {
+                eprintln!("CanonicalRequest:\n{}", signature.canonical_request);
+                eprintln!("StringToSign:\n{}", signature.string_to_sign);
+                eprintln!("Signature:\n{}", signature.signature);
+            }
         }
 
-        let response =
-            http::send(&request, &headers).map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
+        let response = http::send(&request, &headers, &transport)
+            .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
 
         if response.status >= 400 {
             let (code, message) = dispatch::parse_error(
@@ -195,8 +199,16 @@ fn run() -> Result<ExitCode, Failure> {
         starting_token: parsed.starting_token.clone(),
     }, issue)?;
 
+    // --query runs after the pagination merge and after ResponseMetadata removal, so an
+    // expression can never see either. Matches the reference's ordering.
+    let value = match &parsed.query {
+        Some(expression) => aws_cli_output::query::apply(&value, expression)
+            .map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?,
+        None => value,
+    };
+
     match aws_cli_output::render(&value, parsed.output) {
-        Ok(Some(text)) => println!("{text}"),
+        Ok(Some(text)) => print!("{text}"),
         Ok(None) => {}
         Err(e) => return Err(Failure::new(exit::GENERAL_ERROR, e)),
     }

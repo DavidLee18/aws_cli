@@ -29,6 +29,13 @@ pub struct Parsed {
     pub max_items: Option<usize>,
     pub page_size: Option<i64>,
     pub starting_token: Option<String>,
+    /// `--query`, a JMESPath expression applied before formatting.
+    pub query: Option<String>,
+    pub no_sign_request: bool,
+    pub verify_ssl: bool,
+    pub ca_bundle: Option<String>,
+    pub read_timeout: Option<u64>,
+    pub connect_timeout: Option<u64>,
 }
 
 pub fn parse(argv: &[String]) -> Result<Outcome, String> {
@@ -67,6 +74,12 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
         max_items: None,
         page_size: None,
         starting_token: None,
+        query: None,
+        no_sign_request: false,
+        verify_ssl: true,
+        ca_bundle: None,
+        read_timeout: None,
+        connect_timeout: None,
     };
 
     let mut i = 2;
@@ -113,6 +126,34 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
                     Some(v.parse().map_err(|_| format!("--page-size: `{v}` is not a number"))?);
             }
             "--starting-token" => parsed.starting_token = Some(take_value()?),
+            "--query" => {
+                let expression = take_value()?;
+                // Validated here so a bad expression fails before any API call, which is
+                // where the reference validates it too.
+                aws_cli_output::query::validate(&expression).map_err(|e| e.to_string())?;
+                parsed.query = Some(expression);
+            }
+            "--no-sign-request" => parsed.no_sign_request = true,
+            "--no-verify-ssl" => parsed.verify_ssl = false,
+            "--ca-bundle" => parsed.ca_bundle = Some(take_value()?),
+            "--cli-read-timeout" => {
+                let v = take_value()?;
+                parsed.read_timeout =
+                    Some(v.parse().map_err(|_| format!("--cli-read-timeout: `{v}` is not a number"))?);
+            }
+            "--cli-connect-timeout" => {
+                let v = take_value()?;
+                parsed.connect_timeout = Some(
+                    v.parse().map_err(|_| format!("--cli-connect-timeout: `{v}` is not a number"))?,
+                );
+            }
+            // Accepted and genuinely inert: we neither colour output nor page it, so
+            // honouring these would be a no-op anyway. Rejecting them would break
+            // scripts that pass them habitually.
+            "--color" => {
+                let _ = take_value()?;
+            }
+            "--no-cli-pager" => {}
             "--help" => return Ok(Outcome::Help),
             other => {
                 // Operation parameters are resolved against the model later; store the

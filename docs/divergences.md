@@ -167,9 +167,35 @@ the reference while building the STS vertical slice.
 
 
 
-- **Output formats** — only `json`. `text`, `table`, `yaml`, `yaml-stream` fail loudly.
+- **Output formats** — `json` and `text` are implemented; `table`, `yaml` and
+  `yaml-stream` fail loudly rather than silently emitting JSON.
 
-- **`--query`** (JMESPath) is not implemented.
+  `text` reproduces the unobvious rules: keys are never printed, scalars are emitted
+  **sorted by key name** (not model order), a nested container is labelled with its own
+  key **uppercased** with no depth encoding, a dict with no scalar members emits no label
+  line at all, and scalars use Python's spellings (`True`/`False`/`None`). Empty
+  containers emit nothing, not even a newline.
+
+  **Known divergence:** the reference's text formatter is *unbuffered* — it formats each
+  page separately and then formats the resume token as a pseudo-page. With
+  `--output text --max-items N --query ...`, `--query` is applied to that pseudo-page too
+  and prints a spurious `None` line. We merge pages first and format once, so we omit it.
+  Everything else about `text` matches, including with `--query`.
+
+- **`--query`** ✅ — JMESPath via the `jmespath` crate. Applied after the pagination merge
+  and after `ResponseMetadata` removal, matching the reference's ordering, and validated
+  at parse time so a bad expression fails before any API call.
+
+  One compatibility shim: a JMESPath literal is `` `json` ``, so a string literal is
+  strictly `` `"us-east-1"` ``. Python's implementation also accepts the unquoted
+  `` `us-east-1` ``, which most published AWS CLI examples use. Literals whose contents
+  are not valid JSON are quoted before compiling.
+
+- **Global arguments** — implemented: `--query`, `--no-sign-request`, `--cli-read-timeout`,
+  `--cli-connect-timeout`, plus `--color`/`--no-cli-pager` accepted as genuine no-ops (we
+  neither colour nor page). `--no-verify-ssl` and `--ca-bundle` are **refused rather than
+  ignored**, since silently verifying when asked not to would misrepresent the request.
+  Still missing: `--cli-binary-format`, `--cli-error-format`, `--debug` parity.
 
 Historical note: the six-model sample reported 96.9% — misleadingly high, because its
 dominant divergence causes had already been fixed. Divergences cluster in services with

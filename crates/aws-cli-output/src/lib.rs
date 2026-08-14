@@ -1,8 +1,11 @@
 //! Output formatting.
 //!
 //! The reference supports `json`, `text`, `table`, `yaml`, `yaml-stream` and `off`
-//! (`data/cli.json`). `json` is implemented; the rest are stubbed explicitly so an
-//! unimplemented format fails loudly instead of silently printing JSON.
+//! (`data/cli.json`). `json` and `text` are implemented; the rest are stubbed explicitly
+//! so an unimplemented format fails loudly instead of silently printing JSON.
+
+pub mod query;
+pub mod text;
 
 use serde_json::Value;
 
@@ -47,8 +50,12 @@ pub struct UnsupportedFormat(pub &'static str);
 
 /// Render a response.
 ///
-/// The reference prints 4-space-indented JSON with a trailing newline, and prints
-/// nothing at all for an empty result — both reproduced here.
+/// Returns the EXACT bytes to write, trailing newline included, so callers use `print!`
+/// rather than `println!` — text output already ends in a newline and would otherwise
+/// gain a spurious blank line.
+///
+/// `None` means "print nothing at all", which is what the reference does for an empty
+/// result.
 pub fn render(value: &Value, format: Format) -> Result<Option<String>, UnsupportedFormat> {
     match format {
         Format::Off => Ok(None),
@@ -61,9 +68,11 @@ pub fn render(value: &Value, format: Format) -> Result<Option<String>, Unsupport
             let formatter = serde_json::ser::PrettyFormatter::with_indent(indent);
             let mut ser = serde_json::Serializer::with_formatter(&mut buf, formatter);
             serde::Serialize::serialize(value, &mut ser).expect("JSON value always serializes");
-            Ok(Some(String::from_utf8(buf).expect("serde_json emits UTF-8")))
+            let mut text = String::from_utf8(buf).expect("serde_json emits UTF-8");
+            text.push('\n');
+            Ok(Some(text))
         }
-        Format::Text => Err(UnsupportedFormat("text")),
+        Format::Text => Ok(text::render(value)),
         Format::Table => Err(UnsupportedFormat("table")),
         Format::Yaml => Err(UnsupportedFormat("yaml")),
         Format::YamlStream => Err(UnsupportedFormat("yaml-stream")),
@@ -79,9 +88,9 @@ mod tests {
     fn matches_reference_json_shape() {
         let v = json!({"UserId": "AIDA", "Account": "123", "Arn": "arn:aws:iam::123:user/x"});
         let out = render(&v, Format::Json).unwrap().unwrap();
-        // 4-space indent, keys in insertion order.
+        // 4-space indent, keys in insertion order, one trailing newline.
         assert!(out.starts_with("{\n    \"UserId\": \"AIDA\","), "got: {out}");
-        assert!(out.ends_with('}'));
+        assert!(out.ends_with("}\n"));
     }
 
     #[test]

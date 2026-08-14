@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+jmespath = "0.5.0"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

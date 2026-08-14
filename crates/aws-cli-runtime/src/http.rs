@@ -19,6 +19,15 @@ pub struct PreparedRequest {
     pub body: String,
 }
 
+/// Transport-level options from the global arguments.
+#[derive(Debug, Clone, Default)]
+pub struct Transport {
+    pub verify_ssl: bool,
+    pub ca_bundle: Option<String>,
+    pub read_timeout: Option<u64>,
+    pub connect_timeout: Option<u64>,
+}
+
 pub struct Response {
     pub status: u16,
     pub body: String,
@@ -126,13 +135,51 @@ pub fn user_agent() -> String {
     format!("aws-cli-rs/{}", env!("CARGO_PKG_VERSION"))
 }
 
-/// Send a signed request. Blocking, since the CLI makes one call per invocation and an
-/// async runtime would buy nothing here.
-pub fn send(req: &PreparedRequest, headers: &[(String, String)]) -> Result<Response, RuntimeError> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(60))
-        .build();
+/// Headers for an unsigned request (`--no-sign-request`).
+///
+/// Everything the protocol asked for, minus the SigV4 apparatus. `host` is still listed
+/// so the caller can filter it out consistently.
+pub fn unsigned_headers(req: &PreparedRequest) -> Vec<(String, String)> {
+    let mut out = vec![("host".to_string(), req.endpoint.host.clone())];
+    if let Some(content_type) = &req.content_type {
+        out.push(("content-type".to_string(), content_type.clone()));
+    }
+    for (k, v) in &req.extra_headers {
+        out.push((k.to_ascii_lowercase(), v.clone()));
+    }
+    out.push(("user-agent".to_string(), user_agent()));
+    out
+}
+
+/// Send a request. Blocking, since the CLI makes one call per invocation and an async
+/// runtime would buy nothing here.
+pub fn send(
+    req: &PreparedRequest,
+    headers: &[(String, String)],
+    transport: &Transport,
+) -> Result<Response, RuntimeError> {
+    let builder = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(
+            transport.connect_timeout.unwrap_or(10),
+        ))
+        .timeout(std::time::Duration::from_secs(transport.read_timeout.unwrap_or(60)));
+
+    // `--no-verify-ssl` and `--ca-bundle` both change certificate verification. Rather
+    // than silently ignoring them — which would give a false sense of what the request
+    // did — an unsupported combination is reported.
+    if !transport.verify_ssl {
+        return Err(RuntimeError::Http(
+            "--no-verify-ssl is not supported yet; refusing rather than silently verifying"
+                .to_string(),
+        ));
+    }
+    if transport.ca_bundle.is_some() {
+        return Err(RuntimeError::Http(
+            "--ca-bundle is not supported yet; refusing rather than silently ignoring it"
+                .to_string(),
+        ));
+    }
+    let agent = builder.build();
 
     let base = req.endpoint.url.trim_end_matches('/');
     let path = if req.path.is_empty() { "/" } else { &req.path };
