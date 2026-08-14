@@ -627,7 +627,10 @@ fn configservice_subscribe(parsed: &Parsed, globals: &Globals) -> Result<ExitCod
         .ok_or_else(|| Failure::new(exit::CONFIGURATION, aws_cli_runtime::RuntimeError::NoRegion))?;
     let other = Globals { region: Some(region.clone()), ..globals.for_other_service() };
 
-    let s3_model = crate::load_model("s3").map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
+    // "s3api" is the CLI's name for the modelled S3 service; plain "s3" is the separate
+    // high-level command tree and resolves to no model.
+    let s3_model =
+        crate::load_model("s3api").map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
     let s3 = Client::new(&s3_model, &other)?;
 
     // The reference converts the error code with a bare `int()`, so only a numeric code
