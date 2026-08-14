@@ -81,13 +81,20 @@ pub fn rb(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> {
         )));
     }
 
+    // `--force` empties the bucket first, exactly as the reference does by invoking
+    // `rm --recursive` and refusing to continue if anything failed.
     if parsed.extras.iter().any(|f| f == "--force") {
-        return Err(Failure::new(
-            exit::GENERAL_ERROR,
-            "rb --force is not implemented yet: it runs `rm --recursive` first, and the \
-             transfer commands are not in this build. Empty the bucket, then retry \
-             without --force.",
-        ));
+        let mut emptied = parsed.clone();
+        emptied.extras.retain(|f| f != "--force");
+        emptied.extras.push("--recursive".to_string());
+        let code = crate::s3::transfer::rm(&emptied, globals)?;
+        if code != exit::code(exit::SUCCESS) {
+            return Err(Failure::new(
+                exit::GENERAL_ERROR,
+                "remove_bucket failed: Unable to delete all objects in the bucket, \
+                 bucket will not be deleted.",
+            ));
+        }
     }
 
     let model =

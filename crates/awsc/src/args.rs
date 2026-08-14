@@ -15,6 +15,7 @@ pub enum Outcome {
     Usage,
 }
 
+#[derive(Clone)]
 pub struct Parsed {
     pub service: String,
     pub operation: String,

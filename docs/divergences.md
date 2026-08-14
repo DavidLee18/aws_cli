@@ -622,8 +622,13 @@ Bugs this work surfaced in code already committed:
   on macOS, after which no pattern matched anything, because the scanned paths keep the
   name the user typed.
 
+`rb --force` empties the bucket via `rm --recursive` first and refuses to delete the
+bucket if anything failed, matching the reference. Verified on real S3: `mb`, upload,
+`rb` failing with `BucketNotEmpty`, then `rb --force` succeeding and the bucket
+disappearing.
+
 Known gaps: `--sse-c`, `--grants`, `--metadata`, `--metadata-directive`, `--copy-props`,
-`--follow-symlinks`, and the streaming forms (`cp - s3://...`). `sync` is not implemented.
+`--follow-symlinks`, and the streaming forms (`cp - s3://...`).
 
 ### Concurrency: one queue, adaptive workers
 
