@@ -30,6 +30,7 @@ pub fn dispatch(parsed: &Parsed) -> Result<Option<ExitCode>, Failure> {
         ("codecommit", "credential-helper") => codecommit_credential_helper(parsed, &globals)?,
         ("eks", "get-token") => eks_get_token(parsed, &globals)?,
         ("configservice", "subscribe") => configservice_subscribe(parsed, &globals)?,
+        ("logs", "tail") => crate::logs_tail::run(parsed, &globals)?,
         _ => return Ok(None),
     };
     Ok(Some(outcome))
@@ -718,7 +719,7 @@ fn configservice_subscribe(parsed: &Parsed, globals: &Globals) -> Result<ExitCod
 
 /// `json.dumps(value, indent=4)`: four-space indent, and with an indent Python's
 /// separators become `(',', ': ')` — so no space before the comma.
-fn python_json(value: &Value) -> String {
+pub fn python_json(value: &Value) -> String {
     let mut buffer = Vec::new();
     let formatter = serde_json::ser::PrettyFormatter::with_indent(b"    ");
     let mut serializer = serde_json::Serializer::with_formatter(&mut buffer, formatter);

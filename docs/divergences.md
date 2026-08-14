@@ -478,3 +478,54 @@ operations marked `deprecated`, which only hides them from help. They already wo
 `configservice subscribe`, and the `s3` tree (`cp`/`sync`/`mv`/`rm`/`ls`), which needs a
 concurrent transfer manager with multipart support and is a subsystem rather than a
 command.
+
+---
+
+## Custom commands (second tranche)
+
+`configservice subscribe` and `logs tail` are implemented.
+
+`logs tail` notes:
+
+- It is the only custom command that streams, and it writes straight to stdout —
+  `--output` and `--query` are ignored, matching the reference.
+- The three formats render the timestamp three different ways: `short` has no offset and
+  no fraction, `detailed` always shows six fractional digits, and `json` drops the
+  fraction entirely when the event lands on a whole second.
+- The `--follow` dedup map is keyed by raw epoch millis and pruned to only the newest
+  timestamp after each response. That is not a cache: `startTime` is advanced to that same
+  millisecond and the bound is inclusive, so without it those events repeat forever.
+- `rstrip()` runs on the *assembled* line, so a message ending in whitespace loses it,
+  while interior newlines survive and multi-line events stay multi-line.
+
+### Known divergence: `--since` with a naive timestamp
+
+The reference sends anything non-relative to `dateutil`, which reads a timestamp with no
+UTC offset (`2026-08-01T10:00:00`) in the machine's **local** timezone — while relative
+offsets such as `5m` are computed in UTC. We support relative offsets, epoch seconds, and
+ISO 8601 *with* an explicit offset, and refuse a naive timestamp with an explanatory
+error. Assuming UTC would silently shift the query window by the local offset, which is
+worse than refusing. Closing this needs a timezone database the binary does not carry.
+Unparseable values match the reference's wording exactly.
+
+---
+
+## Deferred, with reasons
+
+These were researched in full and deliberately not attempted, because each rests on a
+subsystem that does not exist yet. Building a half-version would be worse than the current
+honest "unknown operation".
+
+- **`cloudformation package`** needs a YAML parser *and* emitter that round-trips
+  CloudFormation's intrinsic short forms (`!Ref`, `!GetAtt`), applies YAML 1.1 boolean
+  quoting, preserves key order and flattens aliases; plus jmespath set-by-path, a
+  deterministic zip writer, and multipart S3 upload. Note the S3 key is the MD5 of the
+  artifact, so for *directory* artifacts the key is not reproducible across machines
+  anyway — zip entries carry mtimes and mode bits.
+- **`cloudformation deploy`** additionally needs three botocore waiters
+  (`change_set_create_complete`, `stack_create_complete`, `stack_update_complete`), whose
+  acceptor definitions are a further data extraction.
+- **`eks update-kubeconfig`** needs a general YAML parser, because it *rewrites the user's
+  existing `~/.kube/config` in place*, non-atomically and with no backup. A partial parser
+  that mis-reads an unusual but valid kubeconfig would destroy a file the user depends on.
+  This one should not be attempted until the YAML work above is done and tested.

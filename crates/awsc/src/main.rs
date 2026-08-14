@@ -14,6 +14,7 @@ mod args;
 mod client;
 mod custom;
 mod dispatch;
+mod logs_tail;
 mod paginate;
 mod exit;
 
@@ -39,6 +40,7 @@ To see help text, you can run:
   aws <command> <subcommand> help";
 
 /// An error paired with the exit code the reference would use for it.
+#[derive(Debug)]
 pub struct Failure {
     message: String,
     code: u8,

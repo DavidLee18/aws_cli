@@ -40,6 +40,8 @@ pub struct Parsed {
     /// `--cli-input-json` / `--cli-input-yaml`, already read from disk if `file://`.
     pub cli_input: Option<String>,
     pub generate_skeleton: Option<String>,
+    /// `--color on|off|auto`. Only `logs tail` reads it; nothing else colours output.
+    pub color: Option<String>,
     /// Positional tokens after the operation name. Only custom commands use these
     /// (`codecommit credential-helper get`); the modeled path rejects them.
     pub positionals: Vec<String>,
@@ -95,6 +97,7 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
         connect_timeout: None,
         cli_input: None,
         generate_skeleton: None,
+        color: None,
         positionals: Vec::new(),
         extras: Vec::new(),
     };
@@ -171,9 +174,7 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
             // Accepted and genuinely inert: we neither colour output nor page it, so
             // honouring these would be a no-op anyway. Rejecting them would break
             // scripts that pass them habitually.
-            "--color" => {
-                let _ = take_value()?;
-            }
+            "--color" => parsed.color = Some(take_value()?),
             "--no-cli-pager" => {}
             "--cli-input-json" | "--cli-input-yaml" => {
                 if parsed.cli_input.is_some() {
