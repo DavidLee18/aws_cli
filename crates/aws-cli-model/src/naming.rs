@@ -15,8 +15,37 @@ static END_CAP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"([a-z0-9])([A-Z]
 /// Trailing runs of caps followed by a plural `s`: `ARNs`, `ACLs`, `SSEKMSKeyIds`.
 static SPECIAL_CASE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[A-Z]{2,}s$").unwrap());
 
+/// Names botocore's regexes cannot produce, seeded into its `_xform_cache`.
+///
+/// Without these, `DescribeCachediSCSIVolumes` becomes `describe-cachedi-scsi-volumes`
+/// instead of `describe-cached-iscsi-volumes` — a name the CLI does not accept, making
+/// the operation unreachable. 38 entries covering the iSCSI, WhatsApp, PartiQL and HITs
+/// families.
+static XFORM_OVERRIDES: LazyLock<std::collections::HashMap<String, String>> =
+    LazyLock::new(|| {
+        #[derive(serde::Deserialize)]
+        struct Table {
+            overrides: std::collections::HashMap<String, String>,
+        }
+        let embedded = include_str!("../../../data/xform-cache.json");
+        let parsed: Table =
+            serde_json::from_str(embedded).expect("embedded data/xform-cache.json is malformed");
+        parsed.overrides
+    });
+
 /// Port of botocore's `xform_name` with a configurable separator.
 pub fn xform_name(name: &str, sep: &str) -> String {
+    // The seeded cache wins over the regexes, as it does upstream.
+    if sep == "-" {
+        if let Some(seeded) = XFORM_OVERRIDES.get(name) {
+            return seeded.clone();
+        }
+    }
+    xform_name_computed(name, sep)
+}
+
+/// The two regex passes, without the seeded cache.
+fn xform_name_computed(name: &str, sep: &str) -> String {
     // botocore treats a name already containing the separator as pre-transformed.
     if name.contains(sep) {
         return name.to_string();
@@ -91,6 +120,28 @@ mod tests {
     fn handles_trailing_acronym_plurals() {
         assert_eq!(to_cli_name("ListARNs"), "list-arns");
         assert_eq!(to_cli_name("GetACLs"), "get-acls");
+    }
+
+    /// These names are unreachable without the seeded cache: the regexes produce a
+    /// different spelling from the one the CLI accepts.
+    #[test]
+    fn applies_the_seeded_xform_cache() {
+        assert_eq!(to_cli_name("DescribeCachediSCSIVolumes"), "describe-cached-iscsi-volumes");
+        assert_eq!(to_cli_name("CreateStorediSCSIVolume"), "create-stored-iscsi-volume");
+        assert_eq!(to_cli_name("ListHITsForQualificationType"), "list-hits-for-qualification-type");
+        assert_eq!(to_cli_name("ExecutePartiQLStatement"), "execute-partiql-statement");
+        assert_eq!(
+            to_cli_name("AssociateWhatsAppBusinessAccount"),
+            "associate-whatsapp-business-account"
+        );
+        // Every override genuinely differs from what the regexes compute.
+        for (name, expected) in XFORM_OVERRIDES.iter() {
+            assert_ne!(
+                xform_name_computed(name, "-"),
+                *expected,
+                "{name} would not need an override"
+            );
+        }
     }
 
     /// botocore's transform is two regex passes with no acronym dictionary, so some

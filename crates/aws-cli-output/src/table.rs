@@ -143,7 +143,7 @@ fn render_section(section: &Section, max_width: usize, out: &mut String) {
     let inner = max_width.saturating_sub(2 * indent);
     let bar = "|".repeat(indent);
 
-    let mut line = |text: &str, out: &mut String| {
+    let line = |text: &str, out: &mut String| {
         out.push_str(&bar);
         out.push_str(text);
         out.push_str(&bar);

@@ -8,7 +8,7 @@
 //! recognised and refused explicitly rather than mis-serialized.
 
 use aws_cli_model::Model;
-use aws_cli_runtime::{credentials, endpoint, http, sigv4};
+use aws_cli_runtime::{credentials, endpoint, http, retry, sigv4};
 use std::process::ExitCode;
 
 mod args;
@@ -245,56 +245,117 @@ fn run() -> Result<ExitCode, Failure> {
         connect_timeout: parsed.connect_timeout,
     };
 
-    // One round trip. Kept as a closure so pagination can issue it repeatedly with a
-    // different token injected, without re-resolving credentials or the endpoint.
+    let retry_policy = std::cell::RefCell::new(retry::RetryPolicy::from_environment());
+
+    // One round trip, retried in place. Kept as a closure so pagination can issue it
+    // repeatedly with a different token injected, without re-resolving credentials or
+    // the endpoint. Each attempt is re-signed, since the timestamp changes.
     let issue = |input: Option<&serde_json::Value>| -> Result<serde_json::Value, Failure> {
         let wire = dispatch::serialize(&model, protocol, op_id.name(), op, input_shape, input)
             .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
 
-        let request = http::PreparedRequest {
-            method: wire.method,
-            endpoint: ep.clone(),
-            path: wire.path,
-            query: wire.query,
-            content_type: wire.content_type,
-            extra_headers: wire.headers,
-            body: wire.body,
-        };
+        // One invocation id for the whole call, stable across its retries.
+        let invocation_id = retry::new_invocation_id();
+        let max_attempts = retry_policy.borrow().max_attempts;
+        let mut attempt: u32 = 1;
 
-        let timestamp = sigv4::format_timestamp(now_unix());
-        let (headers, signature) = if parsed.no_sign_request {
-            (http::unsigned_headers(&request), None)
-        } else {
-            let (h, s) = http::sign_request(&request, &creds, &timestamp);
-            (h, Some(s))
-        };
+        let response = loop {
+            let mut extra_headers = wire.headers.clone();
+            extra_headers.extend(retry::retry_headers(&invocation_id, attempt, max_attempts));
 
-        if parsed.debug {
-            eprintln!("endpoint: {}", request.endpoint.url);
-            eprintln!("body: {}", request.body);
-            if let Some(signature) = &signature {
-                eprintln!("CanonicalRequest:\n{}", signature.canonical_request);
-                eprintln!("StringToSign:\n{}", signature.string_to_sign);
-                eprintln!("Signature:\n{}", signature.signature);
+            let request = http::PreparedRequest {
+                method: wire.method.clone(),
+                endpoint: ep.clone(),
+                path: wire.path.clone(),
+                query: wire.query.clone(),
+                content_type: wire.content_type.clone(),
+                extra_headers,
+                body: wire.body.clone(),
+            };
+
+            let timestamp = sigv4::format_timestamp(now_unix());
+            let (headers, signature) = if parsed.no_sign_request {
+                (http::unsigned_headers(&request), None)
+            } else {
+                let (h, s) = http::sign_request(&request, &creds, &timestamp);
+                (h, Some(s))
+            };
+
+            if parsed.debug {
+                eprintln!("endpoint: {}", request.endpoint.url);
+                eprintln!("body: {}", request.body);
+                if let Some(signature) = &signature {
+                    eprintln!("CanonicalRequest:\n{}", signature.canonical_request);
+                    eprintln!("StringToSign:\n{}", signature.string_to_sign);
+                    eprintln!("Signature:\n{}", signature.signature);
+                }
             }
-        }
 
-        let response = http::send(&request, &headers, &transport)
-            .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
+            let sent = http::send(&request, &headers, &transport);
 
+            // Classify this attempt, then ask the policy whether to go again.
+            let outcome_delay = match &sent {
+                Err(e) => {
+                    let message = e.to_string();
+                    let timeout = message.contains("timed out") || message.contains("timeout");
+                    let delay = retry_policy.borrow_mut().next_delay(
+                        attempt,
+                        &retry::Outcome::Transport { timeout },
+                        &ep.signing_name,
+                    );
+                    delay
+                }
+                Ok(ref response) => {
+                    let code = if response.status >= 400 {
+                        Some(dispatch::parse_error(
+                            protocol,
+                            &response.body,
+                            response.header("x-amzn-errortype").as_deref(),
+                        ).0)
+                    } else {
+                        None
+                    };
+                    let delay = retry_policy.borrow_mut().next_delay(
+                        attempt,
+                        &retry::Outcome::Response {
+                            status: response.status,
+                            error_code: code.as_deref(),
+                        },
+                        &ep.signing_name,
+                    );
+                    delay
+                }
+            };
+
+            match outcome_delay {
+                Some(delay) => {
+                    std::thread::sleep(delay);
+                    attempt += 1;
+                }
+                None => {
+                    let response = sent.map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
+                    retry_policy.borrow_mut().record_success(response.status);
+                    break response;
+                }
+            }
+        };
+
+        let attempts_made = attempt;
         if response.status >= 400 {
             let (code, message) = dispatch::parse_error(
                 protocol,
                 &response.body,
                 response.header("x-amzn-errortype").as_deref(),
             );
+            // The reference appends the retry count only when the attempt limit was
+            // actually reached, and only when a response was parsed.
+            let suffix = retry::max_retries_suffix(attempts_made, max_attempts);
             return Err(Failure::new(
                 exit::CLIENT_ERROR,
-                aws_cli_runtime::RuntimeError::Service {
-                    code,
-                    message,
-                    operation: op_id.name().to_string(),
-                },
+                format!(
+                    "An error occurred ({code}) when calling the {} operation{suffix}: {message}",
+                    op_id.name()
+                ),
             ));
         }
 
