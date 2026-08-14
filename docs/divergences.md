@@ -910,10 +910,6 @@ Verified against real S3: `head-object` and `head-bucket` are byte-identical, an
 
 ### Known remaining, all pre-existing and separate
 
-- **restXml flattened lists parse empty.** `s3api list-objects-v2` returns
-  `"Contents": []` for a bucket that has objects. The high-level `s3 ls` is unaffected —
-  it parses S3's XML directly rather than through the modelled path — which is why this
-  survived unnoticed. This is the largest correctness gap currently known.
 - **A self-closing root element fails to parse.** `s3api get-bucket-location` in
   us-east-1 answers `<LocationConstraint/>`; the reference prints
   `{"LocationConstraint": null}` and we print nothing.
@@ -921,3 +917,28 @@ Verified against real S3: `head-object` and `head-bucket` are byte-identical, an
   `x-amz-checksum-mode: ENABLED` by default and we do not.
 - `rds add-option-to-option-group` / `remove-option-from-option-group` are still missing,
   so the command they replace is now correctly rejected with nothing standing in for it.
+
+---
+
+## `xmlFlattened` is a member trait
+
+`s3api list-objects-v2` returned `"Contents": []` for a bucket full of objects. The parser
+tested `xmlFlattened` on the list *shape*; Smithy puts it on the **member**. S3's
+`ListObjectsV2Output$Contents` carries the trait while `ObjectList` does not, so every
+flattened list looked absent.
+
+Silently-empty is the worst shape a bug can take here: an error stops a script, an empty
+list makes it act. And it was invisible from the high-level `s3` tree, which parses S3's
+XML directly rather than through the modelled path — `s3 ls` worked perfectly throughout.
+
+Both spellings are now accepted, since a few models do annotate the shape. Verified live:
+`s3api list-objects-v2`, `list-objects`, `route53 list-hosted-zones`, `iam list-users` and
+`sqs list-queues` are all byte-identical to the reference.
+
+### Remaining on S3 list operations
+
+The reference sends `EncodingType=url` on list calls automatically
+(botocore's `set_list_objects_encoding_type_url`) and URL-decodes the keys on the way
+back, so its output carries `"EncodingType": "url"` and ours does not. Worth doing
+alongside it rather than separately: without the round-trip, keys containing characters
+that are illegal in XML would come back wrong.

@@ -116,8 +116,15 @@ fn parse_structure(
 
         // Flattened lists have no wrapper element: their entries appear as repeated
         // siblings named after the member itself.
+        //
+        // `xmlFlattened` sits on the MEMBER, not on the list shape it targets — S3's
+        // `ListObjectsV2Output$Contents` carries it while `ObjectList` does not. Checking
+        // only the target made every flattened list parse as absent, so
+        // `s3api list-objects-v2` reported a bucket with objects as empty. Both are
+        // accepted here because a few models do annotate the shape.
         if matches!(target_shape, Shape::List(_) | Shape::Set(_))
-            && target_shape.traits().has("smithy.api#xmlFlattened")
+            && (member.traits.has("smithy.api#xmlFlattened")
+                || target_shape.traits().has("smithy.api#xmlFlattened"))
         {
             let items: Vec<&Element> = element.children_named(wire).collect();
             if items.is_empty() {
@@ -216,6 +223,64 @@ pub fn parse_error(body: &str) -> Option<XmlError> {
         message: err.child("Message").map(|e| e.text.clone()).unwrap_or_default(),
         request_id: root.child("RequestId").map(|e| e.text.clone()),
     })
+}
+
+#[cfg(test)]
+mod flattened_tests {
+    use super::*;
+
+    /// `xmlFlattened` sits on the member, not the list shape it targets. Checking only
+    /// the target made every flattened list parse as absent — `s3api list-objects-v2`
+    /// reported a bucket full of objects as empty, which is worse than an error because
+    /// a script acts on it.
+    #[test]
+    fn reads_a_member_annotated_flattened_list() {
+        let model = Model::from_json(
+            br#"{"smithy":"2.0","shapes":{
+                "com.x#S":{"type":"service","version":"1","traits":{}},
+                "com.x#Item":{"type":"structure","members":{
+                    "Key":{"target":"smithy.api#String"}}},
+                "com.x#Items":{"type":"list","member":{"target":"com.x#Item"}},
+                "com.x#Out":{"type":"structure","members":{
+                    "Contents":{"target":"com.x#Items",
+                                "traits":{"smithy.api#xmlFlattened":{}}},
+                    "Name":{"target":"smithy.api#String"}}}}}"#,
+        )
+        .unwrap();
+        let shape = match model.shape(&ShapeId::parse("com.x#Out").unwrap()) {
+            Some(Shape::Structure(s)) => s.clone(),
+            _ => panic!("output shape"),
+        };
+        let body = "<Result><Name>b</Name>\
+                    <Contents><Key>a.txt</Key></Contents>\
+                    <Contents><Key>b.txt</Key></Contents></Result>";
+        let parsed = parse_response(&model, "Op", Some(&shape), body).unwrap();
+        let contents = parsed.get("Contents").and_then(|v| v.as_array()).expect("Contents");
+        assert_eq!(contents.len(), 2, "both repeated siblings should be collected");
+        assert_eq!(contents[0].get("Key").unwrap(), "a.txt");
+        assert_eq!(contents[1].get("Key").unwrap(), "b.txt");
+        assert_eq!(parsed.get("Name").unwrap(), "b");
+    }
+
+    /// A non-flattened list still expects its wrapper element.
+    #[test]
+    fn reads_a_wrapped_list() {
+        let model = Model::from_json(
+            br#"{"smithy":"2.0","shapes":{
+                "com.x#S":{"type":"service","version":"1","traits":{}},
+                "com.x#Items":{"type":"list","member":{"target":"smithy.api#String"}},
+                "com.x#Out":{"type":"structure","members":{
+                    "Names":{"target":"com.x#Items"}}}}}"#,
+        )
+        .unwrap();
+        let shape = match model.shape(&ShapeId::parse("com.x#Out").unwrap()) {
+            Some(Shape::Structure(s)) => s.clone(),
+            _ => panic!("output shape"),
+        };
+        let body = "<Result><Names><member>a</member><member>b</member></Names></Result>";
+        let parsed = parse_response(&model, "Op", Some(&shape), body).unwrap();
+        assert_eq!(parsed.get("Names").and_then(|v| v.as_array()).unwrap().len(), 2);
+    }
 }
 
 #[cfg(test)]
