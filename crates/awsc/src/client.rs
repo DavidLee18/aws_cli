@@ -339,6 +339,25 @@ impl<'a> Client<'a> {
         output_shape: Option<&aws_cli_model::shape::StructureShape>,
         input: Option<&Value>,
     ) -> Result<Value, Failure> {
+        // S3's list operations are always sent with `EncodingType=url`, so a key that
+        // cannot be represented in XML survives the round trip. The response is decoded
+        // again below.
+        let url_encoded = aws_cli_protocol::response_fixups::wants_url_encoding(
+            &self.endpoint.signing_name,
+            operation_wire_name,
+        );
+        let injected;
+        let input = if url_encoded {
+            let mut object = input.cloned().unwrap_or_else(|| Value::Object(Default::default()));
+            if let Some(map) = object.as_object_mut() {
+                map.entry("EncodingType").or_insert_with(|| Value::String("url".into()));
+            }
+            injected = object;
+            Some(&injected)
+        } else {
+            input
+        };
+
         let wire = dispatch::serialize(
             &self.model,
             self.protocol,
@@ -492,9 +511,13 @@ impl<'a> Client<'a> {
             Err(e) => return Err(Failure::new(exit::GENERAL_ERROR, e)),
         };
 
-        Ok(match from_headers {
+        let mut document = match from_headers {
             Some(headers) => merge_in_model_order(output_shape, headers, from_body),
             None => from_body,
-        })
+        };
+        if url_encoded {
+            aws_cli_protocol::response_fixups::decode_encoded_keys(&mut document);
+        }
+        Ok(document)
     }
 }

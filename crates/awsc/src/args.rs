@@ -257,8 +257,9 @@ pub fn build_input_named(
         .map(|m| {
             let derived = naming::xform_name(m, "-");
             let renamed = surface_overlays::rename_argument(service, operation, &derived);
-            (format!("--{renamed}"), m)
+            (format!("--{}", proxy_rename(service, operation, &renamed)), m)
         })
+        .filter(|(_, m)| proxy_hidden_member(service, operation) != Some(m.as_str()))
         .collect();
 
     let mut out = Map::new();
@@ -314,14 +315,44 @@ pub fn missing_required_flags(
         .members
         .iter()
         .filter(|(_, member)| member.traits.is_required())
+        .filter(|(name, _)| proxy_hidden_member(service, operation) != Some(name.as_str()))
         .map(|(name, _)| {
             // The renamed form is what the user must actually pass: `route53
             // get-traffic-policy` requires `--traffic-policy-version`, not `--version`.
             let derived = naming::xform_name(name, "-");
-            format!("--{}", surface_overlays::rename_argument(service, operation, &derived))
+            let renamed = surface_overlays::rename_argument(service, operation, &derived);
+            format!("--{}", proxy_rename(service, operation, &renamed))
         })
         .filter(|flag| !parsed.parameters.contains_key(flag))
         .collect()
+}
+
+/// The `rds` option-group proxies each expose one `--options`.
+///
+/// `add-option-to-option-group` and `remove-option-from-option-group` both call
+/// ModifyOptionGroup; the reference renames whichever list applies to `--options` and
+/// deletes the other, so each command takes one obvious flag instead of two opposites.
+fn proxy_rename<'a>(service: &str, operation: &str, flag: &'a str) -> &'a str {
+    if service != "rds" {
+        return flag;
+    }
+    match (operation, flag) {
+        ("add-option-to-option-group", "options-to-include") => "options",
+        ("remove-option-from-option-group", "options-to-remove") => "options",
+        _ => flag,
+    }
+}
+
+/// The member the proxies must NOT expose: each drops its opposite.
+pub fn proxy_hidden_member(service: &str, operation: &str) -> Option<&'static str> {
+    if service != "rds" {
+        return None;
+    }
+    match operation {
+        "add-option-to-option-group" => Some("OptionsToRemove"),
+        "remove-option-from-option-group" => Some("OptionsToInclude"),
+        _ => None,
+    }
 }
 
 /// Expand a `file://` or `fileb://` reference. Anything else is returned unchanged.

@@ -161,3 +161,81 @@ mod tests {
         assert_eq!(percent_decode("a+b").unwrap(), "a+b");
     }
 }
+
+/// The S3 list operations the reference forces `EncodingType=url` on.
+///
+/// botocore's `set_list_objects_encoding_type_url` injects it and then URL-decodes the
+/// key-shaped fields on the way back. Both halves matter: without the request the output
+/// is missing `EncodingType`, and without the decode a key containing characters that
+/// cannot appear in XML comes back percent-encoded.
+const ENCODED_LIST_OPERATIONS: [&str; 3] =
+    ["ListObjects", "ListObjectsV2", "ListObjectVersions"];
+
+/// The fields S3 percent-encodes when `EncodingType=url` is in force.
+const ENCODED_FIELDS: [&str; 6] =
+    ["Key", "Prefix", "Delimiter", "KeyMarker", "NextKeyMarker", "StartAfter"];
+
+pub fn wants_url_encoding(signing_name: &str, operation: &str) -> bool {
+    signing_name == "s3" && ENCODED_LIST_OPERATIONS.contains(&operation)
+}
+
+/// Percent-decode the key-shaped fields of a list response, in place.
+pub fn decode_encoded_keys(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for (key, entry) in map.iter_mut() {
+                if ENCODED_FIELDS.contains(&key.as_str()) {
+                    if let Value::String(text) = entry {
+                        // A malformed escape is left as written rather than dropped.
+                        if let Some(decoded) = percent_decode(text) {
+                            *text = decoded;
+                        }
+                    }
+                    continue;
+                }
+                decode_encoded_keys(entry);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(decode_encoded_keys),
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod encoding_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn selects_only_the_three_list_operations() {
+        assert!(wants_url_encoding("s3", "ListObjectsV2"));
+        assert!(wants_url_encoding("s3", "ListObjects"));
+        assert!(wants_url_encoding("s3", "ListObjectVersions"));
+        assert!(!wants_url_encoding("s3", "GetObject"));
+        assert!(!wants_url_encoding("ec2", "ListObjectsV2"));
+    }
+
+    #[test]
+    fn decodes_key_fields_at_any_depth() {
+        let mut value = json!({
+            "Prefix": "a%20b/",
+            "Contents": [{"Key": "a%20b/caf%C3%A9.txt", "ETag": "\"abc%20\""}],
+            "Name": "left%20alone"
+        });
+        decode_encoded_keys(&mut value);
+        assert_eq!(value["Prefix"], "a b/");
+        assert_eq!(value["Contents"][0]["Key"], "a b/café.txt");
+        // Only the key-shaped fields are decoded; ETag and Name keep their text.
+        assert_eq!(value["Contents"][0]["ETag"], "\"abc%20\"");
+        assert_eq!(value["Name"], "left%20alone");
+    }
+
+    /// A malformed escape leaves the field as written; the reference would raise, and
+    /// S3 never produces one, so preserving the text is the safer of the two.
+    #[test]
+    fn leaves_invalid_escapes_alone() {
+        let mut value = json!({"Key": "100%"});
+        decode_encoded_keys(&mut value);
+        assert_eq!(value["Key"], "100%");
+    }
+}

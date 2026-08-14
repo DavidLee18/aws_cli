@@ -46,8 +46,12 @@ fn parse_document(xml: &str) -> Result<(String, Element), ProtocolError> {
             }
             Ok(Event::Empty(e)) => {
                 let name = local_name(e.name().as_ref());
-                if let Some((_, parent)) = stack.last_mut() {
-                    parent.children.push((name, Element::default()));
+                match stack.last_mut() {
+                    Some((_, parent)) => parent.children.push((name, Element::default())),
+                    // A self-closing element with nothing open above it IS the document:
+                    // `get-bucket-location` in us-east-1 answers `<LocationConstraint/>`,
+                    // which was being dropped and reported as having no root at all.
+                    None => root = Some((name, Element::default())),
                 }
             }
             Ok(Event::Text(t)) => {
@@ -89,7 +93,30 @@ pub fn parse_response(
     body: &str,
 ) -> Result<Value, ProtocolError> {
     let Some(shape) = output_shape else { return Ok(Value::Object(Map::new())) };
-    let (_, root) = parse_document(body)?;
+    let (root_name, root) = parse_document(body)?;
+
+    // A single-member output can be serialised as the document element itself rather than
+    // wrapped: `GetBucketLocation` answers `<LocationConstraint/>`, where the root IS the
+    // member. Treating it as a wrapper would find no child and emit nothing at all.
+    if root.children.is_empty() && shape.members.len() == 1 {
+        if let Some((member_name, member)) = shape.members.iter().next() {
+            let wire = member
+                .traits
+                .get("smithy.api#xmlName")
+                .and_then(|v| v.as_str())
+                .unwrap_or(member_name);
+            if wire == root_name {
+                let mut out = Map::new();
+                let value = if root.text.is_empty() {
+                    Value::Null
+                } else {
+                    parse_value(model, &member.target, &root)?
+                };
+                out.insert(member_name.clone(), value);
+                return Ok(Value::Object(out));
+            }
+        }
+    }
 
     let result_wrapper = format!("{operation_wire_name}Result");
     let payload = root.child(&result_wrapper).unwrap_or(&root);

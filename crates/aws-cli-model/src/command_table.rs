@@ -47,6 +47,15 @@ pub fn build(
         names.insert(primary, derived);
     }
 
+    // Two commands that proxy an operation the customization removed. `rds
+    // modify-option-group` is split in two so each half takes a single `--options`, and
+    // both still invoke ModifyOptionGroup underneath.
+    if cli_service == "rds" && model.operation("modify-option-group").is_ok() {
+        for proxy in ["add-option-to-option-group", "remove-option-from-option-group"] {
+            names.insert(proxy.to_string(), "modify-option-group".to_string());
+        }
+    }
+
     Ok(Table { service: cli_service, names })
 }
 
@@ -117,11 +126,14 @@ mod tests {
         assert_eq!(cw.resolve("get-otel-enrichment"), cw.resolve("get-o-tel-enrichment"));
     }
 
-    /// An operation a customization replaces is not a command either.
+    /// An operation a customization replaces is not a command, but the commands that
+    /// replace it are — and they resolve back to it.
     #[test]
-    fn drops_replaced_operations() {
+    fn drops_replaced_operations_but_keeps_their_proxies() {
         let rds = table_for("rds.json");
         assert!(!rds.contains("modify-option-group"), "replaced by two other commands");
+        assert_eq!(rds.resolve("add-option-to-option-group"), Some("modify-option-group"));
+        assert_eq!(rds.resolve("remove-option-from-option-group"), Some("modify-option-group"));
         assert!(rds.contains("describe-db-instances"));
     }
 

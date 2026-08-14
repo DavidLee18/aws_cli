@@ -910,13 +910,8 @@ Verified against real S3: `head-object` and `head-bucket` are byte-identical, an
 
 ### Known remaining, all pre-existing and separate
 
-- **A self-closing root element fails to parse.** `s3api get-bucket-location` in
-  us-east-1 answers `<LocationConstraint/>`; the reference prints
-  `{"LocationConstraint": null}` and we print nothing.
 - `get-object` omits `ChecksumCRC64NVME`/`ChecksumType`: the reference sends
   `x-amz-checksum-mode: ENABLED` by default and we do not.
-- `rds add-option-to-option-group` / `remove-option-from-option-group` are still missing,
-  so the command they replace is now correctly rejected with nothing standing in for it.
 
 ---
 
@@ -937,8 +932,39 @@ Both spellings are now accepted, since a few models do annotate the shape. Verif
 
 ### Remaining on S3 list operations
 
-The reference sends `EncodingType=url` on list calls automatically
-(botocore's `set_list_objects_encoding_type_url`) and URL-decodes the keys on the way
-back, so its output carries `"EncodingType": "url"` and ours does not. Worth doing
-alongside it rather than separately: without the round-trip, keys containing characters
-that are illegal in XML would come back wrong.
+Done — see below.
+
+---
+
+## EncodingType, a self-closing root, and the rds proxies
+
+**`EncodingType=url`.** botocore injects it into `ListObjects`, `ListObjectsV2` and
+`ListObjectVersions` and percent-decodes `Key`, `Prefix`, `Delimiter`, `KeyMarker`,
+`NextKeyMarker` and `StartAfter` coming back. Both halves are now done, and they had to be
+done together: the request alone changes the output, and the response alone would decode
+text that was never encoded. Without either, a key containing characters XML cannot carry
+comes back wrong.
+
+**A self-closing root element was dropped.** `Event::Empty` with nothing open above it is
+the whole document, but the parser only ever attached such an element to a parent — so
+`get-bucket-location` in us-east-1, which answers `<LocationConstraint/>`, was reported as
+having no root at all. A single-member output serialised as the document element itself is
+now read as that member, which is how `{"LocationConstraint": null}` appears.
+
+**`rds add-option-to-option-group` / `remove-option-from-option-group`.** Both proxy
+`ModifyOptionGroup`. Each exposes one `--options` — renamed from `--options-to-include` or
+`--options-to-remove` respectively — and hides the opposite list entirely, so the command
+takes one obvious flag rather than two opposites. Verified against real RDS.
+
+`s3api get-bucket-location`, `list-objects`, `list-objects-v2`, `head-object` and both rds
+proxies are byte-identical to the reference.
+
+### Still outstanding
+
+- The reference prints a usage block for an unknown *flag*, and `Maybe you meant:`
+  suggestions for an unknown *command*; we print neither.
+- `get-object` omits the checksum fields, since we do not send
+  `x-amz-checksum-mode: ENABLED`.
+- The high-level `s3` tree builds its own list requests and does not yet send
+  `EncodingType=url`, so `s3 ls` and `s3 cp --recursive` would mishandle a key containing
+  XML-illegal characters.
