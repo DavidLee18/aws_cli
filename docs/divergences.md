@@ -174,15 +174,29 @@ the reference while building the STS vertical slice.
   arguments win, and a key an argument set discards the document's value wholesale rather
   than deep-merging.
 
-  Refused rather than approximated: `--generate-cli-skeleton yaml-input` (annotates every
-  member with `# [REQUIRED] <documentation>`) and `output` (runs full parameter
-  validation before stubbing the response — we have no validation layer). The two
-  hardcoded shorthand back-compat cases (the `firehose`/`workspaces`/`elb`
-  list-of-single-member expansion, and the `{"Value": x}` form) are also not ported.
+  `--generate-cli-skeleton output` now works too, including the quirk that makes it a
+  *checking* mode: the reference stubs the generated skeleton as the response and the
+  stubber validates it against the output shape, so a placeholder that violates that
+  shape's own constraints fails. `sts get-caller-identity --generate-cli-skeleton output`
+  is exactly that — the generated `Arn: "Arn"` is 3 characters against a minimum of 20.
 
-- **Parameter validation** is not implemented — the reference validates min/max lengths,
-  patterns and required members client-side before calling. We let the service reject
-  bad input instead, which changes both the message and the exit code.
+  Refused rather than approximated: `--generate-cli-skeleton yaml-input`, which annotates
+  every member with `# [REQUIRED] <documentation>`. The two hardcoded shorthand
+  back-compat cases (the `firehose`/`workspaces`/`elb` list-of-single-member expansion,
+  and the `{"Value": x}` form) are also not ported.
+
+- **Parameter validation** ✅ — required members, types, and minimum length/range, with
+  every error collected rather than just the first.
+
+  Two behaviours worth stating because they are counter-intuitive:
+
+  - **Only `min` is ever checked, never `max`.** botocore's `range_check` tests the lower
+    bound and returns; an over-long or over-large value goes to the service.
+  - **Required flags are enforced at the argument-parsing layer**, before model
+    validation, with argparse's wording (`the following arguments are required:
+    --role-arn`) and a usage block — a different message from the model-level "Missing
+    required parameter" that would otherwise fire. Suppressed when `--cli-input-*` or
+    `--generate-cli-skeleton` is present, since those supply the parameters.
 
 - **Retries** are not implemented (the reference defaults to `standard` mode).
 

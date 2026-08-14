@@ -19,6 +19,9 @@ pub enum RuntimeError {
     NoRegion,
     #[error("network error: {0}")]
     Http(String),
+    /// Client-side parameter validation, reported the way the reference formats it.
+    #[error("An error occurred (ParamValidation): {0}")]
+    ParamValidation(String),
     /// A modelled service error, reported the way the reference formats it.
     #[error("An error occurred ({code}) when calling the {operation} operation: {message}")]
     Service { code: String, message: String, operation: String },

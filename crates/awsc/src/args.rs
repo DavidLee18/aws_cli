@@ -257,6 +257,32 @@ pub fn build_input(
     Ok(Some(Value::Object(out)))
 }
 
+/// The flags an operation requires that the user did not supply.
+///
+/// The reference enforces required arguments at the ARGUMENT-PARSING layer, before model
+/// validation, and reports them with argparse's wording plus a usage block — a different
+/// message from the model-level "Missing required parameter" that would otherwise fire.
+///
+/// Suppressed entirely when `--cli-input-json`/`--cli-input-yaml` or
+/// `--generate-cli-skeleton` is present, since those legitimately supply or replace the
+/// parameters.
+pub fn missing_required_flags(
+    input_shape: Option<&StructureShape>,
+    parsed: &Parsed,
+) -> Vec<String> {
+    if parsed.cli_input.is_some() || parsed.generate_skeleton.is_some() {
+        return Vec::new();
+    }
+    let Some(shape) = input_shape else { return Vec::new() };
+    shape
+        .members
+        .iter()
+        .filter(|(_, member)| member.traits.is_required())
+        .map(|(name, _)| format!("--{}", naming::xform_name(name, "-")))
+        .filter(|flag| !parsed.parameters.contains_key(flag))
+        .collect()
+}
+
 /// Expand a `file://` or `fileb://` reference. Anything else is returned unchanged.
 ///
 /// These are the ONLY schemes v2 supports — `http://` and `s3://` existed in v1 and were

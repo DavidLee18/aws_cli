@@ -16,6 +16,7 @@ pub mod query;
 pub mod response_fixups;
 pub mod shapes;
 pub mod shorthand;
+pub mod validate;
 pub mod xml;
 
 #[derive(Debug, thiserror::Error)]

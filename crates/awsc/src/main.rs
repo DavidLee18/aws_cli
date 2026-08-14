@@ -28,6 +28,15 @@ A Rust port of the AWS CLI. Options:
   --version                print version
 ";
 
+/// The block the reference prints after an argument-parsing failure.
+const USAGE_HINT: &str = "\
+usage: aws [options] <command> <subcommand> [<subcommand> ...] [parameters]
+To see help text, you can run:
+
+  aws help
+  aws <command> help
+  aws <command> <subcommand> help";
+
 /// An error paired with the exit code the reference would use for it.
 struct Failure {
     message: String,
@@ -103,13 +112,9 @@ fn run() -> Result<ExitCode, Failure> {
                      (it annotates each member with its documentation)",
                 ))
             }
-            "output" => {
-                return Err(Failure::new(
-                    exit::GENERAL_ERROR,
-                    "--generate-cli-skeleton output is not implemented yet \
-                     (it validates parameters before stubbing the response)",
-                ))
-            }
+            // `output` still validates the real parameters before printing the
+            // stubbed response shape, which is what makes it a checking mode.
+            "output" => {}
             other => {
                 return Err(Failure::new(
                     exit::PARAM_VALIDATION,
@@ -117,13 +122,59 @@ fn run() -> Result<ExitCode, Failure> {
                 ))
             }
         }
-        let skeleton = args::generate_skeleton(&model, input_shape, false);
+        if mode == "output" {
+            let built = args::build_input(&model, input_shape, &parsed.parameters)
+                .map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
+            let validation =
+                aws_cli_protocol::validate::validate(&model, input_shape, built.as_ref());
+            if !validation.is_empty() {
+                return Err(Failure::new(
+                    exit::PARAM_VALIDATION,
+                    aws_cli_runtime::RuntimeError::ParamValidation(validation.report()),
+                ));
+            }
+        }
+        let skeleton = match mode.as_str() {
+            "output" => args::generate_skeleton(&model, output_shape, true),
+            _ => args::generate_skeleton(&model, input_shape, false),
+        };
+        // The reference stubs this skeleton as the response, and the stubber validates
+        // it against the output shape — so a placeholder that violates the shape's own
+        // constraints fails. `sts get-caller-identity` is exactly that case: the
+        // generated `Arn: "Arn"` is 3 characters against a minimum of 20.
+        if mode == "output" {
+            let validation =
+                aws_cli_protocol::validate::validate(&model, output_shape, Some(&skeleton));
+            if !validation.is_empty() {
+                return Err(Failure::new(
+                    exit::PARAM_VALIDATION,
+                    aws_cli_runtime::RuntimeError::ParamValidation(validation.report()),
+                ));
+            }
+        }
         match aws_cli_output::render_named(op_id.name(), &skeleton, parsed.output) {
             Ok(Some(text)) => print!("{text}"),
             Ok(None) => {}
             Err(e) => return Err(Failure::new(exit::GENERAL_ERROR, e)),
         }
         return Ok(exit::code(exit::SUCCESS));
+    }
+
+    // Required flags are enforced here, before model validation, because the reference
+    // reports them with argparse's wording and a usage block rather than as a parameter
+    // validation failure.
+    let missing = args::missing_required_flags(input_shape, &parsed);
+    if !missing.is_empty() {
+        return Err(Failure::new(
+            exit::PARAM_VALIDATION,
+            format!(
+                "{}\n\n{USAGE_HINT}",
+                aws_cli_runtime::RuntimeError::ParamValidation(format!(
+                    "the following arguments are required: {}",
+                    missing.join(", ")
+                ))
+            ),
+        ));
     }
 
     // Unknown flags are rejected here rather than dropped: silently ignoring a parameter
@@ -176,6 +227,16 @@ fn run() -> Result<ExitCode, Failure> {
             };
             Failure::new(code, e)
         })?;
+
+    // Client-side validation runs before any network work, exactly as the reference
+    // does — the error text and exit code both differ from letting the service reject.
+    let validation = aws_cli_protocol::validate::validate(&model, input_shape, input.as_ref());
+    if !validation.is_empty() {
+        return Err(Failure::new(
+            exit::PARAM_VALIDATION,
+            aws_cli_runtime::RuntimeError::ParamValidation(validation.report()),
+        ));
+    }
 
     let transport = http::Transport {
         verify_ssl: parsed.verify_ssl,

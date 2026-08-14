@@ -192,8 +192,8 @@ Remaining, roughly in the order that unblocks the most usage:
    timeouts; `--cli-binary-format` and `--cli-error-format` remain
 10. ~~Output formats~~ ✅ — all six, verified byte-identical across a format matrix
 11. ~~Argument layer~~ ✅ — shorthand parser, `file://`/`fileb://`, `--cli-input-json`,
-    `--generate-cli-skeleton input`; `yaml-input`/`output` modes and client-side
-    parameter validation remain
+    `--generate-cli-skeleton` (`input` and `output`), and client-side parameter
+    validation; `yaml-input` mode remains
 12. **Waiter runtime** — 379 `wait` subcommands are in the surface but do not run
 13. **Retries** — the reference defaults to `standard` mode
 14. **Customisations as behaviour** — 103 custom commands, `s3 cp`/`sync` first
