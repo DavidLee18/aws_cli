@@ -721,5 +721,20 @@ is now removed.
 - A key containing Korean characters resolved correctly — both CLIs returned the same
   `InvalidObjectState` for a Glacier object, which proves the key was encoded right.
 
-Uploads to real S3 are still unverified: doing so writes to the user's own buckets, so it
-needs their say-so first.
+### Uploads, verified against real S3
+
+Run against a scratch prefix and cleaned up afterwards:
+
+- Single-object upload, 25 MiB multipart upload, and recursive upload of a tree — all
+  round-trip with **identical SHA-256**.
+- The strongest check: an object uploaded by *our* multipart path downloads with an
+  identical checksum using the **reference CLI**, so the parts were assembled correctly
+  server-side rather than merely being self-consistent.
+- A listing of our upload matches a listing of the reference's upload of the same tree,
+  keys and sizes alike (only the upload timestamps differ).
+- `ContentType` is inferred from the extension identically (`application/json` for
+  `b.json`).
+- `s3 -> s3` recursive copy, `mv` (source correctly deleted), `rm --dryrun` (touches
+  nothing) and `rm --recursive` all behave.
+- Cleanup verified: the scratch prefix lists zero objects afterwards from both CLIs, and
+  the rest of the bucket is untouched.
