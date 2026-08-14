@@ -80,6 +80,7 @@ dependencies = [
  "aws-cli-protocol",
  "aws-cli-runtime",
  "regex",
+ "serde",
  "serde_json",
 ]
 

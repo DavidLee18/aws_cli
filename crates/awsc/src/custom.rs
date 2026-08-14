@@ -29,6 +29,7 @@ pub fn dispatch(parsed: &Parsed) -> Result<Option<ExitCode>, Failure> {
         ("rds", "generate-db-auth-token") => generate_db_auth_token(parsed, &globals)?,
         ("codecommit", "credential-helper") => codecommit_credential_helper(parsed, &globals)?,
         ("eks", "get-token") => eks_get_token(parsed, &globals)?,
+        ("configservice", "subscribe") => configservice_subscribe(parsed, &globals)?,
         _ => return Ok(None),
     };
     Ok(Some(outcome))
@@ -593,6 +594,138 @@ fn resolve_credentials(
     })
 }
 
+/// `aws configservice subscribe --s3-bucket B[/prefix] --sns-topic T --iam-role R`.
+///
+/// Orchestrates three services: it ensures the S3 bucket and SNS topic exist, then points
+/// a Config delivery channel at them and starts the recorder.
+///
+/// `--endpoint-url` applies **only** to the Config calls. The reference is explicit about
+/// this ("Use the specified endpoint only for config related commands"), and it matters:
+/// an override aimed at Config must not redirect the bucket check to a Config endpoint.
+fn configservice_subscribe(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> {
+    let args = take_args(parsed, &["--s3-bucket", "--sns-topic", "--iam-role"])?;
+    let missing: Vec<&str> = ["--s3-bucket", "--sns-topic", "--iam-role"]
+        .into_iter()
+        .filter(|f| !args.contains_key(f))
+        .collect();
+    if !missing.is_empty() {
+        return Err(missing_required(&missing));
+    }
+    let value = |flag: &str| args.get(flag).copied().flatten().unwrap_or_default();
+    let s3_bucket = value("--s3-bucket");
+    let sns_topic = value("--sns-topic");
+    let iam_role = value("--iam-role");
+
+    // `bucket/prefix`, prefix optional — split on the FIRST slash.
+    let (bucket, prefix) = match s3_bucket.split_once('/') {
+        Some((b, p)) => (b, p),
+        None => (s3_bucket, ""),
+    };
+
+    let region = aws_cli_runtime::endpoint::resolve_region(globals.region.as_deref(), None)
+        .ok_or_else(|| Failure::new(exit::CONFIGURATION, aws_cli_runtime::RuntimeError::NoRegion))?;
+    let other = Globals { region: Some(region.clone()), ..globals.for_other_service() };
+
+    let s3_model = crate::load_model("s3").map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
+    let s3 = Client::new(&s3_model, &other)?;
+
+    // The reference converts the error code with a bare `int()`, so only a numeric code
+    // is understood: 404 means "absent", any other number means "present". A non-numeric
+    // code such as AccessDenied escapes as a ValueError rather than being handled.
+    let exists = match s3.call("head-bucket", Some(&serde_json::json!({ "Bucket": bucket }))) {
+        Ok(_) => true,
+        Err(failure) => {
+            let code = failure.service_error_code.clone().unwrap_or_default();
+            match code.parse::<i64>() {
+                Ok(404) => false,
+                Ok(_) => true,
+                Err(_) => {
+                    return Err(Failure::new(
+                        exit::GENERAL_ERROR,
+                        format!("invalid literal for int() with base 10: '{code}'"),
+                    ))
+                }
+            }
+        }
+    };
+
+    if exists {
+        print!("Using existing S3 bucket: {bucket}\n");
+    } else {
+        let mut input = serde_json::json!({ "Bucket": bucket });
+        // us-east-1 must NOT carry a LocationConstraint; S3 rejects it there.
+        if region != "us-east-1" {
+            input["CreateBucketConfiguration"] =
+                serde_json::json!({ "LocationConstraint": region });
+        }
+        s3.call("create-bucket", Some(&input))?;
+        print!("Using new S3 bucket: {bucket}\n");
+    }
+
+    // An ARN is detected by nothing more than containing a colon.
+    let topic_arn = if sns_topic.contains(':') {
+        print!("Using existing SNS topic: {sns_topic}\n");
+        sns_topic.to_string()
+    } else {
+        let sns_model =
+            crate::load_model("sns").map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
+        let sns = Client::new(&sns_model, &other)?;
+        let created = sns.call("create-topic", Some(&serde_json::json!({ "Name": sns_topic })))?;
+        let arn = string(&created, "TopicArn").to_string();
+        print!("Using new SNS topic: {arn}\n");
+        arn
+    };
+
+    let config_model =
+        crate::load_model("configservice").map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
+    let config = Client::new(&config_model, globals)?;
+
+    config.call(
+        "put-configuration-recorder",
+        Some(&serde_json::json!({
+            "ConfigurationRecorder": { "name": "default", "roleARN": iam_role }
+        })),
+    )?;
+
+    let mut channel = serde_json::json!({
+        "name": "default",
+        "s3BucketName": bucket,
+        "snsTopicARN": topic_arn,
+    });
+    if !prefix.is_empty() {
+        channel["s3KeyPrefix"] = Value::String(prefix.to_string());
+    }
+    config.call("put-delivery-channel", Some(&serde_json::json!({ "DeliveryChannel": channel })))?;
+
+    config.call(
+        "start-configuration-recorder",
+        Some(&serde_json::json!({ "ConfigurationRecorderName": "default" })),
+    )?;
+
+    print!("Subscribe succeeded:\n\n");
+    print!("Configuration Recorders: ");
+    let recorders = config.call("describe-configuration-recorders", None)?;
+    print!("{}", python_json(recorders.get("ConfigurationRecorders").unwrap_or(&Value::Null)));
+    print!("\n\n");
+
+    print!("Delivery Channels: ");
+    let channels = config.call("describe-delivery-channels", None)?;
+    print!("{}", python_json(channels.get("DeliveryChannels").unwrap_or(&Value::Null)));
+    println!();
+
+    Ok(exit::code(exit::SUCCESS))
+}
+
+/// `json.dumps(value, indent=4)`: four-space indent, and with an indent Python's
+/// separators become `(',', ': ')` — so no space before the comma.
+fn python_json(value: &Value) -> String {
+    let mut buffer = Vec::new();
+    let formatter = serde_json::ser::PrettyFormatter::with_indent(b"    ");
+    let mut serializer = serde_json::Serializer::with_formatter(&mut buffer, formatter);
+    serde::Serialize::serialize(value, &mut serializer).expect("serializing a Value cannot fail");
+    String::from_utf8(buffer).expect("serde_json emits UTF-8")
+}
+
 /// `last <name>status: <s>`, plus the error pair when the status is exactly `FAILURE`.
 fn last_status(out: &mut String, status: &Value, name: &str) {
     let last = string(status, "lastStatus");
@@ -682,6 +815,18 @@ mod tests {
     #[test]
     fn formats_the_expiration_timestamp() {
         assert_eq!(format_rfc3339(1_786_657_696), "2026-08-13T21:48:16Z");
+    }
+
+    /// `json.dumps(..., indent=4)`: four spaces, and no space before a comma.
+    #[test]
+    fn matches_python_json_dumps_with_indent() {
+        let value = json!([{"name": "default", "recordingGroup": {"allSupported": true}}]);
+        assert_eq!(
+            python_json(&value),
+            "[\n    {\n        \"name\": \"default\",\n        \
+             \"recordingGroup\": {\n            \"allSupported\": true\n        }\n    }\n]"
+        );
+        assert_eq!(python_json(&json!([])), "[]");
     }
 
     /// An empty sub-status object is falsy in Python and prints nothing.

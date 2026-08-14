@@ -48,15 +48,21 @@ pub struct Failure {
     /// so Python's `sys.exit` prints `str(obj)` bare and exits 1 — no leading blank line
     /// and no `aws: [ERROR]:` prefix. `eks get-token` with neither cluster flag is one.
     raw: bool,
+    /// The service's own error code, when this came from a modelled error response.
+    ///
+    /// Kept alongside the formatted message because some commands branch on it —
+    /// `configservice subscribe` treats a `404` from `HeadBucket` as "create it" and
+    /// anything else as "it exists".
+    pub service_error_code: Option<String>,
 }
 
 impl Failure {
     pub fn new(code: u8, message: impl std::fmt::Display) -> Self {
-        Failure { message: message.to_string(), code, raw: false }
+        Failure { message: message.to_string(), code, raw: false, service_error_code: None }
     }
 
     pub fn bare(code: u8, message: impl std::fmt::Display) -> Self {
-        Failure { message: message.to_string(), code, raw: true }
+        Failure { message: message.to_string(), code, raw: true, service_error_code: None }
     }
 }
 

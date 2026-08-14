@@ -63,8 +63,6 @@ impl Globals {
 pub struct Client<'a> {
     pub model: &'a Model,
     pub protocol: Protocol,
-    /// The CLI's name for the service, which the paginator overlay is keyed by.
-    pub cli_service: String,
     pub endpoint: endpoint::Endpoint,
     pub credentials: credentials::Credentials,
     transport: http::Transport,
@@ -81,9 +79,6 @@ impl<'a> Client<'a> {
     /// `--generate-cli-skeleton` never builds one.
     pub fn new(model: &'a Model, globals: &Globals) -> Result<Client<'a>, Failure> {
         let protocol = model.protocol().map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
-        let cli_service =
-            model.cli_service_name().map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
-
         let region = endpoint::resolve_region(globals.region.as_deref(), None);
         let ep_params = endpoint::EndpointParams {
             region,
@@ -116,7 +111,6 @@ impl<'a> Client<'a> {
         Ok(Client {
             model,
             protocol,
-            cli_service,
             endpoint: ep,
             credentials: creds,
             transport: http::Transport {
@@ -270,13 +264,15 @@ impl<'a> Client<'a> {
             // The reference appends the retry count only when the attempt limit was
             // actually reached, and only when a response was parsed.
             let suffix = retry::max_retries_suffix(attempt, max_attempts);
-            return Err(Failure::new(
+            let mut failure = Failure::new(
                 exit::CLIENT_ERROR,
                 format!(
                     "An error occurred ({code}) when calling the \
                      {operation_wire_name} operation{suffix}: {message}"
                 ),
-            ));
+            );
+            failure.service_error_code = Some(code);
+            return Err(failure);
         }
 
         dispatch::parse_response(
