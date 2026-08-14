@@ -1,7 +1,7 @@
 //! Command-line parsing and model-driven parameter binding.
 
 use aws_cli_model::shape::StructureShape;
-use aws_cli_model::{naming, Model, Shape, ShapeId};
+use aws_cli_model::{naming, surface_overlays, Model, Shape, ShapeId};
 use aws_cli_protocol::shorthand;
 use aws_cli_output::Format;
 use serde_json::{Map, Value};
@@ -230,10 +230,15 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
 ///
 /// Unknown flags are an error, matching the reference: silently dropping a parameter the
 /// user supplied would send a different request than they asked for.
-pub fn build_input(
+///
+/// The command is needed because the reference renames some arguments per service and
+/// operation: `sns subscribe` takes `--notification-endpoint`, not `--endpoint`.
+pub fn build_input_named(
     model: &Model,
     input_shape: Option<&StructureShape>,
     parameters: &BTreeMap<String, Option<String>>,
+    service: &str,
+    operation: &str,
 ) -> Result<Option<Value>, String> {
     if parameters.is_empty() {
         return Ok(None);
@@ -245,11 +250,15 @@ pub fn build_input(
         ));
     };
 
-    // CLI flag name -> model member name.
+    // CLI flag name -> model member name, after the reference's renames.
     let by_flag: BTreeMap<String, &String> = shape
         .members
         .keys()
-        .map(|m| (format!("--{}", naming::xform_name(m, "-")), m))
+        .map(|m| {
+            let derived = naming::xform_name(m, "-");
+            let renamed = surface_overlays::rename_argument(service, operation, &derived);
+            (format!("--{renamed}"), m)
+        })
         .collect();
 
     let mut out = Map::new();
@@ -294,6 +303,8 @@ pub fn build_input(
 pub fn missing_required_flags(
     input_shape: Option<&StructureShape>,
     parsed: &Parsed,
+    service: &str,
+    operation: &str,
 ) -> Vec<String> {
     if parsed.cli_input.is_some() || parsed.generate_skeleton.is_some() {
         return Vec::new();
@@ -303,7 +314,12 @@ pub fn missing_required_flags(
         .members
         .iter()
         .filter(|(_, member)| member.traits.is_required())
-        .map(|(name, _)| format!("--{}", naming::xform_name(name, "-")))
+        .map(|(name, _)| {
+            // The renamed form is what the user must actually pass: `route53
+            // get-traffic-policy` requires `--traffic-policy-version`, not `--version`.
+            let derived = naming::xform_name(name, "-");
+            format!("--{}", surface_overlays::rename_argument(service, operation, &derived))
+        })
         .filter(|flag| !parsed.parameters.contains_key(flag))
         .collect()
 }

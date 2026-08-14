@@ -54,6 +54,9 @@ impl Surface {
             .filter_map(|e| e.ok())
             .map(|e| e.path())
             .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            // Skip our own dotfiles: the model-name index cache lives in this directory
+            // and is not a Smithy model.
+            .filter(|p| !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')))
             .collect();
         files.sort();
 

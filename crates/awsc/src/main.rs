@@ -127,17 +127,47 @@ fn run() -> Result<ExitCode, Failure> {
         ));
     }
 
-    let model = load_model(&parsed.service)
-        .map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
+    // An unknown service is argparse's `argument command`, one level up from `argument
+    // operation`; the wording differs only in that word.
+    let model = load_model(&parsed.service).map_err(|_| {
+        Failure::new(
+            exit::PARAM_VALIDATION,
+            format!(
+                "{}\n\n\n{USAGE_HINT}",
+                aws_cli_runtime::RuntimeError::ParamValidation(format!(
+                    "argument command: Found invalid choice '{}'",
+                    parsed.service
+                ))
+            ),
+        )
+    })?;
 
     // The paginator overlay is keyed by CLI service name, which is not always the
     // name the user typed (aliases) nor the model filename.
     let cli_service =
         model.cli_service_name().map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
 
-    let (op_id, op) = model
-        .operation(&parsed.operation)
-        .map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
+    // v2 deletes some commands outright. The model still carries them, so they have to
+    // be rejected here or we would accept a command the reference does not know. An
+    // unknown operation is reported the same way, since argparse cannot tell the
+    // difference between a command that never existed and one that was removed.
+    let unknown_operation = || {
+        Failure::new(
+            exit::PARAM_VALIDATION,
+            format!(
+                "{}\n\n\n{USAGE_HINT}",
+                aws_cli_runtime::RuntimeError::ParamValidation(format!(
+                    "argument operation: Found invalid choice '{}'",
+                    parsed.operation
+                ))
+            ),
+        )
+    };
+    if aws_cli_model::surface_overlays::is_removed(&cli_service, &parsed.operation) {
+        return Err(unknown_operation());
+    }
+
+    let (op_id, op) = model.operation(&parsed.operation).map_err(|_| unknown_operation())?;
     let input_shape =
         model.operation_input(op).map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
     let output_shape =
@@ -169,8 +199,14 @@ fn run() -> Result<ExitCode, Failure> {
             }
         }
         if mode == "output" {
-            let built = args::build_input(&model, input_shape, &parsed.parameters)
-                .map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
+            let built = args::build_input_named(
+                &model,
+                input_shape,
+                &parsed.parameters,
+                &cli_service,
+                &parsed.operation,
+            )
+            .map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
             let validation =
                 aws_cli_protocol::validate::validate(&model, input_shape, built.as_ref());
             if !validation.is_empty() {
@@ -209,7 +245,8 @@ fn run() -> Result<ExitCode, Failure> {
     // Required flags are enforced here, before model validation, because the reference
     // reports them with argparse's wording and a usage block rather than as a parameter
     // validation failure.
-    let missing = args::missing_required_flags(input_shape, &parsed);
+    let missing =
+        args::missing_required_flags(input_shape, &parsed, &cli_service, &parsed.operation);
     if !missing.is_empty() {
         return Err(Failure::new(
             exit::PARAM_VALIDATION,
@@ -225,8 +262,9 @@ fn run() -> Result<ExitCode, Failure> {
 
     // Unknown flags are rejected here rather than dropped: silently ignoring a parameter
     // the user supplied would send a request they did not ask for.
-    let mut input = args::build_input(&model, input_shape, &parsed.parameters)
-        .map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
+    let mut input =
+        args::build_input_named(&model, input_shape, &parsed.parameters, &cli_service, &parsed.operation)
+            .map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
 
     // --cli-input-json/yaml fills in top-level keys the command line did not set. The
     // command line wins, and the fill is shallow: a key set by an argument discards the
@@ -366,6 +404,9 @@ fn build_index(
     let mut index = std::collections::BTreeMap::new();
     for entry in entries.flatten() {
         let path = entry.path();
+        if path.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')) {
+            continue;
+        }
         if path.extension().is_none_or(|e| e != "json") {
             continue;
         }

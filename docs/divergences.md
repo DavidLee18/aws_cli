@@ -793,3 +793,44 @@ reports nothing to do, and vice versa:
 The local fake server could not settle these: it returned a fixed `LastModified`, and once
 that was fixed the reference's own sync-download no-ops against it. Real S3 was the only
 usable oracle.
+
+---
+
+## Removals and argument renames
+
+Two tables that were already extracted into `data/customizations.json` and already applied
+by the conformance harness — but never by the binary.
+
+- **Removals.** v2 deletes 37 commands across 16 services. We accepted every one of them:
+  `ses delete-verified-email-address` ran for us and is unknown to the reference. A
+  drop-in replacement being a *superset* is its own kind of wrong. Now rejected with
+  argparse's own wording, `argument operation: Found invalid choice '...'`.
+- **Argument renames.** 87 `service.operation.argument` rules. `sns subscribe` takes
+  `--notification-endpoint`, `route53 get-traffic-policy` takes
+  `--traffic-policy-version`. These now apply in three places that all had to agree:
+  binding a flag to a member, the required-flag check, and skeleton generation. The
+  required-flag check was the one that would have been missed — it demanded `--version`
+  for a command whose flag had been renamed away.
+
+While wiring these up, unknown *services* and unknown *operations* also gained the
+reference's exact wording (`argument command:` and `argument operation:` respectively,
+each followed by two blank lines and the usage block).
+
+### The overlay was already there
+
+The first attempt wrote a fresh extractor and a second JSON file before noticing
+`data/customizations.json` already carried both tables with identical content. Deleted
+in favour of embedding the existing file, with a test asserting the embedded copy and the
+one the harness loads from disk are the same table — otherwise the binary and the
+conformance report could quietly disagree about the surface.
+
+### The harness could not have caught this
+
+`ServiceDiff` computes `operations_unexpected` and `is_clean` checks it, so the surface
+comparison was sound. The gap was that the *surface builder* applied removals while the
+*binary* did not — two code paths deriving the same thing, only one of them checked. The
+`ses` line read `69 ops matched` and was accurate; nothing was comparing what the binary
+would actually accept.
+
+Worth remembering: a conformance harness that shares no code with the thing it checks can
+only report on what it re-derives.
