@@ -15,3 +15,4 @@ aws-cli-protocol = { workspace = true }
 aws-cli-runtime = { workspace = true }
 aws-cli-output = { workspace = true }
 serde_json = { workspace = true }
+regex = "1"

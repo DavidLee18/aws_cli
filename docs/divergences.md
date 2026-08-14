@@ -424,3 +424,57 @@ views of one service. Deferred to the customization phase.
   removed, so a drop-in replacement must keep accepting them. The corpus captures them.
 - **Argument *types*** — shorthand syntax, `nargs`, blob/file handling. The corpus records
   flag names only; behavioural conformance needs the `awsc` binary.
+
+---
+
+## Custom commands (first tranche)
+
+Six custom commands are now implemented, each verified by byte-diffing our stdout/stderr
+and exit code against the reference. `scripts/compare-custom-commands.sh` reproduces the
+comparison; it pins our clock to the reference's via `AWSC_FIXED_TIME`, because presigned
+URLs embed a timestamp and would otherwise never compare equal.
+
+| Command | Verified against reference |
+|---|---|
+| `ecr get-login-password` | live call required; logic pinned to `customizations/ecr.py` |
+| `ecr-public get-login-password` | as above; response shape differs (structure, not list) |
+| `rds generate-db-auth-token` | byte-identical, 6 cases incl. session token |
+| `codecommit credential-helper get/store/erase` | byte-identical, 6 cases |
+| `eks get-token` | presigned URL byte-identical; document byte-identical in json/text/yaml/query |
+| `configservice get-status` | format strings ported from `getstatus.py`; needs a live account to diff |
+
+Facts worth recording, because each contradicts a reasonable assumption:
+
+- **`ecr-public` does not pin `us-east-1`.** Its ruleset is purely region-templated; the
+  `us-east-1` that appears everywhere comes from the *documentation examples*.
+- **`generate-db-auth-token` signs for `rds-db`**, not `rds`, and always appends the port
+  to the URL — but omits `:443` from the *signed* host, so those two strings differ.
+- **Presigned URLs emit and canonicalize their parameters in different orders.** botocore
+  appends the auth parameters in a fixed insertion order, then recomputes the canonical
+  query by sorting the encoded pairs — and `X-Amz-Security-Token` sorts before
+  `X-Amz-SignedHeaders`. Emitting in canonical order produces a plausible URL that fails
+  to authenticate.
+- **`codecommit credential-helper` is not SigV4.** The canonical request uses the literal
+  method `GIT`, an empty canonical query, and an *empty payload-hash field* rather than a
+  SHA-256; the timestamp inside the string-to-sign carries no trailing `Z`. The `Z` is
+  added only when the timestamp is concatenated with the signature.
+- **`eks get-token` prints a trailing blank line**, because the command adds a newline on
+  top of the formatter's. Its output does go through `--output`/`--query`, unlike the
+  other custom commands here.
+- **`eks get-token` with neither cluster flag exits 1**, not 252: the reference *returns*
+  a `ValueError` instead of raising it, so Python prints it bare with no `aws: [ERROR]:`
+  prefix.
+
+### Found while scoping, and dropped
+
+`s3api get-bucket-lifecycle`, `put-bucket-lifecycle`, `get-bucket-notification` and
+`put-bucket-notification` are **not custom commands** — they are ordinary modeled
+operations marked `deprecated`, which only hides them from help. They already worked.
+`customizations/s3endpoint.py` does not exist in v2 at all.
+
+### Still outstanding
+
+`cloudformation deploy/package`, `logs tail`, `eks update-kubeconfig`,
+`configservice subscribe`, and the `s3` tree (`cp`/`sync`/`mv`/`rm`/`ls`), which needs a
+concurrent transfer manager with multipart support and is a subsystem rather than a
+command.

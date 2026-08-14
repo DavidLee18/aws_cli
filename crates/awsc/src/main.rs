@@ -8,10 +8,11 @@
 //! recognised and refused explicitly rather than mis-serialized.
 
 use aws_cli_model::Model;
-use aws_cli_runtime::{credentials, endpoint, http, retry, sigv4};
 use std::process::ExitCode;
 
 mod args;
+mod client;
+mod custom;
 mod dispatch;
 mod paginate;
 mod exit;
@@ -38,14 +39,24 @@ To see help text, you can run:
   aws <command> <subcommand> help";
 
 /// An error paired with the exit code the reference would use for it.
-struct Failure {
+pub struct Failure {
     message: String,
     code: u8,
+    /// Print the message alone, with none of the usual decoration.
+    ///
+    /// A handful of custom commands *return* an exception object instead of raising it,
+    /// so Python's `sys.exit` prints `str(obj)` bare and exits 1 — no leading blank line
+    /// and no `aws: [ERROR]:` prefix. `eks get-token` with neither cluster flag is one.
+    raw: bool,
 }
 
 impl Failure {
-    fn new(code: u8, message: impl std::fmt::Display) -> Self {
-        Failure { message: message.to_string(), code }
+    pub fn new(code: u8, message: impl std::fmt::Display) -> Self {
+        Failure { message: message.to_string(), code, raw: false }
+    }
+
+    pub fn bare(code: u8, message: impl std::fmt::Display) -> Self {
+        Failure { message: message.to_string(), code, raw: true }
     }
 }
 
@@ -56,7 +67,11 @@ fn main() -> ExitCode {
             // The reference prefixes every error with a blank line — verified across
             // service errors, unknown profiles and SSO failures. Cosmetic, but it is a
             // byte difference in stderr and this is a drop-in replacement.
-            eprintln!("\naws: [ERROR]: {}", f.message);
+            if f.raw {
+                eprintln!("{}", f.message);
+            } else {
+                eprintln!("\naws: [ERROR]: {}", f.message);
+            }
             exit::code(f.code)
         }
     }
@@ -80,10 +95,22 @@ fn run() -> Result<ExitCode, Failure> {
         Err(e) => return Err(Failure::new(exit::PARAM_VALIDATION, e)),
     };
 
+    // Custom commands are not modeled operations, so they are dispatched before the model
+    // is consulted — `ecr get-login-password` has no `GetLoginPassword` shape to find.
+    if let Some(code) = custom::dispatch(&parsed)? {
+        return Ok(code);
+    }
+
+    if let Some(extra) = parsed.positionals.first() {
+        return Err(Failure::new(
+            exit::PARAM_VALIDATION,
+            format!("unexpected positional argument `{extra}`"),
+        ));
+    }
+
     let model = load_model(&parsed.service)
         .map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
 
-    let protocol = model.protocol().map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
     // The paginator overlay is keyed by CLI service name, which is not always the
     // name the user typed (aliases) nor the model filename.
     let cli_service =
@@ -197,36 +224,9 @@ fn run() -> Result<ExitCode, Failure> {
     }
 
     // The ruleset decides the endpoint, and may supply a signing region that differs
-    // from the client region. A region is still required: services without a global
-    // endpoint produce a rule error otherwise, which is reported as configuration (253)
-    // to match the reference.
-    let region = endpoint::resolve_region(parsed.region.as_deref(), None);
-    let ep_params = endpoint::EndpointParams {
-        region,
-        endpoint_url: parsed.endpoint_url.clone(),
-        ..Default::default()
-    };
-    let ep = endpoint::resolve(&model, &ep_params).map_err(|e| match e {
-        // A ruleset that rejects the inputs, or a missing region, is a configuration
-        // problem (253). The ruleset's own wording beats anything we would substitute.
-        endpoint::EndpointError::Rules(_) | endpoint::EndpointError::NoRegion => {
-            Failure::new(exit::CONFIGURATION, e)
-        }
-        other => Failure::new(exit::GENERAL_ERROR, other),
-    })?;
-    let creds = credentials::resolve(parsed.profile.as_deref(), Some(&ep.signing_region))
-        .map_err(|e| {
-        // Only "no credentials found at all" is a configuration error; an unknown
-        // profile or an expired SSO token is general (255). Matches the reference.
-            let code = if e.is_configuration_error() {
-                exit::CONFIGURATION
-            } else if e.is_client_error() {
-                exit::CLIENT_ERROR
-            } else {
-                exit::GENERAL_ERROR
-            };
-            Failure::new(code, e)
-        })?;
+    // from the client region. Credentials and endpoint resolve here, after the skeleton
+    // short-circuit, so `--generate-cli-skeleton` still works with no credentials.
+    let client = client::Client::new(&model, &client::Globals::from_parsed(&parsed))?;
 
     // Client-side validation runs before any network work, exactly as the reference
     // does — the error text and exit code both differ from letting the service reject.
@@ -238,129 +238,10 @@ fn run() -> Result<ExitCode, Failure> {
         ));
     }
 
-    let transport = http::Transport {
-        verify_ssl: parsed.verify_ssl,
-        ca_bundle: parsed.ca_bundle.clone(),
-        read_timeout: parsed.read_timeout,
-        connect_timeout: parsed.connect_timeout,
-    };
-
-    let retry_policy = std::cell::RefCell::new(retry::RetryPolicy::from_environment());
-
-    // One round trip, retried in place. Kept as a closure so pagination can issue it
-    // repeatedly with a different token injected, without re-resolving credentials or
-    // the endpoint. Each attempt is re-signed, since the timestamp changes.
+    // Kept as a closure so pagination can issue the call repeatedly with a different
+    // token injected, without re-resolving credentials or the endpoint.
     let issue = |input: Option<&serde_json::Value>| -> Result<serde_json::Value, Failure> {
-        let wire = dispatch::serialize(&model, protocol, op_id.name(), op, input_shape, input)
-            .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
-
-        // One invocation id for the whole call, stable across its retries.
-        let invocation_id = retry::new_invocation_id();
-        let max_attempts = retry_policy.borrow().max_attempts;
-        let mut attempt: u32 = 1;
-
-        let response = loop {
-            let mut extra_headers = wire.headers.clone();
-            extra_headers.extend(retry::retry_headers(&invocation_id, attempt, max_attempts));
-
-            let request = http::PreparedRequest {
-                method: wire.method.clone(),
-                endpoint: ep.clone(),
-                path: wire.path.clone(),
-                query: wire.query.clone(),
-                content_type: wire.content_type.clone(),
-                extra_headers,
-                body: wire.body.clone(),
-            };
-
-            let timestamp = sigv4::format_timestamp(now_unix());
-            let (headers, signature) = if parsed.no_sign_request {
-                (http::unsigned_headers(&request), None)
-            } else {
-                let (h, s) = http::sign_request(&request, &creds, &timestamp);
-                (h, Some(s))
-            };
-
-            if parsed.debug {
-                eprintln!("endpoint: {}", request.endpoint.url);
-                eprintln!("body: {}", request.body);
-                if let Some(signature) = &signature {
-                    eprintln!("CanonicalRequest:\n{}", signature.canonical_request);
-                    eprintln!("StringToSign:\n{}", signature.string_to_sign);
-                    eprintln!("Signature:\n{}", signature.signature);
-                }
-            }
-
-            let sent = http::send(&request, &headers, &transport);
-
-            // Classify this attempt, then ask the policy whether to go again.
-            let outcome_delay = match &sent {
-                Err(e) => {
-                    let message = e.to_string();
-                    let timeout = message.contains("timed out") || message.contains("timeout");
-                    let delay = retry_policy.borrow_mut().next_delay(
-                        attempt,
-                        &retry::Outcome::Transport { timeout },
-                        &ep.signing_name,
-                    );
-                    delay
-                }
-                Ok(ref response) => {
-                    let code = if response.status >= 400 {
-                        Some(dispatch::parse_error(
-                            protocol,
-                            &response.body,
-                            response.header("x-amzn-errortype").as_deref(),
-                        ).0)
-                    } else {
-                        None
-                    };
-                    let delay = retry_policy.borrow_mut().next_delay(
-                        attempt,
-                        &retry::Outcome::Response {
-                            status: response.status,
-                            error_code: code.as_deref(),
-                        },
-                        &ep.signing_name,
-                    );
-                    delay
-                }
-            };
-
-            match outcome_delay {
-                Some(delay) => {
-                    std::thread::sleep(delay);
-                    attempt += 1;
-                }
-                None => {
-                    let response = sent.map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
-                    retry_policy.borrow_mut().record_success(response.status);
-                    break response;
-                }
-            }
-        };
-
-        let attempts_made = attempt;
-        if response.status >= 400 {
-            let (code, message) = dispatch::parse_error(
-                protocol,
-                &response.body,
-                response.header("x-amzn-errortype").as_deref(),
-            );
-            // The reference appends the retry count only when the attempt limit was
-            // actually reached, and only when a response was parsed.
-            let suffix = retry::max_retries_suffix(attempts_made, max_attempts);
-            return Err(Failure::new(
-                exit::CLIENT_ERROR,
-                format!(
-                    "An error occurred ({code}) when calling the {} operation{suffix}: {message}",
-                    op_id.name()
-                ),
-            ));
-        }
-
-        dispatch::parse_response(&model, protocol, op_id.name(), output_shape, &response.body)
-            .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))
+        client.call_operation(op_id.name(), op, input_shape, output_shape, input)
     };
 
     let value = paginate::run(&paginate::Settings {
@@ -391,7 +272,15 @@ fn run() -> Result<ExitCode, Failure> {
     Ok(exit::code(exit::SUCCESS))
 }
 
-fn now_unix() -> i64 {
+pub fn now_unix() -> i64 {
+    // Overridable so conformance tests can pin our clock to the same second as a captured
+    // reference run; presigned URLs embed the timestamp, so without this the two outputs
+    // can only be compared field by field rather than byte for byte.
+    if let Ok(fixed) = std::env::var("AWSC_FIXED_TIME") {
+        if let Ok(seconds) = fixed.parse() {
+            return seconds;
+        }
+    }
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock is after 1970")
@@ -403,7 +292,7 @@ fn now_unix() -> i64 {
 /// `models/` is named by aws-sdk-rust's conventions, not the CLI's — `logs` lives in
 /// `cloudwatch-logs.json` — so the fast path tries the obvious filename and the fallback
 /// resolves each candidate's own CLI name rather than guessing.
-fn load_model(cli_service: &str) -> Result<Model, String> {
+pub fn load_model(cli_service: &str) -> Result<Model, String> {
     let dir = models_dir();
     let direct = dir.join(format!("{cli_service}.json"));
     if let Ok(bytes) = std::fs::read(&direct) {

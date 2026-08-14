@@ -86,7 +86,7 @@ pub fn sign(ctx: &SigningContext<'_>, req: &SigningRequest<'_>) -> Signature {
         hex(Sha256::digest(canonical_request.as_bytes()))
     );
 
-    let signature = hex(derive_signature(ctx, string_to_sign.as_bytes()));
+    let signature = sign_string_to_sign(ctx, &string_to_sign);
 
     let authorization = format!(
         "{ALGORITHM} Credential={}/{}, SignedHeaders={signed_headers}, Signature={signature}",
@@ -95,6 +95,37 @@ pub fn sign(ctx: &SigningContext<'_>, req: &SigningRequest<'_>) -> Signature {
     );
 
     Signature { canonical_request, string_to_sign, signature, signed_headers, authorization }
+}
+
+/// The empty-body payload hash. Presigned URLs always sign an empty body, and so does
+/// codecommit's hand-built canonical request.
+pub const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+/// Build the string-to-sign around an already-formed canonical request, and sign it.
+///
+/// Exposed because two commands build their canonical request by hand rather than from a
+/// real HTTP request: presigned URLs put the auth parameters in the query string, and
+/// `codecommit credential-helper` signs a synthetic `GIT` request that is not valid
+/// SigV4 at all (see [`crate::presign`] and the codecommit command).
+pub fn sign_canonical_request(ctx: &SigningContext<'_>, canonical_request: &str) -> (String, String) {
+    let string_to_sign = format!(
+        "{ALGORITHM}\n{}\n{}\n{}",
+        ctx.timestamp,
+        ctx.scope(),
+        hex(Sha256::digest(canonical_request.as_bytes()))
+    );
+    let signature = sign_string_to_sign(ctx, &string_to_sign);
+    (string_to_sign, signature)
+}
+
+pub fn sign_string_to_sign(ctx: &SigningContext<'_>, string_to_sign: &str) -> String {
+    hex(derive_signature(ctx, string_to_sign.as_bytes()))
+}
+
+/// The credential-scope string, `AKID/YYYYMMDD/region/service/aws4_request` without the
+/// key, as it appears in `X-Amz-Credential`.
+pub fn credential_scope(ctx: &SigningContext<'_>) -> String {
+    ctx.scope()
 }
 
 /// The four-step key derivation: date -> region -> service -> `aws4_request`.

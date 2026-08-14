@@ -40,6 +40,15 @@ pub struct Parsed {
     /// `--cli-input-json` / `--cli-input-yaml`, already read from disk if `file://`.
     pub cli_input: Option<String>,
     pub generate_skeleton: Option<String>,
+    /// Positional tokens after the operation name. Only custom commands use these
+    /// (`codecommit credential-helper get`); the modeled path rejects them.
+    pub positionals: Vec<String>,
+    /// Non-global tokens exactly as they appeared in argv, in order.
+    ///
+    /// `parameters` loses both the ordering and the `--flag=value` vs `--flag value`
+    /// distinction, and the reference reports unknown options by joining these raw tokens
+    /// with `,` — so `--bogus=x` is one token but `--bogus x` is two.
+    pub extras: Vec<String>,
 }
 
 pub fn parse(argv: &[String]) -> Result<Outcome, String> {
@@ -86,13 +95,19 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
         connect_timeout: None,
         cli_input: None,
         generate_skeleton: None,
+        positionals: Vec::new(),
+        extras: Vec::new(),
     };
 
     let mut i = 2;
     while i < argv.len() {
         let arg = &argv[i];
         if !arg.starts_with("--") {
-            return Err(format!("unexpected positional argument `{arg}`"));
+            // Held rather than rejected here: a custom command may declare subcommands.
+            // The modeled path rejects any that are left over.
+            parsed.positionals.push(arg.clone());
+            i += 1;
+            continue;
         }
         // Support both `--flag value` and `--flag=value`.
         let (name, inline) = match arg.split_once('=') {
@@ -184,10 +199,12 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
             other => {
                 // Operation parameters are resolved against the model later; store the
                 // raw value here (or None, which a boolean member will interpret).
+                parsed.extras.push(arg.clone());
                 let value = if inline.is_some() {
                     Some(take_value()?)
                 } else if argv.get(i + 1).is_some_and(|n| !n.starts_with("--")) {
                     i += 1;
+                    parsed.extras.push(argv[i].clone());
                     Some(argv[i].clone())
                 } else {
                     None
