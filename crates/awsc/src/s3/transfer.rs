@@ -488,9 +488,9 @@ fn scan_s3(conn: &Conn, prefix: &str) -> Result<Vec<Item>, Failure> {
     let mut token: Option<String> = None;
     loop {
         let mut query =
-            vec!["list-type=2".to_string(), format!("prefix={}", super::encode_key(prefix))];
+            vec!["list-type=2".to_string(), format!("prefix={}", super::encode_query(prefix))];
         if let Some(t) = &token {
-            query.push(format!("continuation-token={}", super::encode_key(t)));
+            query.push(format!("continuation-token={}", super::encode_query(t)));
         }
         let response =
             conn.send_checked("ListObjectsV2", "GET", "/", &query.join("&"), &[], Vec::new())?;
@@ -791,7 +791,7 @@ fn upload_part(
         "UploadPart",
         "PUT",
         &upload.path,
-        &format!("partNumber={part}&uploadId={}", super::encode_key(&upload.id)),
+        &format!("partNumber={part}&uploadId={}", super::encode_query(&upload.id)),
         &[],
         buffer,
     )?;
@@ -815,7 +815,7 @@ fn complete_upload(
         "CompleteMultipartUpload",
         "POST",
         &upload.path,
-        &format!("uploadId={}", super::encode_key(&upload.id)),
+        &format!("uploadId={}", super::encode_query(&upload.id)),
         &[],
         body.into_bytes(),
     )?;
@@ -827,7 +827,7 @@ fn abort_upload(conn: &Conn, _item: &Item, upload: &Upload) {
     let _ = conn.send(
         "DELETE",
         &upload.path,
-        &format!("uploadId={}", super::encode_key(&upload.id)),
+        &format!("uploadId={}", super::encode_query(&upload.id)),
         &[],
         Vec::new(),
     );
@@ -1055,7 +1055,14 @@ fn download(
             continue;
         }
         let result = match failed.iter().find(|(i, _)| *i == index) {
-            Some((_, e)) => Err(Failure::new(e.exit_code(), e.message())),
+            Some((_, e)) => {
+                // The file was preallocated at full size before the first range was
+                // fetched, so a failure would otherwise leave a large sparse file of
+                // zeroes that looks like a successful download.
+                drop(handles[index].take());
+                let _ = std::fs::remove_file(&item.dest);
+                Err(Failure::new(e.exit_code(), e.message()))
+            }
             None => Ok(()),
         };
         finish(

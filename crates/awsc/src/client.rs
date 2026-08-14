@@ -91,7 +91,12 @@ impl<'a> Client<'a> {
         bucket: Option<&str>,
     ) -> Result<Client<'a>, Failure> {
         let protocol = model.protocol().map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
-        let region = endpoint::resolve_region(globals.region.as_deref(), None);
+        // The profile's `region` key is the last step of botocore's precedence, and
+        // skipping it silently sent S3 and STS to their legacy global endpoints.
+        let profile_region =
+            credentials::profile::profile_region(globals.profile.as_deref());
+        let region =
+            endpoint::resolve_region(globals.region.as_deref(), profile_region.as_deref());
         let ep_params = endpoint::EndpointParams {
             region,
             endpoint_url: globals.endpoint_url.clone(),

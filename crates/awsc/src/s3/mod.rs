@@ -36,6 +36,16 @@ pub fn encode_key(key: &str) -> String {
     out
 }
 
+/// Percent-encode a **query parameter** value.
+///
+/// Stricter than [`encode_key`]: `/` must become `%2F` here. SigV4 canonicalises query
+/// parameters with `quote(safe='-._~')`, so a literal `/` in a value — a `prefix` of
+/// `logs/`, or `delimiter=/` — is signed as `%2F` by S3 but sent raw by us, and the
+/// signature does not match. That failure only appears against the real service.
+pub fn encode_query(value: &str) -> String {
+    aws_cli_runtime::presign::percent_encode(value)
+}
+
 /// Base-2 sizes, as `--human-readable` and the progress bar render them.
 ///
 /// Note the two special cases at the bottom (`1 Byte`, `N Bytes`) and that the threshold
@@ -134,6 +144,17 @@ pub fn dispatch(parsed: &Parsed, globals: &Globals) -> Result<std::process::Exit
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The distinction that broke signing against real S3: a path keeps its separators,
+    /// a query value does not.
+    #[test]
+    fn encodes_query_values_more_strictly_than_paths() {
+        assert_eq!(encode_key("logs/2026/"), "logs/2026/");
+        assert_eq!(encode_query("logs/2026/"), "logs%2F2026%2F");
+        assert_eq!(encode_query("/"), "%2F");
+        assert_eq!(encode_query("a+b"), "a%2Bb");
+        assert_eq!(encode_query("plain-9._~"), "plain-9._~");
+    }
 
     /// Values checked against the reference's own `human_readable_size`.
     #[test]

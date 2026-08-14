@@ -103,6 +103,17 @@ impl Config {
 }
 
 /// The profile to use: explicit flag, then `AWS_PROFILE`, then `default`.
+/// The `region` key of the active profile, if the config file sets one.
+///
+/// Without this the region falls back to the service's global pseudo-region, which for
+/// most services is a `NoRegion` error but for S3 and STS *silently* resolves to the
+/// legacy global endpoint — a different host from the one the reference uses.
+pub fn profile_region(explicit_profile: Option<&str>) -> Option<String> {
+    let config = Config::load().ok()?;
+    let section = config.profile(&profile_name(explicit_profile))?;
+    section.get("region").filter(|r| !r.is_empty()).cloned()
+}
+
 pub fn profile_name(explicit: Option<&str>) -> String {
     explicit
         .map(str::to_string)

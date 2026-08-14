@@ -671,3 +671,55 @@ and it was invisible while only argument handling was being tested.
 The scan result is now cached in `models/.awsc-model-index.json` and rebuilt whenever a
 lookup misses, so it is self-healing if models are added or replaced. First call 9 s,
 every call after 0.28 s.
+
+---
+
+## What only real AWS could catch
+
+Everything above was verified against a local server that does not check signatures and
+resolves one endpoint. Pointing the binary at real S3 immediately found three bugs that
+had passed every local test.
+
+### 1. Query values need stricter encoding than paths
+
+SigV4 canonicalises query parameters with `quote(safe='-._~')`, so `/` becomes `%2F`. We
+encoded query values with the *path* encoder, which deliberately leaves `/` alone. A
+`prefix` of `AWSLogs/`, or `delimiter=/`, was therefore signed one way and sent another:
+
+```
+An error occurred (SignatureDoesNotMatch) when calling the ListObjectsV2 operation
+```
+
+`ls --recursive` passed throughout, because at a bucket root the prefix is empty and no
+delimiter is sent — the failure only appeared with a nested prefix or a non-recursive
+listing. `encode_key` (paths, `/` preserved) and `encode_query` (values, `/` escaped) are
+now separate, with a test stating the distinction.
+
+### 2. The profile's `region` was never read
+
+`resolve_region` accepted a `profile_region` argument and every caller passed `None`, so
+the `region = us-east-1` in `~/.aws/config` was ignored. For most services that would be a
+loud `NoRegion` error; for S3 and STS it *silently* resolved the legacy global endpoint —
+`bucket.s3.amazonaws.com` where the reference uses `bucket.s3.us-east-1.amazonaws.com`.
+Both work, so `ls` output matched and nothing looked wrong until a presigned URL was
+compared host by host.
+
+### 3. A failed download left a full-size sparse file
+
+Large downloads preallocate the destination with `set_len` before fetching any range. On
+failure — an object in Glacier, say — that left a file of the right size full of zeroes,
+looking exactly like a successful download. The reference leaves nothing. The partial file
+is now removed.
+
+### Verified against real S3
+
+- `sts get-caller-identity`, `s3 ls` in eight forms, `s3api list-buckets`,
+  `ec2 describe-regions`: byte-identical, exit codes included. (The only difference
+  anywhere was S3's opaque pagination token, which the service regenerates per call.)
+- A 24 MB Standard-tier object downloaded through the ranged path: **identical SHA-256**,
+  8.7 s against the reference's 11.4 s.
+- A key containing Korean characters resolved correctly — both CLIs returned the same
+  `InvalidObjectState` for a Glacier object, which proves the key was encoded right.
+
+Uploads to real S3 are still unverified: doing so writes to the user's own buckets, so it
+needs their say-so first.

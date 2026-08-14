@@ -153,13 +153,13 @@ fn list_buckets(
             query.push(format!("max-buckets={size}"));
         }
         if let Some(prefix) = &options.bucket_name_prefix {
-            query.push(format!("prefix={}", super::encode_key(prefix)));
+            query.push(format!("prefix={}", super::encode_query(prefix)));
         }
         if let Some(region) = &options.bucket_region {
-            query.push(format!("bucket-region={}", super::encode_key(region)));
+            query.push(format!("bucket-region={}", super::encode_query(region)));
         }
         if let Some(t) = &token {
-            query.push(format!("continuation-token={}", super::encode_key(t)));
+            query.push(format!("continuation-token={}", super::encode_query(t)));
         }
 
         let response = client.send_raw("GET", "/", &query.join("&"), &[], Vec::new())?;
@@ -201,15 +201,15 @@ fn list_objects(
 
     loop {
         // `Prefix` is always sent, even when empty.
-        let mut query = vec!["list-type=2".to_string(), format!("prefix={}", super::encode_key(prefix))];
+        let mut query = vec!["list-type=2".to_string(), format!("prefix={}", super::encode_query(prefix))];
         if let Some(d) = delimiter {
-            query.push(format!("delimiter={}", super::encode_key(d)));
+            query.push(format!("delimiter={}", super::encode_query(d)));
         }
         if let Some(size) = options.page_size {
             query.push(format!("max-keys={size}"));
         }
         if let Some(t) = &token {
-            query.push(format!("continuation-token={}", super::encode_key(t)));
+            query.push(format!("continuation-token={}", super::encode_query(t)));
         }
         let mut headers = Vec::new();
         if let Some(payer) = &options.request_payer {

@@ -242,7 +242,7 @@ fn generate_db_auth_token(parsed: &Parsed, globals: &Globals) -> Result<ExitCode
         )
     })?;
 
-    let region = aws_cli_runtime::endpoint::resolve_region(globals.region.as_deref(), None)
+    let region = resolve_region(globals)
         .ok_or_else(|| Failure::new(exit::CONFIGURATION, aws_cli_runtime::RuntimeError::NoRegion))?;
     let creds = resolve_credentials(globals, &region)?;
 
@@ -351,7 +351,7 @@ fn codecommit_credential_helper(parsed: &Parsed, globals: &Globals) -> Result<Ex
 
     let region = codecommit_region(host)
         .map(str::to_string)
-        .or_else(|| aws_cli_runtime::endpoint::resolve_region(globals.region.as_deref(), None))
+        .or_else(|| resolve_region(globals))
         .ok_or_else(|| Failure::new(exit::CONFIGURATION, aws_cli_runtime::RuntimeError::NoRegion))?;
     let creds = resolve_credentials(globals, &region)?;
 
@@ -421,7 +421,7 @@ fn eks_get_token(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure
         ));
     };
 
-    let region = aws_cli_runtime::endpoint::resolve_region(globals.region.as_deref(), None)
+    let region = resolve_region(globals)
         .ok_or_else(|| Failure::new(exit::CONFIGURATION, aws_cli_runtime::RuntimeError::NoRegion))?;
 
     // `--endpoint-url` is not forwarded here: the reference builds the STS client without
@@ -583,6 +583,13 @@ fn codecommit_region(host: &str) -> Option<&str> {
     PATTERN.captures(host).and_then(|c| c.get(3)).map(|m| m.as_str())
 }
 
+/// The region, honouring the profile's `region` key as botocore's precedence does.
+fn resolve_region(globals: &Globals) -> Option<String> {
+    let profile_region =
+        aws_cli_runtime::credentials::profile::profile_region(globals.profile.as_deref());
+    aws_cli_runtime::endpoint::resolve_region(globals.region.as_deref(), profile_region.as_deref())
+}
+
 fn resolve_credentials(
     globals: &Globals,
     region: &str,
@@ -627,7 +634,7 @@ fn configservice_subscribe(parsed: &Parsed, globals: &Globals) -> Result<ExitCod
         None => (s3_bucket, ""),
     };
 
-    let region = aws_cli_runtime::endpoint::resolve_region(globals.region.as_deref(), None)
+    let region = resolve_region(globals)
         .ok_or_else(|| Failure::new(exit::CONFIGURATION, aws_cli_runtime::RuntimeError::NoRegion))?;
     let other = Globals { region: Some(region.clone()), ..globals.for_other_service() };
 
