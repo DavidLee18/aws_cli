@@ -453,7 +453,14 @@ fn run(parsed: &Parsed, globals: &Globals, verb: Verb) -> Result<ExitCode, Failu
             let client = Client::for_bucket(&model, globals, Some(bucket))?;
             let conn = Conn::from_client(&client, globals);
             let response = conn
-                .send_checked("GetObject", "GET", &conn.object_path(key), "", &[], Vec::new())
+                .send_checked(
+                    "GetObject",
+                    "GET",
+                    &conn.object_path(key),
+                    "",
+                    &sse_c_headers(&options),
+                    Vec::new(),
+                )
                 .map_err(|e| missing_key_message(e, key))?;
             std::io::Write::write_all(&mut std::io::stdout(), &response.bytes)
                 .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
@@ -804,7 +811,7 @@ pub fn sync_download(
 
     let pool = Pool::new(options.concurrency);
     pool.run(&downloads, options.concurrency.is_none(), |item| {
-        let result = get_object(conn, item, &progress, &pool).and_then(|_| {
+        let result = get_object(conn, item, options, &progress, &pool).and_then(|_| {
             // Stamp the local mtime to the object's LastModified. Without this a clean
             // download leaves the local file newer than the object, and the next sync
             // would download it all over again.
@@ -1487,7 +1494,14 @@ fn download(
         found
     } else {
         let head = conn
-            .send_checked("HeadObject", "HEAD", &conn.object_path(key), "", &[], Vec::new())
+            .send_checked(
+                "HeadObject",
+                "HEAD",
+                &conn.object_path(key),
+                "",
+                &sse_c_headers(options),
+                Vec::new(),
+            )
             .map_err(|e| missing_key_message(e, key))?;
         let size =
             head.header("content-length").and_then(|v| v.parse().ok()).unwrap_or_default();
@@ -1552,7 +1566,7 @@ fn download(
 
     pool.run(&jobs, options.concurrency.is_none(), |job| match job {
         Job::Whole { item } => {
-            let result = get_object(conn, &items[*item], &progress, &pool);
+            let result = get_object(conn, &items[*item], options, &progress, &pool);
             finish(
                 &progress,
                 &outcome,
@@ -1572,7 +1586,8 @@ fn download(
             let end = (start + chunk).min(items[*item].size) - 1;
             let file = handles[*item].as_ref().expect("large items have a handle");
             let result = (|| -> Result<(), Failure> {
-                let headers = vec![("range".to_string(), format!("bytes={start}-{end}"))];
+                let mut headers = sse_c_headers(options);
+                headers.push(("range".to_string(), format!("bytes={start}-{end}")));
                 let response = conn.send_checked(
                     "GetObject",
                     "GET",
@@ -1640,6 +1655,7 @@ pub fn create_parent(path: &str) -> Result<(), Failure> {
 fn get_object(
     conn: &Conn,
     item: &Item,
+    options: &Options,
     progress: &Progress,
     pool: &Pool,
 ) -> Result<(), Failure> {
@@ -1648,7 +1664,7 @@ fn get_object(
         "GET",
         &conn.object_path(&item.source),
         "",
-        &[],
+        &sse_c_headers(options),
         Vec::new(),
     )?;
     create_parent(&item.dest)?;

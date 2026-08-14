@@ -1016,11 +1016,21 @@ Verified against real S3: uploading with `--metadata Key1=v1,Key2=v2 --content-t
 text/plain --cache-control max-age=60` produces a `head-object` identical to the
 reference's, and the streaming forms round-trip stdin to stdout.
 
-`--sse-c` and `--grants` could only be verified as far as S3's own rejection — the test
-bucket blocks SSE-C uploads and disallows ACLs — so the headers demonstrably reach the
-service and are understood, but no end-to-end round trip was possible here. SSE-C sends
-the key base64-encoded with its MD5 alongside, which is how S3 detects a key mangled in
-transit.
+**`--grants`** is verified end to end against a scratch bucket with ACLs enabled: uploading
+with `full=id=<canonical-id>` and with `read=uri=.../AllUsers` produces object ACLs
+byte-identical to the reference's for both grantee forms.
+
+**`--sse-c`** cannot be verified in this account. SSE-C uploads are blocked by policy at
+the *account* level, not per bucket — a freshly created bucket refuses them the same way,
+and the reference CLI fails with the identical `AccessDenied`. That identical failure is
+itself evidence the request is equivalent, but it is not a round trip, and this is the one
+flag whose correctness rests on reading the reference rather than observing it. SSE-C
+sends the key base64-encoded with its MD5 alongside, which is how S3 detects a key mangled
+in transit.
+
+Implementing it did surface a real gap: the SSE-C headers were only being sent on
+**uploads**. `GetObject`, the ranged download and `HeadObject` all need the same customer
+key, or an encrypted object cannot be read back at all. Downloads now carry them.
 
 ### `DirEntry::metadata` does not follow symlinks
 
