@@ -37,6 +37,35 @@ pub fn encode_key(key: &str) -> String {
     out
 }
 
+/// Percent-decode a value returned under `encoding-type=url`.
+///
+/// The listing is requested url-encoded so a key containing characters XML cannot carry
+/// survives the round trip; every key and prefix read out of the response has to come
+/// back through here. A malformed escape is left as written.
+pub fn decode_listed(value: &str) -> String {
+    if !value.contains('%') && !value.contains('+') {
+        return value.to_string();
+    }
+    let bytes = value.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+            if let Some(byte) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        // S3 encodes a space as `+` under `encoding-type=url`; a literal `+` in the key
+        // arrives as `%2B`, so this substitution cannot lose one.
+        out.push(if bytes[i] == b'+' { b' ' } else { bytes[i] });
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Percent-encode a **query parameter** value.
 ///
 /// Stricter than [`encode_key`]: `/` must become `%2F` here. SigV4 canonicalises query
@@ -186,6 +215,20 @@ mod tests {
             let rendered = human_readable_size(value);
             assert!(!rendered.starts_with("1024.0"), "{value} rendered as {rendered}");
         }
+    }
+
+    /// Round trip: what we send url-encoded must come back as it started.
+    #[test]
+    fn decodes_listed_keys() {
+        for original in ["a b/café.txt", "plain.txt", "with+plus", "a/b/c"] {
+            assert_eq!(decode_listed(&encode_query(original)), original, "{original}");
+        }
+        // A malformed escape is left as written rather than dropped.
+        assert_eq!(decode_listed("100%"), "100%");
+        assert_eq!(decode_listed("a%zzb"), "a%zzb");
+        // S3 sends a space as `+`; a literal `+` arrives as `%2B` and survives.
+        assert_eq!(decode_listed("a+b.txt"), "a b.txt");
+        assert_eq!(decode_listed("a%2Bb.txt"), "a+b.txt");
     }
 
     #[test]

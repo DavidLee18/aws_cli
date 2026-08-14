@@ -961,10 +961,44 @@ proxies are byte-identical to the reference.
 
 ### Still outstanding
 
-- The reference prints a usage block for an unknown *flag*, and `Maybe you meant:`
-  suggestions for an unknown *command*; we print neither.
 - `get-object` omits the checksum fields, since we do not send
   `x-amz-checksum-mode: ENABLED`.
-- The high-level `s3` tree builds its own list requests and does not yet send
-  `EncodingType=url`, so `s3 ls` and `s3 cp --recursive` would mishandle a key containing
-  XML-illegal characters.
+
+---
+
+## Suggestions, and the `s3` tree's own encoding
+
+**`Maybe you meant:`.** `argparser.py` calls `difflib.get_close_matches(value, choices,
+cutoff=0.8)`, leaving `n` at 3. The suggestions are printed, so the similarity measure is
+user-visible and an approximation would show a different list. `close_matches.rs` is a
+port of difflib's `SequenceMatcher.ratio` — `2*M/T` over the recursively-longest matching
+blocks — validated against Python's own output. `rds modify-option-group` now suggests
+`copy-option-group`, exactly as the reference does.
+
+Note the two newline counts differ: argparse's first message part keeps its own trailing
+newline, so a message *without* suggestions sits one line further from the usage block
+than one with them. Both are reproduced.
+
+**Unknown flags** are now reported as `Unknown options: --a, x` after the usage block —
+argparse prints its usage first and the message second, the opposite order from every
+other error the CLI reports.
+
+**`EncodingType=url` in the `s3` tree.** The high-level tree builds its own listings, so it
+needed the treatment separately. Verified with keys containing spaces and non-ASCII:
+`s3 ls` matches the reference byte for byte, and `cp --recursive` round-trips them.
+
+Two bugs that only a key with a space could show:
+
+- S3 encodes a space as `+` under `encoding-type=url`, not `%20`. Decoding only percent
+  escapes left `a+b.txt`, which then made `rm --recursive` delete nothing and report
+  success — it was asking for keys that did not exist. A literal `+` arrives as `%2B`, so
+  the substitution cannot lose one.
+- The same decode was missing from the modelled path's `Key`/`Prefix` fields.
+
+### A divergence left deliberately
+
+With **three or more** unknown flags the reference emits them in an order that comes out of
+argparse's own extras accumulation: `--aa 1 --bb 2 --cc 3` prints
+`--aa, --bb, 2, --cc, 3, 1`. One and two unknown flags match exactly; beyond that the same
+set appears in a different order. Reproducing it means porting argparse's option-scanning
+loop, which is a lot of machinery for the ordering of an error message nobody parses.

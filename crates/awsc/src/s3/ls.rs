@@ -201,7 +201,13 @@ fn list_objects(
 
     loop {
         // `Prefix` is always sent, even when empty.
-        let mut query = vec!["list-type=2".to_string(), format!("prefix={}", super::encode_query(prefix))];
+        // `encoding-type=url` so a key containing characters XML cannot carry survives the
+        // listing; the fields are decoded again as they are read.
+        let mut query = vec![
+            "list-type=2".to_string(),
+            "encoding-type=url".to_string(),
+            format!("prefix={}", super::encode_query(prefix)),
+        ];
         if let Some(d) = delimiter {
             query.push(format!("delimiter={}", super::encode_query(d)));
         }
@@ -233,7 +239,7 @@ fn list_objects(
 
         for common in prefixes {
             // Only the LAST component is shown, not the whole prefix: `a/b/` prints `b/`.
-            let full = common.get("Prefix");
+            let full = &super::decode_listed(common.get("Prefix"));
             let name = full.trim_end_matches('/').rsplit('/').next().unwrap_or_default();
             let _ = write!(out, "{:>30} {name}/\n", "PRE");
         }
@@ -248,7 +254,7 @@ fn list_objects(
                 size.to_string()
             };
             // Under --recursive the full key is printed; otherwise just the basename.
-            let key = content.get("Key");
+            let key = &super::decode_listed(content.get("Key"));
             let name = if delimiter.is_some() {
                 key.rsplit('/').next().unwrap_or_default()
             } else {

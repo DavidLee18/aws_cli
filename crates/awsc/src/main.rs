@@ -51,6 +51,11 @@ pub struct Failure {
     /// so Python's `sys.exit` prints `str(obj)` bare and exits 1 — no leading blank line
     /// and no `aws: [ERROR]:` prefix. `eks get-token` with neither cluster flag is one.
     raw: bool,
+    /// Printed before the error line, without decoration.
+    ///
+    /// argparse writes its usage block *first* and the message after it, which is the
+    /// opposite order from every other error the CLI reports.
+    preamble: Option<String>,
     /// The service's own error code, when this came from a modelled error response.
     ///
     /// Kept alongside the formatted message because some commands branch on it —
@@ -61,7 +66,7 @@ pub struct Failure {
 
 impl Failure {
     pub fn new(code: u8, message: impl std::fmt::Display) -> Self {
-        Failure { message: message.to_string(), code, raw: false, service_error_code: None }
+        Failure { message: message.to_string(), code, raw: false, preamble: None, service_error_code: None }
     }
 
     /// The exit code this failure carries.
@@ -70,12 +75,19 @@ impl Failure {
     }
 
     /// The message alone, for the few commands that format their own error line.
+    /// A parameter error that argparse prints after its usage block.
+    pub fn after_usage(message: impl std::fmt::Display) -> Self {
+        let mut failure = Failure::new(exit::PARAM_VALIDATION, message);
+        failure.preamble = Some(USAGE_HINT.to_string());
+        failure
+    }
+
     pub fn message(&self) -> &str {
         &self.message
     }
 
     pub fn bare(code: u8, message: impl std::fmt::Display) -> Self {
-        Failure { message: message.to_string(), code, raw: true, service_error_code: None }
+        Failure { message: message.to_string(), code, raw: true, preamble: None, service_error_code: None }
     }
 }
 
@@ -86,6 +98,9 @@ fn main() -> ExitCode {
             // The reference prefixes every error with a blank line — verified across
             // service errors, unknown profiles and SSO failures. Cosmetic, but it is a
             // byte difference in stderr and this is a drop-in replacement.
+            if let Some(preamble) = &f.preamble {
+                eprintln!("\n{preamble}\n");
+            }
             if f.raw {
                 eprintln!("{}", f.message);
             } else {
@@ -122,18 +137,11 @@ fn run() -> Result<ExitCode, Failure> {
 
     // An unknown service is argparse's `argument command`, one level up from `argument
     // operation`; the wording differs only in that word.
-    let model = load_model(&parsed.service).map_err(|_| {
-        Failure::new(
-            exit::PARAM_VALIDATION,
-            format!(
-                "{}\n\n\n{USAGE_HINT}",
-                aws_cli_runtime::RuntimeError::ParamValidation(format!(
-                    "argument command: Found invalid choice '{}'",
-                    parsed.service
-                ))
-            ),
-        )
-    })?;
+    let model = load_model(&parsed.service)
+        .map_err(|_| {
+            let services = known_services();
+            invalid_choice("command", &parsed.service, services.iter().map(String::as_str))
+        })?;
 
     // The paginator overlay is keyed by CLI service name, which is not always the
     // name the user typed (aliases) nor the model filename.
@@ -153,16 +161,7 @@ fn run() -> Result<ExitCode, Failure> {
     // An unknown operation and a removed one are reported identically, since argparse
     // cannot tell the difference between a command that never existed and one v2 deleted.
     let unknown_operation = || {
-        Failure::new(
-            exit::PARAM_VALIDATION,
-            format!(
-                "{}\n\n\n{USAGE_HINT}",
-                aws_cli_runtime::RuntimeError::ParamValidation(format!(
-                    "argument operation: Found invalid choice '{}'",
-                    parsed.operation
-                ))
-            ),
-        )
+        invalid_choice("operation", &parsed.operation, table.names.keys().map(String::as_str))
     };
     let wire_name = table.resolve(&parsed.operation).ok_or_else(unknown_operation)?;
     let (op_id, op) = model.operation(wire_name).map_err(|_| unknown_operation())?;
@@ -282,9 +281,14 @@ fn run() -> Result<ExitCode, Failure> {
 
     // Unknown flags are rejected here rather than dropped: silently ignoring a parameter
     // the user supplied would send a request they did not ask for.
-    let mut input =
-        args::build_input_named(&model, input_shape, &parsed.parameters, &cli_service, &parsed.operation)
-            .map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
+    let mut input = args::build_input_named(
+        &model,
+        input_shape,
+        &parsed.parameters,
+        &cli_service,
+        &parsed.operation,
+    )
+    .map_err(Failure::after_usage)?;
 
     // --cli-input-json/yaml fills in top-level keys the command line did not set. The
     // command line wins, and the fill is shallow: a key set by an argument discards the
@@ -369,6 +373,49 @@ fn run() -> Result<ExitCode, Failure> {
         Err(e) => return Err(Failure::new(exit::GENERAL_ERROR, e)),
     }
     Ok(exit::code(exit::SUCCESS))
+}
+
+/// argparse's wording for a name that is not one of the choices, with the reference's
+/// `Maybe you meant:` block when anything is close enough.
+///
+/// The suggestions come from Python's `difflib.get_close_matches` at its 0.8 cutoff, so
+/// the printed list matches candidate for candidate.
+fn invalid_choice<'a>(
+    argument: &str,
+    typed: &str,
+    choices: impl IntoIterator<Item = &'a str>,
+) -> Failure {
+    let suggestions = aws_cli_model::close_matches::get_close_matches(typed, choices, 3, 0.8);
+    let mut message = format!("argument {argument}: Found invalid choice '{typed}'\n");
+    if !suggestions.is_empty() {
+        message.push_str("\nMaybe you meant:\n");
+        for word in &suggestions {
+            message.push_str(&format!("\n  * {word}"));
+        }
+    }
+    Failure::new(
+        exit::PARAM_VALIDATION,
+        // argparse joins its message parts with newlines and then puts a blank line
+        // before the usage block. The first part keeps its own trailing newline, so a
+        // message with no suggestions ends up one line further from the usage than one
+        // that has them -- which is why this appends only two.
+        format!(
+            "{}\n\n{USAGE_HINT}",
+            aws_cli_runtime::RuntimeError::ParamValidation(message)
+        ),
+    )
+}
+
+/// Every `aws <service>` name we can resolve, for the suggestion list.
+fn known_services() -> Vec<String> {
+    let dir = models_dir();
+    if let Ok(bytes) = std::fs::read(dir.join(".awsc-model-index.json")) {
+        if let Ok(map) = serde_json::from_slice::<std::collections::BTreeMap<String, String>>(&bytes)
+        {
+            return map.into_keys().collect();
+        }
+    }
+    Vec::new()
 }
 
 pub fn now_unix() -> i64 {

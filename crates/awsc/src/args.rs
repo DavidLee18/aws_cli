@@ -262,6 +262,27 @@ pub fn build_input_named(
         .filter(|(_, m)| proxy_hidden_member(service, operation) != Some(m.as_str()))
         .collect();
 
+    // Every unrecognised flag is collected, not just the first. argparse hands back its
+    // leftovers with all the flags first and their values *after*, in reverse — so
+    // `--aa 1 --bb 2` reads as `--aa, --bb, 2, 1`. That ordering is an artifact of how
+    // argparse accumulates extras, and it is reproduced because the line is printed.
+    let mut flags: Vec<String> = Vec::new();
+    let mut values: Vec<String> = Vec::new();
+    for (flag, raw) in parameters {
+        let lookup = flag.strip_prefix("--no-").map(|r| format!("--{r}")).unwrap_or(flag.clone());
+        if !by_flag.contains_key(&lookup) {
+            flags.push(flag.clone());
+            if let Some(value) = raw {
+                values.push(value.clone());
+            }
+        }
+    }
+    if !flags.is_empty() {
+        values.reverse();
+        flags.extend(values);
+        return Err(format!("Unknown options: {}", flags.join(", ")));
+    }
+
     let mut out = Map::new();
     for (flag, raw) in parameters {
         // `--no-foo` is the negative form of a boolean member.
@@ -269,9 +290,7 @@ pub fn build_input_named(
             Some(rest) => (format!("--{rest}"), true),
             None => (flag.clone(), false),
         };
-        let Some(member_name) = by_flag.get(&lookup) else {
-            return Err(format!("unknown option: {flag}"));
-        };
+        let Some(member_name) = by_flag.get(&lookup) else { continue };
         let member = &shape.members[*member_name];
 
         // Booleans take no value at all.

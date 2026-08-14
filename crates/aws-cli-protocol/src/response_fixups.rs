@@ -186,8 +186,11 @@ pub fn decode_encoded_keys(value: &mut Value) {
             for (key, entry) in map.iter_mut() {
                 if ENCODED_FIELDS.contains(&key.as_str()) {
                     if let Value::String(text) = entry {
-                        // A malformed escape is left as written rather than dropped.
-                        if let Some(decoded) = percent_decode(text) {
+                        // S3 sends a space as `+` under `encoding-type=url`; a literal
+                        // `+` arrives as `%2B`, so this cannot lose one. A malformed
+                        // escape leaves the field as written.
+                        let plus_decoded = text.replace('+', " ");
+                        if let Some(decoded) = percent_decode(&plus_decoded) {
                             *text = decoded;
                         }
                     }
@@ -213,6 +216,15 @@ mod encoding_tests {
         assert!(wants_url_encoding("s3", "ListObjectVersions"));
         assert!(!wants_url_encoding("s3", "GetObject"));
         assert!(!wants_url_encoding("ec2", "ListObjectsV2"));
+    }
+
+    /// A space arrives as `+`, a literal `+` as `%2B`.
+    #[test]
+    fn decodes_plus_as_space() {
+        let mut value = json!({"Key": "a+b.txt", "Prefix": "a%2Bb/"});
+        decode_encoded_keys(&mut value);
+        assert_eq!(value["Key"], "a b.txt");
+        assert_eq!(value["Prefix"], "a+b/");
     }
 
     #[test]

@@ -827,8 +827,13 @@ pub fn scan_s3(conn: &Conn, prefix: &str) -> Result<Vec<Item>, Failure> {
     let mut out = Vec::new();
     let mut token: Option<String> = None;
     loop {
-        let mut query =
-            vec!["list-type=2".to_string(), format!("prefix={}", super::encode_query(prefix))];
+        // `encoding-type=url` so a key containing characters XML cannot carry survives
+        // the listing; the fields are decoded again as they are read.
+        let mut query = vec![
+            "list-type=2".to_string(),
+            "encoding-type=url".to_string(),
+            format!("prefix={}", super::encode_query(prefix)),
+        ];
         if let Some(t) = &token {
             query.push(format!("continuation-token={}", super::encode_query(t)));
         }
@@ -837,7 +842,7 @@ pub fn scan_s3(conn: &Conn, prefix: &str) -> Result<Vec<Item>, Failure> {
         let root = xml::parse(&response.text())
             .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
         for content in root.all("Contents") {
-            let key = content.get("Key").to_string();
+            let key = super::decode_listed(content.get("Key"));
             // Zero-byte pseudo-folders are skipped for transfers.
             if key.ends_with('/') && content.get("Size") == "0" {
                 continue;
