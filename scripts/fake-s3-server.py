@@ -145,6 +145,23 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         bucket, key, q = self._split()
+        if self.path.startswith('/__seed'):
+            # Populate N synthetic objects so listing can be exercised without uploading
+            # anything: /__seed?n=100000&bucket=b
+            #
+            # Note this server never truncates a listing, while real S3 caps a page at
+            # 1000 keys. A big seeded listing therefore arrives in one response, so it is
+            # useful for exercising the parse path but is NOT a model of what listing
+            # costs against S3, where the same work is N/1000 sequential round trips.
+            q = parse_qs(urlparse(self.path).query)
+            n = int(q.get('n', ['1000'])[0])
+            bucket = q.get('bucket', ['b'])[0]
+            with LOCK:
+                for i in range(n):
+                    key = 'p/%06d/object-%06d.bin' % (i // 1000, i)
+                    OBJECTS[(bucket, key)] = b'x' * 10
+                    MTIMES[(bucket, key)] = 1700000000
+            return self._send(200, b'seeded %d' % n)
         if self.path.startswith('/__stats'):
             # Reported before this request is counted out, so subtract the /__stats call
             # itself and the connection it arrived on.
