@@ -9,6 +9,7 @@
 //! identity, which is far worse than a clear error.
 
 pub mod assume_role;
+pub mod cache;
 pub mod imds;
 pub mod process;
 pub mod profile;

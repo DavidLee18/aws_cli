@@ -58,8 +58,49 @@ pub struct SsoConfig {
 
 /// Resolve SSO credentials for a profile.
 pub fn resolve(config: &SsoConfig, profile: &str) -> Result<Credentials, CredentialError> {
+    // The role credentials are cached, not just the bearer token. Without this every
+    // invocation calls GetRoleCredentials against the *SSO* region, which is often not the
+    // region the command works in -- measured from Korea against a us-east-1 SSO endpoint,
+    // that was about a second of dead time in front of every command.
+    let key = role_cache_key(config);
+    if let Some(cached) = super::cache::read(&key) {
+        return Ok(cached);
+    }
     let token = load_token(config, profile)?;
-    fetch_role_credentials(config, &token, profile)
+    let credentials = fetch_role_credentials(config, &token, profile)?;
+    super::cache::write(&key, &credentials, Some("sso"));
+    Ok(credentials)
+}
+
+/// botocore's SSO cache key: `sha1` of the arguments as *minified* JSON with sorted keys.
+///
+/// Note the separators differ from the assume-role fetcher, which uses Python's default
+/// `", "`/`": "` spacing. botocore's own source calls this out as an inconsistency it
+/// cannot fix without invalidating existing caches. Matching it exactly is what lets
+/// `aws` and `awsc` share credentials rather than each re-fetching.
+fn role_cache_key(config: &SsoConfig) -> String {
+    use sha1::{Digest, Sha1};
+    // Sorted keys: accountId, roleName, then sessionName or startUrl.
+    let mut entries = vec![
+        format!("{}:{}", json_string("accountId"), json_string(&config.account_id)),
+        format!("{}:{}", json_string("roleName"), json_string(&config.role_name)),
+    ];
+    match &config.session_name {
+        Some(name) => {
+            entries.push(format!("{}:{}", json_string("sessionName"), json_string(name)))
+        }
+        None => entries
+            .push(format!("{}:{}", json_string("startUrl"), json_string(&config.start_url))),
+    }
+    let serialized = format!("{{{}}}", entries.join(","));
+    let digest: String =
+        Sha1::digest(serialized.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+    digest.replace([':', '/'], "_")
+}
+
+fn json_string(s: &str) -> String {
+    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
 }
 
 /// The cache key is the SSO session name for the modern form, or the start URL for the
@@ -379,6 +420,31 @@ fn urlencode(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// Against values computed with botocore's own algorithm:
+    ///
+    ///   json.dumps({'roleName':..,'accountId':..,'sessionName':..},
+    ///              sort_keys=True, separators=(',', ':'))  -> sha1 hexdigest
+    ///
+    /// A mismatch here does not fail anything visibly -- it just means `aws` and `awsc`
+    /// stop sharing the cache and each re-fetch credentials, which looks like nothing more
+    /// than being mysteriously slow.
+    #[test]
+    fn role_cache_key_matches_botocore() {
+        let session = SsoConfig {
+            session_name: Some("amplify-admin".into()),
+            start_url: "https://d-9067c25df2.awsapps.com/start".into(),
+            sso_region: "us-east-1".into(),
+            account_id: "147475613246".into(),
+            role_name: "amplify-admin".into(),
+        };
+        assert_eq!(role_cache_key(&session), "fa3955c26a3285bb71b32e8b0262014665c0ccad");
+
+        // The legacy inline form keys on the start URL instead, and the session name must
+        // not leak into the digest.
+        let legacy = SsoConfig { session_name: None, ..session };
+        assert_eq!(role_cache_key(&legacy), "cd609e275dc9a0b9b9579d21f3d3db11d977dccc");
+    }
     use super::*;
 
     /// The cache is shared with the reference CLI, so this derivation has to match it

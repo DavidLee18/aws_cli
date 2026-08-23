@@ -8,7 +8,6 @@ use super::{CredentialError, Credentials};
 use crate::sigv4::{self, SigningContext, SigningRequest};
 use sha1::{Digest, Sha1};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 const STS_API_VERSION: &str = "2011-06-15";
 
@@ -69,7 +68,7 @@ pub fn assume_role(
     // The cache is shared with the reference CLI, so a role assumed by either tool is
     // reusable by the other until it expires.
     let cache_key = cache_key(&params, generated_session_name);
-    if let Some(cached) = read_cache(&cache_key) {
+    if let Some(cached) = super::cache::read(&cache_key) {
         return Ok(cached);
     }
 
@@ -82,7 +81,7 @@ pub fn assume_role(
     let credentials =
         parse_credentials(&xml).ok_or_else(|| service_error(&xml, "AssumeRole"))?;
 
-    write_cache(&cache_key, &credentials);
+    super::cache::write(&cache_key, &credentials, None);
     Ok(credentials)
 }
 
@@ -244,61 +243,6 @@ fn json_string(s: &str) -> String {
     format!("\"{escaped}\"")
 }
 
-fn cache_dir() -> Option<PathBuf> {
-    super::profile::home().map(|h| h.join(".aws/cli/cache"))
-}
-
-fn read_cache(key: &str) -> Option<Credentials> {
-    let path = cache_dir()?.join(format!("{key}.json"));
-    let bytes = std::fs::read(path).ok()?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    let c = value.get("Credentials")?;
-
-    let expiration = c.get("Expiration").and_then(|e| e.as_str()).map(str::to_string);
-    // botocore treats an entry with under 15 minutes left as expired.
-    if let Some(expiry) = &expiration {
-        let remaining = super::sso::parse_rfc3339(expiry)? - now_unix();
-        if remaining < 15 * 60 {
-            return None;
-        }
-    }
-    Some(Credentials {
-        access_key_id: c.get("AccessKeyId")?.as_str()?.to_string(),
-        secret_access_key: c.get("SecretAccessKey")?.as_str()?.to_string(),
-        session_token: c.get("SessionToken").and_then(|t| t.as_str()).map(str::to_string),
-        expires_at: expiration,
-    })
-}
-
-fn write_cache(key: &str, credentials: &Credentials) {
-    let Some(dir) = cache_dir() else { return };
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-    let document = serde_json::json!({
-        "Credentials": {
-            "AccessKeyId": credentials.access_key_id,
-            "SecretAccessKey": credentials.secret_access_key,
-            "SessionToken": credentials.session_token,
-            "Expiration": credentials.expires_at,
-        }
-    });
-    // A cache write failing is not worth failing the command over.
-    let path = dir.join(format!("{key}.json"));
-    if let Ok(text) = serde_json::to_string_pretty(&document) {
-        let _ = std::fs::write(&path, text);
-        restrict_permissions(&path);
-    }
-}
-
-#[cfg(unix)]
-fn restrict_permissions(path: &PathBuf) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-}
-
-#[cfg(not(unix))]
-fn restrict_permissions(_path: &PathBuf) {}
 
 fn form_encode(s: &str) -> String {
     const UNRESERVED: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~";
