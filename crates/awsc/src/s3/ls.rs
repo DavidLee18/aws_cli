@@ -6,6 +6,7 @@
 //! Output goes straight to stdout; `--output`, `--query` and `--no-paginate` are ignored,
 //! which the reference states in its own description.
 
+use aws_cli_runtime::http;
 use super::{human_readable_size, param_error, service_error, uri, xml};
 use crate::args::Parsed;
 use crate::client::{Client, Globals};
@@ -162,7 +163,7 @@ fn list_buckets(
             query.push(format!("continuation-token={}", super::encode_query(t)));
         }
 
-        let response = client.send_raw("GET", "/", &query.join("&"), &[], Vec::new())?;
+        let response = client.send_raw("GET", "/", &query.join("&"), &[], http::Body::Empty)?;
         if response.status >= 400 {
             return Err(service_error("ListBuckets", &response));
         }
@@ -223,7 +224,7 @@ fn list_objects(
         }
 
         // Virtual-host addressing puts the bucket in the host, so the path is just `/`.
-        let response = client.send_raw("GET", "/", &query.join("&"), &headers, Vec::new())?;
+        let response = client.send_raw("GET", "/", &query.join("&"), &headers, http::Body::Empty)?;
         if response.status >= 400 {
             return Err(service_error("ListObjectsV2", &response));
         }

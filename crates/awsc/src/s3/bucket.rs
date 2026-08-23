@@ -5,6 +5,7 @@
 //! letting the driver print `aws: [ERROR]:` and exit 254. That is reproduced.
 
 use super::{param_error, service_error, uri};
+use aws_cli_runtime::http;
 use crate::args::Parsed;
 use crate::client::{Client, Globals};
 use crate::exit;
@@ -53,7 +54,7 @@ pub fn mb(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> {
         .into_bytes()
     };
 
-    match client.send_raw("PUT", "/", "", &[], body) {
+    match client.send_raw("PUT", "/", "", &[], http::Body::from_vec(body)) {
         Ok(response) if response.status < 400 => {
             println!("make_bucket: {bucket}");
             Ok(exit::code(exit::SUCCESS))
@@ -101,7 +102,7 @@ pub fn rb(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> {
         crate::load_model("s3api").map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
     let client = Client::for_bucket(&model, globals, Some(&bucket))?;
 
-    match client.send_raw("DELETE", "/", "", &[], Vec::new()) {
+    match client.send_raw("DELETE", "/", "", &[], http::Body::Empty) {
         Ok(response) if response.status < 400 => {
             println!("remove_bucket: {bucket}");
             Ok(exit::code(exit::SUCCESS))
@@ -235,7 +236,7 @@ pub fn website(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> 
         crate::load_model("s3api").map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
     let client = Client::for_bucket(&model, globals, Some(&bucket))?;
     let response =
-        client.send_raw("PUT", "/", "website=", &[], config.into_bytes())?;
+        client.send_raw("PUT", "/", "website=", &[], http::Body::from_vec(config.into_bytes()))?;
     if response.status >= 400 {
         return Err(service_error("PutBucketWebsite", &response));
     }

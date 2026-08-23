@@ -25,7 +25,11 @@ pub struct SigningRequest<'a> {
     pub query: &'a str,
     /// Headers to sign. Names are lowercased and the set is sorted internally.
     pub headers: Vec<(String, String)>,
-    pub body: &'a [u8],
+    /// Hex SHA-256 of the payload, or a sentinel such as `UNSIGNED-PAYLOAD`.
+    ///
+    /// The hash rather than the bytes, because a file-backed upload body must not be
+    /// read into memory just to be hashed — see [`crate::http::payload_hash`].
+    pub payload_hash: &'a str,
 }
 
 /// The signing context: who, where, when.
@@ -72,11 +76,10 @@ pub fn sign(ctx: &SigningContext<'_>, req: &SigningRequest<'_>) -> Signature {
         .iter()
         .map(|(k, v)| format!("{k}:{v}\n"))
         .collect::<String>();
-    let payload_hash = hex(Sha256::digest(req.body));
 
     let canonical_request = format!(
         "{}\n{}\n{}\n{}\n{}\n{}",
-        req.method, req.path, req.query, canonical_headers, signed_headers, payload_hash
+        req.method, req.path, req.query, canonical_headers, signed_headers, req.payload_hash
     );
 
     let string_to_sign = format!(

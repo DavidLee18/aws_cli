@@ -26,18 +26,36 @@ def iso(bucket, key):
 def xml_escape(s):
     return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
+# Connections accepted vs requests served. The ratio is the whole point of connection
+# pooling: without it they are equal, with it requests far exceed connections.
+CONNECTIONS = [0]
+REQUESTS = [0]
+METHODS = {}
+CLOSED_BY_SERVER = [0]
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
     def log_message(self, *a): pass
 
+    def setup(self):
+        with LOCK:
+            CONNECTIONS[0] += 1
+        BaseHTTPRequestHandler.setup(self)
+
     def handle_one_request(self):
         with LOCK:
+            REQUESTS[0] += 1
             INFLIGHT[0] += 1
             PEAK[0] = max(PEAK[0], INFLIGHT[0])
         try:
             if DELAY:
                 time.sleep(DELAY)
             BaseHTTPRequestHandler.handle_one_request(self)
+            with LOCK:
+                METHODS[self.command] = METHODS.get(self.command, 0) + 1
+                if self.close_connection:
+                    CLOSED_BY_SERVER[0] += 1
         finally:
             with LOCK:
                 INFLIGHT[0] -= 1
@@ -127,6 +145,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         bucket, key, q = self._split()
+        if self.path.startswith('/__stats'):
+            # Reported before this request is counted out, so subtract the /__stats call
+            # itself and the connection it arrived on.
+            body = ('connections=%d requests=%d server_closed=%d methods=%s'
+                    % (CONNECTIONS[0] - 1, REQUESTS[0] - 1, CLOSED_BY_SERVER[0],
+                       sorted((str(k), v) for k, v in METHODS.items()))).encode()
+            return self._send(200, body)
         if self.path.startswith('/__peak'):
             body = str(PEAK[0]).encode()
             PEAK[0] = 0

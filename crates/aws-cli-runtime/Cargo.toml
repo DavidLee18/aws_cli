@@ -16,6 +16,17 @@ sha2 = "0.10"
 # unchanged -- `s3api get-object` on a gzip-encoded object has to produce the gzip.
 # It also made an empty gzip body fail as "unexpected end of file".
 ureq = { version = "2", default-features = false, features = ["json", "tls"] }
+tokio = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+hyper-rustls = { workspace = true }
+rustls = { workspace = true }
+bytes = { workspace = true }
+http = { workspace = true }
+tokio-util = { version = "0.7", features = ["io"] }
+futures-core = "0.3"
+futures-util = { version = "0.3", default-features = false }
 serde = { workspace = true, features = ["derive"] }
 sha1 = "0.10"
 

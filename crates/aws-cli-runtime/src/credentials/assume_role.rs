@@ -160,7 +160,10 @@ fn sts_call(
                 path: "/",
                 query: "",
                 headers: headers.clone(),
-                body: body.as_bytes(),
+                payload_hash: &crate::http::payload_hash(
+                    &crate::transport::Body::from_vec(body.as_bytes().to_vec()),
+                    "sts",
+                ),
             },
         );
         for (k, v) in headers.iter().filter(|(k, _)| k != "host") {

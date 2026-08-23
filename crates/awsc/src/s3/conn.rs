@@ -40,7 +40,7 @@ impl Conn {
         path: &str,
         query: &str,
         headers: &[(String, String)],
-        body: Vec<u8>,
+        body: http::Body,
     ) -> Result<http::Response, Failure> {
         let mut policy = retry::RetryPolicy::from_environment();
         let invocation_id = retry::new_invocation_id();
@@ -58,7 +58,7 @@ impl Conn {
                 query: query.to_string(),
                 content_type: None,
                 extra_headers,
-                body_bytes: body.clone(),
+                body: body.clone(),
             };
 
             let timestamp = sigv4::format_timestamp(crate::now_unix());
@@ -121,7 +121,7 @@ impl Conn {
         path: &str,
         query: &str,
         headers: &[(String, String)],
-        body: Vec<u8>,
+        body: http::Body,
     ) -> Result<http::Response, Failure> {
         let response = self.send(method, path, query, headers, body)?;
         if response.status >= 400 {

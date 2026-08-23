@@ -8,6 +8,7 @@ pub mod presign;
 pub mod retry;
 pub mod rules;
 pub mod sigv4;
+pub mod transport;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
@@ -22,6 +23,11 @@ pub enum RuntimeError {
     NoRegion,
     #[error("network error: {0}")]
     Http(String),
+    /// A non-2xx response on a streaming path, where the body was never written to the
+    /// sink. Carries the error document so the caller can parse a modelled error out of
+    /// it, and the headers because S3 reports some failures only there.
+    #[error("HTTP {status}")]
+    HttpStatus { status: u16, body: String, headers: Vec<(String, String)> },
     /// Client-side parameter validation, reported the way the reference formats it.
     #[error("An error occurred (ParamValidation): {0}")]
     ParamValidation(String),

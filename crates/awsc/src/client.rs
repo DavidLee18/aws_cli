@@ -205,7 +205,7 @@ impl<'a> Client<'a> {
         path: &str,
         query: &str,
         headers: &[(String, String)],
-        body: Vec<u8>,
+        body: http::Body,
     ) -> Result<http::Response, Failure> {
         let invocation_id = retry::new_invocation_id();
         let max_attempts = self.retry.borrow().max_attempts;
@@ -222,7 +222,7 @@ impl<'a> Client<'a> {
                 query: query.to_string(),
                 content_type: None,
                 extra_headers,
-                body_bytes: body.clone(),
+                body: body.clone(),
             };
 
             let timestamp = sigv4::format_timestamp(crate::now_unix());
@@ -305,7 +305,7 @@ impl<'a> Client<'a> {
             &wire.path,
             &wire.query,
             &wire.headers,
-            wire.body.into_bytes(),
+            http::Body::from_vec(wire.body.into_bytes()),
         )?;
 
         if response.status >= 400 {
@@ -384,7 +384,7 @@ impl<'a> Client<'a> {
                 query: wire.query.clone(),
                 content_type: wire.content_type.clone(),
                 extra_headers,
-                body_bytes: wire.body.clone().into_bytes(),
+                body: http::Body::from_vec(wire.body.clone().into_bytes()),
             };
 
             // Re-signed each attempt, since the timestamp changes.
@@ -398,7 +398,7 @@ impl<'a> Client<'a> {
 
             if self.debug {
                 eprintln!("endpoint: {}", request.endpoint.url);
-                eprintln!("body: {}", String::from_utf8_lossy(&request.body_bytes));
+                eprintln!("body: {}", String::from_utf8_lossy(request.body.as_bytes().unwrap_or_default()));
                 if let Some(signature) = &signature {
                     eprintln!("CanonicalRequest:\n{}", signature.canonical_request);
                     eprintln!("StringToSign:\n{}", signature.string_to_sign);
@@ -503,7 +503,7 @@ impl<'a> Client<'a> {
         let from_body = match parsed_body {
             Ok(value) => value,
             Err(e) if from_headers.is_some() => {
-                if response.bytes.iter().any(|b| !b.is_ascii_whitespace()) && self.debug {
+                if response.bytes().iter().any(|b| !b.is_ascii_whitespace()) && self.debug {
                     eprintln!("note: body did not parse ({e}); using headers alone");
                 }
                 Value::Object(Default::default())

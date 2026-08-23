@@ -44,7 +44,10 @@ fn reproduces_reference_signature_exactly() {
             ("host".into(), req["host"].as_str().unwrap().to_string()),
             ("x-amz-date".into(), sig["timestamp"].as_str().unwrap().to_string()),
         ],
-        body: body.as_bytes(),
+        payload_hash: &{
+            use sha2::{Digest, Sha256};
+            Sha256::digest(body.as_bytes()).iter().map(|b| format!("{b:02x}")).collect::<String>()
+        },
     };
 
     let got = sign(&ctx, &signing_request);

@@ -13,6 +13,7 @@
 //! lines, and the exit-code rule (1 if anything failed, 2 if only warnings).
 
 pub use super::conn::Conn;
+use aws_cli_runtime::http;
 use super::pool::Pool;
 use super::progress::Progress;
 use super::{param_error, uri::Location, xml};
@@ -440,7 +441,7 @@ fn run(parsed: &Parsed, globals: &Globals, verb: Verb) -> Result<ExitCode, Failu
             std::io::Read::read_to_end(&mut std::io::stdin(), &mut body)
                 .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
             let headers = object_headers(&options, key);
-            conn.send_checked("PutObject", "PUT", &conn.object_path(key), "", &headers, body)?;
+            conn.send_checked("PutObject", "PUT", &conn.object_path(key), "", &headers, http::Body::from_vec(body))?;
             Ok(exit::code(exit::SUCCESS))
         }
         (Location::S3 { bucket, key }, Location::Stream, _) => {
@@ -459,10 +460,10 @@ fn run(parsed: &Parsed, globals: &Globals, verb: Verb) -> Result<ExitCode, Failu
                     &conn.object_path(key),
                     "",
                     &sse_c_headers(&options),
-                    Vec::new(),
+                    http::Body::Empty,
                 )
                 .map_err(|e| missing_key_message(e, key))?;
-            std::io::Write::write_all(&mut std::io::stdout(), &response.bytes)
+            std::io::Write::write_all(&mut std::io::stdout(), response.bytes())
                 .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
             Ok(exit::code(exit::SUCCESS))
         }
@@ -934,7 +935,7 @@ fn execute_deletes(
                 &conn.object_path(&item.source),
                 "",
                 &[],
-                Vec::new(),
+                http::Body::Empty,
             )
             .map(|_| ());
         let target = format!("s3://{}", display_key(conn, &item.source));
@@ -985,7 +986,7 @@ fn multipart_copy(
         &source_conn.object_path(&item.source),
         "",
         &sse_c_headers(options),
-        Vec::new(),
+        http::Body::Empty,
     )?;
     let source_etag = head.header("etag").unwrap_or_default();
 
@@ -1016,7 +1017,7 @@ fn multipart_copy(
 
     let path = conn.object_path(&item.dest);
     let created =
-        conn.send_checked("CreateMultipartUpload", "POST", &path, "uploads=", &headers, Vec::new())?;
+        conn.send_checked("CreateMultipartUpload", "POST", &path, "uploads=", &headers, http::Body::Empty)?;
     let upload_id = xml::parse(&created.text())
         .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?
         .get("UploadId")
@@ -1049,7 +1050,7 @@ fn multipart_copy(
                 &path,
                 &format!("partNumber={part}&uploadId={}", super::encode_query(&upload_id)),
                 &part_headers,
-                Vec::new(),
+                http::Body::Empty,
             )?;
             // The part ETag is in the body here, not a header.
             let etag = xml::parse(&response.text())
@@ -1075,7 +1076,7 @@ fn multipart_copy(
             &path,
             &format!("uploadId={}", super::encode_query(&upload_id)),
             &[],
-            Vec::new(),
+            http::Body::Empty,
         );
         // A source that changed underneath us is reported as such rather than as a bare
         // precondition failure.
@@ -1105,7 +1106,7 @@ fn multipart_copy(
         &path,
         &format!("uploadId={}", super::encode_query(&upload_id)),
         &sse_c_headers(options),
-        body.into_bytes(),
+        http::Body::from_vec(body.into_bytes()),
     )?;
     Ok(())
 }
@@ -1122,7 +1123,7 @@ fn copy_object(
         "x-amz-copy-source".to_string(),
         format!("/{source_bucket}/{}", super::encode_key(&item.source)),
     ));
-    conn.send_checked("CopyObject", "PUT", &conn.object_path(&item.dest), "", &headers, Vec::new())?;
+    conn.send_checked("CopyObject", "PUT", &conn.object_path(&item.dest), "", &headers, http::Body::Empty)?;
     Ok(())
 }
 
@@ -1186,7 +1187,7 @@ pub fn scan_s3(conn: &Conn, prefix: &str) -> Result<Vec<Item>, Failure> {
             query.push(format!("continuation-token={}", super::encode_query(t)));
         }
         let response =
-            conn.send_checked("ListObjectsV2", "GET", "/", &query.join("&"), &[], Vec::new())?;
+            conn.send_checked("ListObjectsV2", "GET", "/", &query.join("&"), &[], http::Body::Empty)?;
         let root = xml::parse(&response.text())
             .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
         for content in root.all("Contents") {
@@ -1474,7 +1475,7 @@ fn begin_upload(
         &path,
         "uploads=",
         &headers,
-        Vec::new(),
+        http::Body::Empty,
     )?;
     let id = xml::parse(&created.text())
         .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?
@@ -1491,17 +1492,17 @@ fn upload_part(
     offset: u64,
     length: u64,
 ) -> Result<String, Failure> {
-    let mut file =
-        std::fs::File::open(&item.source).map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
-    let mut buffer = vec![0u8; length as usize];
-    read_exact_at(&mut file, &mut buffer, offset)?;
+    // Described, not read: the part is streamed off disk while the request is in flight,
+    // so a worker costs a chunk buffer rather than a whole part. With ten workers and
+    // 64 MiB parts that is the difference between a few hundred kilobytes and 640 MiB.
+    let body = http::Body::FileRange { path: item.source.clone().into(), offset, len: length };
     let response = conn.send_checked(
         "UploadPart",
         "PUT",
         &upload.path,
         &format!("partNumber={part}&uploadId={}", super::encode_query(&upload.id)),
         &[],
-        buffer,
+        body,
     )?;
     Ok(response.header("etag").unwrap_or_default())
 }
@@ -1525,7 +1526,7 @@ fn complete_upload(
         &upload.path,
         &format!("uploadId={}", super::encode_query(&upload.id)),
         &[],
-        body.into_bytes(),
+        http::Body::from_vec(body.into_bytes()),
     )?;
     Ok(())
 }
@@ -1537,7 +1538,7 @@ fn abort_upload(conn: &Conn, _item: &Item, upload: &Upload) {
         &upload.path,
         &format!("uploadId={}", super::encode_query(&upload.id)),
         &[],
-        Vec::new(),
+        http::Body::Empty,
     );
 }
 
@@ -1595,25 +1596,17 @@ fn finish(
 }
 
 fn put_object(conn: &Conn, item: &Item, options: &Options) -> Result<(), Failure> {
-    let body = std::fs::read(&item.source).map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
+    // Streamed off disk rather than read up front, so a whole-file upload costs a chunk
+    // buffer no matter how large the file is. `item.size` comes from the scan that
+    // planned this transfer.
+    let body = http::Body::FileRange {
+        path: item.source.clone().into(),
+        offset: 0,
+        len: item.size,
+    };
     let headers = object_headers(options, &item.dest);
     conn.send_checked("PutObject", "PUT", &conn.object_path(&item.dest), "", &headers, body)?;
     Ok(())
-}
-
-fn read_exact_at(file: &mut std::fs::File, buffer: &mut [u8], offset: u64) -> Result<(), Failure> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::FileExt;
-        file.read_exact_at(buffer, offset).map_err(|e| Failure::new(exit::GENERAL_ERROR, e))
-    }
-    #[cfg(not(unix))]
-    {
-        use std::io::Seek;
-        file.seek(std::io::SeekFrom::Start(offset))
-            .and_then(|_| file.read_exact(buffer))
-            .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))
-    }
 }
 
 fn write_all_at(file: &std::fs::File, buffer: &[u8], offset: u64) -> Result<(), Failure> {
@@ -1653,7 +1646,7 @@ fn download(
                 &conn.object_path(key),
                 "",
                 &sse_c_headers(options),
-                Vec::new(),
+                http::Body::Empty,
             )
             .map_err(|e| missing_key_message(e, key))?;
         let size =
@@ -1747,11 +1740,11 @@ fn download(
                     &conn.object_path(&items[*item].source),
                     "",
                     &headers,
-                    Vec::new(),
+                    http::Body::Empty,
                 )?;
-                write_all_at(file, &response.bytes, start)?;
-                pool.record_bytes(response.bytes.len() as u64);
-                progress.add_bytes(response.bytes.len() as u64);
+                write_all_at(file, response.bytes(), start)?;
+                pool.record_bytes(response.bytes().len() as u64);
+                progress.add_bytes(response.bytes().len() as u64);
                 Ok(())
             })();
             if let Err(e) = result {
@@ -1818,13 +1811,13 @@ fn get_object(
         &conn.object_path(&item.source),
         "",
         &sse_c_headers(options),
-        Vec::new(),
+        http::Body::Empty,
     )?;
     create_parent(&item.dest)?;
-    std::fs::write(&item.dest, &response.bytes)
+    std::fs::write(&item.dest, response.bytes())
         .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
-    pool.record_bytes(response.bytes.len() as u64);
-    progress.add_bytes(response.bytes.len() as u64);
+    pool.record_bytes(response.bytes().len() as u64);
+    progress.add_bytes(response.bytes().len() as u64);
     Ok(())
 }
 
@@ -1855,7 +1848,7 @@ fn copy(
                 &source_conn.object_path(source_key),
                 "",
                 &[],
-                Vec::new(),
+                http::Body::Empty,
             )
             .map_err(|e| missing_key_message(e, source_key))?;
         let size = head.header("content-length").and_then(|v| v.parse().ok()).unwrap_or_default();
@@ -1900,7 +1893,7 @@ fn copy(
         );
         if verb == Verb::Move {
             let _ =
-                source_conn.send("DELETE", &source_conn.object_path(&item.source), "", &[], Vec::new());
+                source_conn.send("DELETE", &source_conn.object_path(&item.source), "", &[], http::Body::Empty);
         }
     }
 
@@ -1911,7 +1904,7 @@ fn copy(
                 "x-amz-copy-source".to_string(),
                 format!("/{source_bucket}/{}", super::encode_key(&item.source)),
             ));
-            conn.send_checked("CopyObject", "PUT", &conn.object_path(&item.dest), "", &headers, Vec::new())?;
+            conn.send_checked("CopyObject", "PUT", &conn.object_path(&item.dest), "", &headers, http::Body::Empty)?;
             progress.add_bytes(item.size);
             Ok(())
         })();
@@ -1919,7 +1912,7 @@ fn copy(
             &format!("s3://{source_bucket}/{}", item.source),
             &format!("s3://{}", display_key(conn, &item.dest)));
         if verb == Verb::Move {
-            let _ = source_conn.send("DELETE", &source_conn.object_path(&item.source), "", &[], Vec::new());
+            let _ = source_conn.send("DELETE", &source_conn.object_path(&item.source), "", &[], http::Body::Empty);
         }
     });
 
@@ -1951,7 +1944,7 @@ fn remove(conn: &Conn, key: &str, options: &Options) -> Result<ExitCode, Failure
     let pool = Pool::new(options.concurrency);
     pool.run(&items, options.concurrency.is_none(), |item| {
         let result = conn
-            .send_checked("DeleteObject", "DELETE", &conn.object_path(&item.source), "", &[], Vec::new())
+            .send_checked("DeleteObject", "DELETE", &conn.object_path(&item.source), "", &[], http::Body::Empty)
             .map(|_| ());
         let target = format!("s3://{}", display_key(conn, &item.source));
         match result {

@@ -2,7 +2,10 @@
 
 use crate::endpoint::Endpoint;
 use crate::sigv4::{self, Credentials, SigningContext, SigningRequest};
+use crate::transport::{self};
 use crate::RuntimeError;
+
+pub use crate::transport::{Body, Response, ResponseHead, Transport};
 
 /// A request built by the protocol layer, ready to sign and send.
 pub struct PreparedRequest {
@@ -16,52 +19,9 @@ pub struct PreparedRequest {
     pub content_type: Option<String>,
     /// Protocol headers such as `X-Amz-Target`, plus any bound by the operation.
     pub extra_headers: Vec<(String, String)>,
-    /// Raw request body. Bytes rather than a `String` because `s3 cp` uploads arbitrary
-    /// binary content.
-    pub body_bytes: Vec<u8>,
-}
-
-/// Transport-level options from the global arguments.
-#[derive(Debug, Clone, Default)]
-pub struct Transport {
-    pub verify_ssl: bool,
-    pub ca_bundle: Option<String>,
-    pub read_timeout: Option<u64>,
-    pub connect_timeout: Option<u64>,
-}
-
-pub struct Response {
-    pub status: u16,
-    /// The raw response bytes.
-    ///
-    /// Kept as bytes rather than a `String` because `s3 cp` downloads arbitrary binary
-    /// objects; decoding every response as UTF-8 would corrupt them. Protocol parsing goes
-    /// through [`Response::text`].
-    pub bytes: Vec<u8>,
-    headers: Vec<(String, String)>,
-}
-
-impl Response {
-    /// The body as text, for the protocol parsers and error documents.
-    ///
-    /// Lossy on purpose: a malformed body should surface as a parse error naming the
-    /// service, not as a decoding error from the transport.
-    pub fn text(&self) -> std::borrow::Cow<'_, str> {
-        String::from_utf8_lossy(&self.bytes)
-    }
-
-    /// Every response header, for the output-header binding.
-    pub fn headers(&self) -> &[(String, String)] {
-        &self.headers
-    }
-
-    /// Case-insensitive header lookup.
-    pub fn header(&self, name: &str) -> Option<String> {
-        self.headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(name))
-            .map(|(_, v)| v.clone())
-    }
+    /// The request body. May be file-backed, in which case it is streamed from disk at
+    /// send time and never held in memory.
+    pub body: Body,
 }
 
 /// The headers that participate in the signature.
@@ -87,7 +47,10 @@ fn signed_headers(
     // header for this request: x-amz-content-sha256"), unlike every other service, which
     // is happy with the hash appearing only inside the canonical request.
     if requires_content_sha256(&req.endpoint.signing_name) {
-        headers.push(("x-amz-content-sha256".to_string(), payload_hash(&req.body_bytes)));
+        headers.push((
+            "x-amz-content-sha256".to_string(),
+            payload_hash(&req.body, &req.endpoint.signing_name),
+        ));
     }
     for (k, v) in &req.extra_headers {
         headers.push((k.to_ascii_lowercase(), v.clone()));
@@ -100,9 +63,27 @@ fn requires_content_sha256(signing_name: &str) -> bool {
     signing_name == "s3" || signing_name.starts_with("s3-")
 }
 
-fn payload_hash(body: &[u8]) -> String {
+/// The payload hash that goes into the canonical request.
+///
+/// An in-memory body is hashed. A file-backed body is signed as `UNSIGNED-PAYLOAD`
+/// instead: hashing it would mean reading every byte off disk before the upload starts,
+/// doubling the I/O and adding a full SHA-256 pass over each part. S3 accepts the
+/// sentinel over HTTPS, where TLS already protects the payload in transit.
+///
+/// Only S3 accepts it, and file-backed bodies only ever arise from S3 uploads, so the
+/// mismatch is unreachable rather than merely unlikely.
+pub fn payload_hash(body: &Body, signing_name: &str) -> String {
     use sha2::{Digest, Sha256};
-    Sha256::digest(body).iter().map(|b| format!("{b:02x}")).collect()
+    match body.as_bytes() {
+        Some(bytes) => Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect(),
+        None => {
+            debug_assert!(
+                requires_content_sha256(signing_name),
+                "a file-backed body reached {signing_name}, which cannot sign UNSIGNED-PAYLOAD",
+            );
+            "UNSIGNED-PAYLOAD".to_string()
+        }
+    }
 }
 
 /// Sign `req` and return the headers to send, including Authorization.
@@ -126,7 +107,7 @@ pub fn sign_request(
         path: if path.is_empty() { "/" } else { &path },
         query: &canonical_query(&req.query),
         headers: headers.clone(),
-        body: &req.body_bytes,
+        payload_hash: &payload_hash(&req.body, &req.endpoint.signing_name),
     };
     let signature = sigv4::sign(&ctx, &signing_req);
 
@@ -174,80 +155,49 @@ pub fn unsigned_headers(req: &PreparedRequest) -> Vec<(String, String)> {
     out
 }
 
-/// Send a request. Blocking, since the CLI makes one call per invocation and an async
-/// runtime would buy nothing here.
-pub fn send(
-    req: &PreparedRequest,
-    headers: &[(String, String)],
-    transport: &Transport,
-) -> Result<Response, RuntimeError> {
-    let builder = ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(
-            transport.connect_timeout.unwrap_or(10),
-        ))
-        .timeout(std::time::Duration::from_secs(transport.read_timeout.unwrap_or(60)));
-
-    // `--no-verify-ssl` and `--ca-bundle` both change certificate verification. Rather
-    // than silently ignoring them — which would give a false sense of what the request
-    // did — an unsupported combination is reported.
-    if !transport.verify_ssl {
-        return Err(RuntimeError::Http(
-            "--no-verify-ssl is not supported yet; refusing rather than silently verifying"
-                .to_string(),
-        ));
-    }
-    if transport.ca_bundle.is_some() {
-        return Err(RuntimeError::Http(
-            "--ca-bundle is not supported yet; refusing rather than silently ignoring it"
-                .to_string(),
-        ));
-    }
-    let agent = builder.build();
-
+/// The absolute URL for a prepared request.
+fn url_of(req: &PreparedRequest) -> String {
     let base = req.endpoint.url.trim_end_matches('/');
     let path = if req.path.is_empty() { "/" } else { &req.path };
-    let url = if req.query.is_empty() {
+    if req.query.is_empty() {
         format!("{base}{path}")
     } else {
         format!("{base}{path}?{}", req.query)
-    };
-
-    let mut call = agent.request(&req.method, &url);
-    for (k, v) in headers {
-        // `host` is set by the transport; sending it explicitly duplicates the header.
-        if k != "host" {
-            call = call.set(k, v);
-        }
     }
+}
 
-    let head_request = req.method.eq_ignore_ascii_case("HEAD");
-    let collect = |resp: ureq::Response| {
-        let status = resp.status();
-        let names: Vec<String> = resp.headers_names();
-        let headers: Vec<(String, String)> = names
-            .iter()
-            .filter_map(|n| resp.header(n).map(|v| (n.clone(), v.to_string())))
-            .collect();
-        // A HEAD response carries the headers of the body it describes, including
-        // Content-Length, but sends no body -- reading one waits for bytes that never
-        // arrive and ends as "unexpected end of file".
-        if head_request {
-            return Ok(Response { status, bytes: Vec::new(), headers });
-        }
-        let mut bytes = Vec::new();
-        std::io::Read::read_to_end(&mut resp.into_reader(), &mut bytes)
-            .map(|_| Response { status, bytes, headers })
-    };
-
-    match call.send_bytes(&req.body_bytes) {
-        Ok(resp) => collect(resp).map_err(|e| RuntimeError::Http(e.to_string())),
-        // A 4xx/5xx is a normal outcome carrying a modelled error document, not a
-        // transport failure — hand the body back for the protocol layer to parse.
-        Err(ureq::Error::Status(_, resp)) => {
-            collect(resp).map_err(|e| RuntimeError::Http(e.to_string()))
-        }
-        Err(e) => Err(RuntimeError::Http(e.to_string())),
+fn transport_request(req: &PreparedRequest, headers: &[(String, String)]) -> transport::Request {
+    transport::Request {
+        method: req.method.clone(),
+        url: url_of(req),
+        headers: headers.to_vec(),
+        body: req.body.clone(),
     }
+}
+
+/// Send a request and read the response into memory.
+///
+/// Blocking, but backed by the shared pooled client — successive calls reuse the
+/// connection rather than handshaking again.
+pub fn send(
+    req: &PreparedRequest,
+    headers: &[(String, String)],
+    transport_opts: &Transport,
+) -> Result<Response, RuntimeError> {
+    transport::send(&transport_request(req, headers), transport_opts)
+}
+
+/// Send a request and stream the response body straight into `sink`.
+///
+/// The download path: the object never exists in memory as a whole, so fetching a 5 GB
+/// object costs a chunk buffer rather than 5 GB.
+pub fn send_to_writer<W: std::io::Write>(
+    req: &PreparedRequest,
+    headers: &[(String, String)],
+    transport_opts: &Transport,
+    sink: &mut W,
+) -> Result<ResponseHead, RuntimeError> {
+    transport::send_to_writer(&transport_request(req, headers), transport_opts, sink)
 }
 
 #[cfg(test)]
