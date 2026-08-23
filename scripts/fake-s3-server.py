@@ -177,22 +177,53 @@ class Handler(BaseHTTPRequestHandler):
             if 'list-type' in q:
                 prefix = q.get('prefix', [''])[0]
                 delim = q.get('delimiter', [None])[0]
+                # S3 caps a page at 1000 keys and truncates with a continuation token.
+                # Modelling that matters: without it a large listing arrives in one
+                # response and hides the sequential round trips that dominate real
+                # listing cost.
+                max_keys = min(int(q.get('max-keys', ['1000'])[0]), 1000)
+                token = q.get('continuation-token', [None])[0]
+                start_after = q.get('start-after', [None])[0]
+                after = token or start_after
+
                 keys = sorted(k for (b, k) in OBJECTS if b == bucket and k.startswith(prefix))
-                out = ['<?xml version="1.0"?><ListBucketResult><Name>%s</Name>'
-                       '<IsTruncated>false</IsTruncated>' % bucket]
-                prefixes = set()
+                if after:
+                    keys = [k for k in keys if k > after]
+
+                out = []
+                prefixes = []
+                seen_prefixes = set()
+                emitted = 0
+                last = None
+                truncated = False
                 for k in keys:
+                    if emitted >= max_keys:
+                        truncated = True
+                        break
                     rest = k[len(prefix):]
                     if delim and delim in rest:
-                        prefixes.add(prefix + rest.split(delim)[0] + delim)
+                        cp = prefix + rest.split(delim)[0] + delim
+                        if cp not in seen_prefixes:
+                            seen_prefixes.add(cp)
+                            prefixes.append(cp)
+                            emitted += 1
+                            last = k
                         continue
                     out.append('<Contents><Key>%s</Key><Size>%d</Size>'
                                '<LastModified>%s</LastModified></Contents>'
                                % (xml_escape(k), len(OBJECTS[(bucket, k)]), iso(bucket, k)))
-                for p in sorted(prefixes):
-                    out.append('<CommonPrefixes><Prefix>%s</Prefix></CommonPrefixes>' % xml_escape(p))
-                out.append('</ListBucketResult>')
-                return self._send(200, ''.join(out).encode(), {'Content-Type': 'application/xml'})
+                    emitted += 1
+                    last = k
+
+                body = ['<?xml version="1.0"?><ListBucketResult><Name>%s</Name>' % bucket,
+                        '<IsTruncated>%s</IsTruncated>' % ('true' if truncated else 'false')]
+                body.extend(out)
+                for cp in prefixes:
+                    body.append('<CommonPrefixes><Prefix>%s</Prefix></CommonPrefixes>' % xml_escape(cp))
+                if truncated and last is not None:
+                    body.append('<NextContinuationToken>%s</NextContinuationToken>' % xml_escape(last))
+                body.append('</ListBucketResult>')
+                return self._send(200, ''.join(body).encode(), {'Content-Type': 'application/xml'})
             data = OBJECTS.get((bucket, key))
         if data is None:
             return self._error(404, 'NoSuchKey', 'The specified key does not exist.')

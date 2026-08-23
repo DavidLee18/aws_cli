@@ -10,6 +10,7 @@ pub mod pool;
 pub mod progress;
 pub mod sync;
 pub mod transfer;
+pub mod list;
 pub mod ls;
 pub mod uri;
 pub mod xml;

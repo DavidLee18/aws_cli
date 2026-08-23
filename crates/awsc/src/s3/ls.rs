@@ -33,7 +33,36 @@ pub fn run(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> {
     if bucket.is_empty() {
         list_buckets(&client, &options, &mut out)?;
     } else if options.recursive {
-        list_objects(&client, &options, &key, None, &mut totals, &mut out)?;
+        // A deep listing is round-trip bound: one continuation chain, strictly
+        // sequential. Where the keyspace has sub-prefixes it is walked in parallel
+        // instead, streamed in key order so memory does not scale with the listing.
+        let conn = super::conn::Conn::from_client(&client, globals);
+        let workers =
+            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) * 2;
+        let mut first = true;
+        super::list::deep_streaming(&conn, &key, workers, |batch| {
+            if first && batch.is_empty() {
+                totals.empty_first_page = true;
+            }
+            first = false;
+            for entry in batch {
+                totals.objects += 1;
+                totals.bytes += entry.size;
+                let size_text = if options.human_readable {
+                    human_readable_size(entry.size)
+                } else {
+                    entry.size.to_string()
+                };
+                let _ = write!(
+                    out,
+                    "{} {:>10} {}\n",
+                    last_modified(&entry.last_modified),
+                    size_text,
+                    entry.key
+                );
+            }
+            Ok(())
+        })?;
     } else {
         list_objects(&client, &options, &key, Some("/"), &mut totals, &mut out)?;
     }

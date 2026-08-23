@@ -1172,46 +1172,32 @@ pub fn dir_prefix(key: &str) -> String {
 }
 
 /// List every object under a prefix.
+///
+/// Fans out over sub-prefixes where the keyspace has them: the continuation chain of a
+/// single prefix is strictly sequential, so a deep listing is round-trip bound rather than
+/// bandwidth bound. See [`super::list`].
 pub fn scan_s3(conn: &Conn, prefix: &str) -> Result<Vec<Item>, Failure> {
-    let mut out = Vec::new();
-    let mut token: Option<String> = None;
-    loop {
-        // `encoding-type=url` so a key containing characters XML cannot carry survives
-        // the listing; the fields are decoded again as they are read.
-        let mut query = vec![
-            "list-type=2".to_string(),
-            "encoding-type=url".to_string(),
-            format!("prefix={}", super::encode_query(prefix)),
-        ];
-        if let Some(t) = &token {
-            query.push(format!("continuation-token={}", super::encode_query(t)));
-        }
-        let response =
-            conn.send_checked("ListObjectsV2", "GET", "/", &query.join("&"), &[], http::Body::Empty)?;
-        let root = xml::parse(&response.text())
-            .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
-        for content in root.all("Contents") {
-            let key = super::decode_listed(content.get("Key"));
+    let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) * 2;
+    let entries = super::list::deep(conn, prefix, workers)?;
+    Ok(entries
+        .into_iter()
+        .filter(|entry| {
             // Zero-byte pseudo-folders are skipped for transfers.
-            if key.ends_with('/') && content.get("Size") == "0" {
-                continue;
-            }
-            let relative = key.strip_prefix(prefix).unwrap_or(&key).trim_start_matches('/');
-            out.push(Item {
+            !(entry.key.ends_with('/') && entry.size == 0)
+        })
+        .map(|entry| {
+            let relative =
+                entry.key.strip_prefix(prefix).unwrap_or(&entry.key).trim_start_matches('/');
+            Item {
                 dest: relative.to_string(),
-                size: content.get("Size").parse().unwrap_or_default(),
-                modified: super::ls::parse_iso8601(content.get("LastModified"))
+                size: entry.size,
+                modified: super::ls::parse_iso8601(&entry.last_modified)
                     .map(|s| s as f64)
                     .unwrap_or(0.0),
-                source: key,
-            });
-        }
-        match root.get("NextContinuationToken") {
-            "" => break,
-            next => token = Some(next.to_string()),
-        }
-    }
-    Ok(out)
+                source: entry.key.clone(),
+            }
+        })
+        .collect())
 }
 
 /// A 404 from `HeadObject` has an empty body, so the reference supplies the wording.
