@@ -3,3 +3,4 @@
 # scripts/fetch-models.sh. Pin with AWS_SDK_RUST_REF for a reproducible build.
 /models
 .awsc-model-index.json
+.DS_Store
