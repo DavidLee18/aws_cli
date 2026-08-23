@@ -6,6 +6,7 @@
 //! carries pagination, waiters, and endpoint rulesets as traits.
 
 pub mod custom_surface;
+pub mod db;
 pub mod close_matches;
 pub mod command_table;
 pub mod customizations;

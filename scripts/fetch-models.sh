@@ -81,3 +81,9 @@ for svc in "${services[@]}"; do
   fetch_one "$svc" || exit 1
 done
 echo "models written to ${DEST}"
+
+# Compile the catalogue into the mapped container the CLI actually reads. Without this
+# the binary silently falls back to parsing a whole JSON model per invocation, which
+# still works but costs 20-140ms of startup instead of 2-6ms.
+echo "compiling ${DEST}/models.bin"
+cargo run --release -q -p aws-cli-model --bin compile-models -- "${DEST}"

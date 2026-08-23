@@ -329,7 +329,7 @@ fn run() -> Result<ExitCode, Failure> {
     // become the printed document.
     if let Some(path) = &outfile {
         let response = client.call_operation_raw(op_id.name(), op, input_shape, input.as_ref())?;
-        std::fs::write(path, &response.bytes)
+        std::fs::write(path, response.bytes())
             .map_err(|e| Failure::new(exit::GENERAL_ERROR, format!("{path}: {e}")))?;
         let document = match output_shape {
             Some(shape) => aws_cli_protocol::http_binding::bind_output_headers(
@@ -445,6 +445,13 @@ pub fn now_unix() -> i64 {
 /// directory and reused, and rebuilt whenever a lookup misses.
 pub fn load_model(cli_service: &str) -> Result<Model, String> {
     let dir = models_dir();
+
+    // The compiled container: one mapped file, a binary search, and shapes decoded only
+    // as the command reaches them. The JSON path below stays as a fallback for a models
+    // directory that has not been compiled yet.
+    if let Some(model) = Model::from_container(&dir, cli_service) {
+        return Ok(model);
+    }
 
     // The obvious filename, which is right for most services.
     let direct = dir.join(format!("{cli_service}.json"));

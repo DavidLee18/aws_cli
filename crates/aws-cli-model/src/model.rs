@@ -1,10 +1,14 @@
 //! The loaded model: a shape index plus resolution helpers.
 
+use crate::db::{ModelDb, ServiceView};
 use crate::naming;
 use crate::shape::{OperationShape, ServiceShape, Shape, StructureShape};
 use crate::shape_id::ShapeId;
+use elsa::FrozenMap;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::path::Path;
+use std::sync::OnceLock;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ModelError {
@@ -36,8 +40,7 @@ pub const UNIT_SHAPE: &str = "smithy.api#Unit";
 /// behave like their plain counterparts. `Unit` is deliberately *not* injected: it means
 /// "no value", and [`Model::operation_input`]/[`Model::operation_output`] special-case it
 /// to `None` — an empty structure here would defeat that.
-fn inject_prelude(shapes: &mut HashMap<ShapeId, Shape>) {
-    const PRELUDE: &[(&str, fn() -> Shape)] = &[
+const PRELUDE: &[(&str, fn() -> Shape)] = &[
         ("smithy.api#Blob", || Shape::Blob(Default::default())),
         ("smithy.api#Boolean", || Shape::Boolean(Default::default())),
         ("smithy.api#PrimitiveBoolean", || Shape::Boolean(Default::default())),
@@ -58,11 +61,69 @@ fn inject_prelude(shapes: &mut HashMap<ShapeId, Shape>) {
         ("smithy.api#BigDecimal", || Shape::BigDecimal(Default::default())),
         ("smithy.api#Timestamp", || Shape::Timestamp(Default::default())),
         ("smithy.api#Document", || Shape::Document(Default::default())),
-    ];
+];
+
+fn inject_prelude(shapes: &mut HashMap<ShapeId, Shape>) {
     for (id, make) in PRELUDE {
         let id = ShapeId::parse(id).expect("prelude ids are valid");
         shapes.entry(id).or_insert_with(make);
     }
+}
+
+/// The prelude shape for `id`, if it names one.
+///
+/// The lazy store needs this because prelude shapes are never written into a model file —
+/// they are implicit, and ~14,000 members target them directly.
+fn prelude_shape(id: &ShapeId) -> Option<Shape> {
+    PRELUDE.iter().find(|(name, _)| *name == id.as_str()).map(|(_, make)| make())
+}
+
+/// Where a model's shapes come from.
+///
+/// `Eager` is the whole document parsed up front, which is what tests and the model
+/// compiler use. `Lazy` reads a shape's JSON out of the mapped container and decodes it on
+/// first use — for a single command that is a couple of hundred shapes instead of ~15,000.
+enum Store {
+    Eager(HashMap<ShapeId, Shape>),
+    Lazy { view: ServiceView<'static>, cache: FrozenMap<ShapeId, Box<Shape>> },
+}
+
+impl std::fmt::Debug for Store {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Store::Eager(shapes) => write!(f, "Eager({} shapes)", shapes.len()),
+            Store::Lazy { .. } => write!(f, "Lazy(mapped container)"),
+        }
+    }
+}
+
+impl Store {
+    fn get(&self, id: &ShapeId) -> Option<&Shape> {
+        match self {
+            Store::Eager(shapes) => shapes.get(id),
+            Store::Lazy { view, cache } => {
+                if let Some(shape) = cache.get(id) {
+                    return Some(shape);
+                }
+                let shape = match view.shape_json(id.as_str()) {
+                    Some(json) => serde_json::from_str::<Shape>(json).ok()?,
+                    None => prelude_shape(id)?,
+                };
+                // `FrozenMap` hands back a reference that outlives the insert, which is
+                // what lets `Model::shape` keep taking `&self` while decoding on demand.
+                Some(cache.insert(id.clone(), Box::new(shape)))
+            }
+        }
+    }
+}
+
+/// The container, opened once for the process.
+///
+/// The path is fixed by the first caller. A CLI invocation talks to one catalogue, and
+/// making the map static is what lets a [`ServiceView`] be `'static`.
+fn container(path: &Path) -> Option<&'static ModelDb> {
+    static DB: OnceLock<Option<ModelDb>> = OnceLock::new();
+    DB.get_or_init(|| ModelDb::open(path).ok()).as_ref()
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,7 +137,7 @@ struct RawModel {
 /// A single AWS service model, loaded from one Smithy JSON AST file.
 #[derive(Debug)]
 pub struct Model {
-    shapes: HashMap<ShapeId, Shape>,
+    store: Store,
     service_id: ShapeId,
     /// Operation shape id keyed by the CLI-facing kebab-case name
     /// (`get-caller-identity` -> `com.amazonaws.sts#GetCallerIdentity`).
@@ -87,6 +148,28 @@ impl Model {
     pub fn from_json(bytes: &[u8]) -> Result<Self, ModelError> {
         let raw: RawModel = serde_json::from_slice(bytes)?;
         Self::from_shapes(raw.shapes)
+    }
+
+    /// Load one service out of the compiled container, decoding shapes on demand.
+    ///
+    /// Returns `None` when the container is missing or does not carry this service, so
+    /// callers can fall back to the JSON models.
+    pub fn from_container(models_dir: &Path, cli_service: &str) -> Option<Model> {
+        let db = container(&models_dir.join("models.bin"))?;
+        let view = db.service(cli_service)?;
+        let service_id = ShapeId::parse(view.service_id()?).ok()?;
+        let operations_by_cli_name = view
+            .operation_names()
+            .filter_map(|name| {
+                let id = ShapeId::parse(view.operation_shape_id(name)?).ok()?;
+                Some((name.to_string(), id))
+            })
+            .collect();
+        Some(Model {
+            store: Store::Lazy { view, cache: FrozenMap::new() },
+            service_id,
+            operations_by_cli_name,
+        })
     }
 
     fn from_shapes(mut shapes: HashMap<ShapeId, Shape>) -> Result<Self, ModelError> {
@@ -103,7 +186,8 @@ impl Model {
             n => return Err(ModelError::MultipleServices(n)),
         };
 
-        let mut model = Model { shapes, service_id, operations_by_cli_name: HashMap::new() };
+        let mut model =
+            Model { store: Store::Eager(shapes), service_id, operations_by_cli_name: HashMap::new() };
         model.operations_by_cli_name = model.build_operation_index()?;
         Ok(model)
     }
@@ -124,13 +208,13 @@ impl Model {
             if !seen.insert(rid.clone()) {
                 continue;
             }
-            let Some(Shape::Resource(res)) = self.shapes.get(&rid) else { continue };
+            let Some(Shape::Resource(res)) = self.store.get(&rid) else { continue };
             queue.extend(res.all_operations().map(|r| r.target.clone()));
             resources.extend(res.resources.iter().map(|r| r.target.clone()));
         }
 
         for op_id in queue {
-            if !self.shapes.contains_key(&op_id) {
+            if self.store.get(&op_id).is_none() {
                 return Err(ModelError::Dangling(op_id));
             }
             index.insert(naming::to_cli_name(op_id.name()), op_id);
@@ -143,7 +227,7 @@ impl Model {
     }
 
     pub fn service(&self) -> Result<&ServiceShape, ModelError> {
-        match self.shapes.get(&self.service_id) {
+        match self.store.get(&self.service_id) {
             Some(Shape::Service(s)) => Ok(s),
             _ => Err(ModelError::NoService),
         }
@@ -175,13 +259,13 @@ impl Model {
     }
 
     pub fn shape(&self, id: &ShapeId) -> Option<&Shape> {
-        self.shapes.get(id)
+        self.store.get(id)
     }
 
     /// Resolve a reference, erroring rather than returning `None` — a dangling target
     /// means the model itself is malformed, which callers can't meaningfully recover from.
     pub fn resolve(&self, id: &ShapeId) -> Result<&Shape, ModelError> {
-        self.shapes.get(id).ok_or_else(|| ModelError::Dangling(id.clone()))
+        self.store.get(id).ok_or_else(|| ModelError::Dangling(id.clone()))
     }
 
     pub fn operation_names(&self) -> impl Iterator<Item = &str> {
