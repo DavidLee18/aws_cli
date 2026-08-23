@@ -36,35 +36,39 @@ and never conclude from n=1.
 | Compiled model container (mmap) | `ec2` startup 147ms -> 10.7ms; `s3api` 26ms -> 14ms |
 | SSO role-credential caching | `sts get-caller-identity` 1.10s -> 0.24s (reference 0.57s) |
 | Parallel prefix listing | `s3 ls --recursive` 25k keys 3.05s -> ~1.0s (reference 3.52s) |
+| Batched `DeleteObjects` | `rm --recursive` over 2,500 objects: 2,504 requests -> 7 |
 
 Small-file uploads (300 files) went from 4.38s — 25% *slower* than the reference — to 1.73s,
 roughly twice as fast.
 
 ## Queued
 
-### 1. Batch deletes with `DeleteObjects`
+### 1. ~~Batch deletes with `DeleteObjects`~~ — done
 
-Highest-value item outstanding.
+Landed. `rm --recursive`, `sync --delete` and s3-to-s3 `mv` now go through `s3::delete`,
+which sends up to 1,000 keys per POST. Deleting 2,500 objects fell from 2,504 requests
+(4 listing + 2,500 deletes) to 7. The reference still issues one request per key.
 
-`s3 rm --recursive` issues one `DeleteObject` per key (`transfer.rs:1933`, and the
-`"DeleteObject"` call around `transfer.rs:933`). Deleting 3,902 objects meant 3,902
-requests. S3's `DeleteObjects` accepts **1000 keys per request**, so that becomes 4.
+Two things that came out of it and are worth keeping in mind:
 
-The reference does not batch either — `customizations/s3/s3handler.py:588` maps
-`delete_object`, singular — so this is a place to beat it rather than match it. Applies to
-`sync --delete` as well as `rm --recursive`.
+- **A 200 from `DeleteObjects` is not success.** The body carries `<Deleted>` and `<Error>`
+  entries per key, so a request that refused one key of a thousand still returns 200. Every
+  key is reconciled against the response individually, and a key the response mentions in
+  *neither* list is reported as a failure — a truncated response must not read as a
+  thousand successful deletions.
+- **s3-to-s3 `mv` was discarding its delete result entirely** (`let _ = source_conn.send(...)`).
+  A move that copied and then failed to remove the source printed `move:` and exited 0. It
+  now reports the failure and exits non-zero. This was a correctness bug the batching work
+  only happened to walk into.
 
-Notes for implementing:
-- `DeleteObjects` is a POST to `/?delete` with an XML body and a `Content-MD5` header
-  (required, unless a checksum header is supplied instead).
-- The response is per-key: it reports `<Deleted>` and `<Error>` entries, and a 200 can still
-  carry failures. Partial failure must map onto the existing per-item outcome reporting,
-  not be treated as whole-request success — the silent-success failure mode this codebase
-  keeps hitting.
-- `--quiet` on the API suppresses the `<Deleted>` list; the CLI needs the keys to print
-  `delete: s3://...` lines, so do not set it.
+### 2. Next
 
-### 2. Deferred until a fat pipe is available
+Nothing is queued ahead of the deferred items below. The obvious remaining request-count
+targets have been taken: listing is parallel, deletes are batched, credentials are cached.
+What is left is either bandwidth-bound (and unmeasurable here, see below) or a matter of
+API coverage rather than performance.
+
+### 3. Deferred until a fat pipe is available
 
 These are real but unmeasurable on the current link. Do not implement them blind:
 
@@ -74,7 +78,7 @@ These are real but unmeasurable on the current link. Do not implement them blind
 
 Validate on EC2 in-region, or any link well above 36 Mbps.
 
-### 3. Smaller
+### 4. Smaller
 
 - `HeadBucket` 404s produce `An error occurred (Unknown) ... :` with an empty message.
   `missing_key_message` handles the `HeadObject` equivalent; `HeadBucket` has no counterpart.

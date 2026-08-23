@@ -14,6 +14,7 @@
 
 pub use super::conn::Conn;
 use aws_cli_runtime::http;
+use super::delete;
 use super::pool::Pool;
 use super::progress::Progress;
 use super::{param_error, uri::Location, xml};
@@ -926,35 +927,24 @@ fn execute_deletes(
     progress: &Progress,
     outcome: &Outcome,
 ) {
-    let pool = Pool::new(options.concurrency);
-    pool.run(items, options.concurrency.is_none(), |item| {
-        let result = conn
-            .send_checked(
-                "DeleteObject",
-                "DELETE",
-                &conn.object_path(&item.source),
-                "",
-                &[],
-                http::Body::Empty,
-            )
-            .map(|_| ());
-        let target = format!("s3://{}", display_key(conn, &item.source));
+    let keys: Vec<String> = items.iter().map(|i| i.source.clone()).collect();
+    delete::batched(conn, &keys, options.concurrency, |key, result| {
+        let target = format!("s3://{}", display_key(conn, key));
         match result {
             Ok(()) => {
                 if !options.quiet && !options.only_show_errors {
                     progress.println(&format!("delete: {target}"));
                 }
-                progress.finish_file();
             }
-            Err(failure) => {
+            Err(message) => {
                 outcome.failed.fetch_add(1, Ordering::Relaxed);
                 if !options.quiet {
                     progress.clear();
-                    eprintln!("delete failed: {target} {}", failure.message());
+                    eprintln!("delete failed: {target} {message}");
                 }
-                progress.finish_file();
             }
         }
+        progress.finish_file();
     });
 }
 
@@ -1866,8 +1856,17 @@ fn copy(
         items.iter().partition(|i| i.size >= MULTIPART_THRESHOLD);
 
     let pool = Pool::new(options.concurrency);
+    // For a move, the sources of the copies that succeeded, deleted together once the
+    // copying is done. Deleting per object would be one request per key; more
+    // importantly, the old code discarded the delete's result entirely, so a move that
+    // copied and then failed to remove the source still printed `move:` and exited 0.
+    let moved: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
     for item in large {
         let result = multipart_copy(conn, source_conn, source_bucket, item, options, &pool, &progress);
+        if verb == Verb::Move && result.is_ok() {
+            moved.lock().expect("moved keys mutex").push(item.source.clone());
+        }
         finish(
             &progress,
             &outcome,
@@ -1877,10 +1876,6 @@ fn copy(
             &format!("s3://{source_bucket}/{}", item.source),
             &format!("s3://{}", display_key(conn, &item.dest)),
         );
-        if verb == Verb::Move {
-            let _ =
-                source_conn.send("DELETE", &source_conn.object_path(&item.source), "", &[], http::Body::Empty);
-        }
     }
 
     pool.run(&small, options.concurrency.is_none(), |item| {
@@ -1894,11 +1889,24 @@ fn copy(
             progress.add_bytes(item.size);
             Ok(())
         })();
+        if verb == Verb::Move && result.is_ok() {
+            moved.lock().expect("moved keys mutex").push(item.source.clone());
+        }
         finish(&progress, &outcome, options, word, result,
             &format!("s3://{source_bucket}/{}", item.source),
             &format!("s3://{}", display_key(conn, &item.dest)));
-        if verb == Verb::Move {
-            let _ = source_conn.send("DELETE", &source_conn.object_path(&item.source), "", &[], http::Body::Empty);
+    });
+
+    let mut moved = moved.into_inner().expect("moved keys mutex");
+    moved.sort();
+    delete::batched(source_conn, &moved, options.concurrency, |key, result| {
+        if let Err(message) = result {
+            outcome.failed.fetch_add(1, Ordering::Relaxed);
+            report_failure(
+                &progress,
+                options,
+                &format!("delete failed: s3://{source_bucket}/{key} {message}"),
+            );
         }
     });
 
@@ -1927,24 +1935,20 @@ fn remove(conn: &Conn, key: &str, options: &Options) -> Result<ExitCode, Failure
         return Ok(exit::code(exit::SUCCESS));
     }
 
-    let pool = Pool::new(options.concurrency);
-    pool.run(&items, options.concurrency.is_none(), |item| {
-        let result = conn
-            .send_checked("DeleteObject", "DELETE", &conn.object_path(&item.source), "", &[], http::Body::Empty)
-            .map(|_| ());
-        let target = format!("s3://{}", display_key(conn, &item.source));
+    let keys: Vec<String> = items.iter().map(|i| i.source.clone()).collect();
+    delete::batched(conn, &keys, options.concurrency, |key, result| {
+        let target = format!("s3://{}", display_key(conn, key));
         match result {
             Ok(()) => {
                 // `delete:` lines carry no destination.
                 report(&progress, options, &format!("delete: {target}"));
-                progress.finish_file();
             }
-            Err(failure) => {
+            Err(message) => {
                 outcome.failed.fetch_add(1, Ordering::Relaxed);
-                report_failure(&progress, options, &format!("delete failed: {target} {}", failure.message()));
-                progress.finish_file();
+                report_failure(&progress, options, &format!("delete failed: {target} {message}"));
             }
         }
+        progress.finish_file();
     });
 
     progress.clear();

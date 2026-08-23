@@ -3,10 +3,13 @@
 Not a conformance oracle -- it exists so uploads, downloads, multipart and ranged reads
 can be verified for real rather than only in dry-run.
 """
-import re, sys, threading, hashlib, time, os
+import re, sys, threading, hashlib, time, os, base64
+from xml.sax.saxutils import unescape
 
 # Optional artificial latency, so concurrency shows up as wall-clock time.
 DELAY = float(os.environ.get('FAKE_S3_DELAY', '0'))
+# Any key containing this string is refused by DeleteObjects, to exercise partial failure.
+DENY_KEY = os.environ.get('FAKE_S3_DENY_KEY', '')
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
@@ -45,14 +48,26 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_one_request(self):
         with LOCK:
-            REQUESTS[0] += 1
             INFLIGHT[0] += 1
             PEAK[0] = max(PEAK[0], INFLIGHT[0])
         try:
             if DELAY:
                 time.sleep(DELAY)
             BaseHTTPRequestHandler.handle_one_request(self)
+            # The last call on a kept-alive connection reads EOF and returns without
+            # parsing anything, leaving `self.command` set to the *previous* request's
+            # method. Counting that returns one phantom request per connection,
+            # attributed to whatever came last -- which read as the client sending every
+            # request twice. An empty request line is the only reliable "nothing was
+            # read" signal.
+            if not self.raw_requestline:
+                return
+            # The instrumentation endpoints are not workload; counting them means every
+            # measurement includes the act of measuring.
+            if self.path.startswith('/__'):
+                return
             with LOCK:
+                REQUESTS[0] += 1
                 METHODS[self.command] = METHODS.get(self.command, 0) + 1
                 if self.close_connection:
                     CLOSED_BY_SERVER[0] += 1
@@ -111,7 +126,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         bucket, key, q = self._split()
         length = int(self.headers.get('Content-Length', 0))
-        if length: self.rfile.read(length)
+        payload = self.rfile.read(length) if length else b''
+        if 'delete' in q:
+            return self._delete_objects(bucket, payload)
         with LOCK:
             if 'uploads' in q:
                 COUNTER[0] += 1
@@ -132,6 +149,34 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, body, {'Content-Type': 'application/xml'})
         self._error(400, 'BadRequest', 'unsupported POST')
 
+    def _delete_objects(self, bucket, payload):
+        """DeleteObjects. Content-MD5 is verified, because that is the part a client
+        gets wrong silently -- S3 rejects a bad digest and we should too."""
+        want = self.headers.get('Content-MD5')
+        if not want:
+            return self._error(400, 'MissingContentMD5', 'Missing required header Content-MD5.')
+        got = base64.b64encode(hashlib.md5(payload).digest()).decode()
+        if want != got:
+            return self._error(400, 'BadDigest', 'The Content-MD5 you specified did not match.')
+        keys = re.findall(r'<Key>(.*?)</Key>', payload.decode('utf-8', 'replace'), re.S)
+        keys = [unescape(k) for k in keys]
+        if os.environ.get('FAKE_S3_LOG_DELETE'):
+            print('DeleteObjects keys=%d' % len(keys), file=sys.stderr, flush=True)
+        parts = ['<?xml version="1.0"?><DeleteResult>']
+        with LOCK:
+            for k in keys:
+                # FAKE_S3_DENY_KEY exercises the partial-failure path: a 200 whose body
+                # reports some keys as errors.
+                if DENY_KEY and DENY_KEY in k:
+                    parts.append('<Error><Key>%s</Key><Code>AccessDenied</Code>'
+                                 '<Message>Access Denied</Message></Error>' % xml_escape(k))
+                    continue
+                OBJECTS.pop((bucket, k), None)
+                MTIMES.pop((bucket, k), None)
+                parts.append('<Deleted><Key>%s</Key></Deleted>' % xml_escape(k))
+        parts.append('</DeleteResult>')
+        self._send(200, ''.join(parts).encode(), {'Content-Type': 'application/xml'})
+
     def do_HEAD(self):
         bucket, key, q = self._split()
         with LOCK:
@@ -149,10 +194,9 @@ class Handler(BaseHTTPRequestHandler):
             # Populate N synthetic objects so listing can be exercised without uploading
             # anything: /__seed?n=100000&bucket=b
             #
-            # Note this server never truncates a listing, while real S3 caps a page at
-            # 1000 keys. A big seeded listing therefore arrives in one response, so it is
-            # useful for exercising the parse path but is NOT a model of what listing
-            # costs against S3, where the same work is N/1000 sequential round trips.
+            # Keys are laid out as p/000000/, p/000001/, ... -- 1000 per sub-prefix --
+            # so a seeded bucket has the sub-prefix structure that parallel listing
+            # shards on. A flat keyspace would exercise only the sequential fallback.
             q = parse_qs(urlparse(self.path).query)
             n = int(q.get('n', ['1000'])[0])
             bucket = q.get('bucket', ['b'])[0]
@@ -163,10 +207,10 @@ class Handler(BaseHTTPRequestHandler):
                     MTIMES[(bucket, key)] = 1700000000
             return self._send(200, b'seeded %d' % n)
         if self.path.startswith('/__stats'):
-            # Reported before this request is counted out, so subtract the /__stats call
-            # itself and the connection it arrived on.
+            # `/__` requests are excluded from the request and method counters, but the
+            # connection this one arrived on was counted in setup(), so discount it.
             body = ('connections=%d requests=%d server_closed=%d methods=%s'
-                    % (CONNECTIONS[0] - 1, REQUESTS[0] - 1, CLOSED_BY_SERVER[0],
+                    % (CONNECTIONS[0] - 1, REQUESTS[0], CLOSED_BY_SERVER[0],
                        sorted((str(k), v) for k, v in METHODS.items()))).encode()
             return self._send(200, body)
         if self.path.startswith('/__peak'):
