@@ -311,6 +311,7 @@ impl<'a> Client<'a> {
         if response.status >= 400 {
             let (code, message) = dispatch::parse_error(
                 self.protocol,
+                response.status,
                 &response.text(),
                 response.header("x-amzn-errortype").as_deref(),
             );
@@ -424,6 +425,7 @@ impl<'a> Client<'a> {
                         Some(
                             dispatch::parse_error(
                                 self.protocol,
+                                response.status,
                                 &response.text(),
                                 response.header("x-amzn-errortype").as_deref(),
                             )
@@ -459,6 +461,7 @@ impl<'a> Client<'a> {
         if response.status >= 400 {
             let (code, message) = dispatch::parse_error(
                 self.protocol,
+                response.status,
                 &response.text(),
                 response.header("x-amzn-errortype").as_deref(),
             );

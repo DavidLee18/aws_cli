@@ -220,10 +220,21 @@ fn parse_body(
 /// Extract `(code, message)` from an error response.
 pub fn parse_error(
     protocol: Protocol,
+    status: u16,
     body: &str,
     error_type_header: Option<&str>,
 ) -> (String, String) {
-    let fallback = || ("Unknown".to_string(), body.trim().to_string());
+    // A body-less failure — every HEAD operation — carries the status and nothing else.
+    // Reporting that as `(Unknown)` with an empty message describes nothing; the status
+    // is the only fact available, so use it.
+    let fallback = || {
+        let text = body.trim();
+        if text.is_empty() {
+            (status.to_string(), aws_cli_runtime::http::reason_phrase(status).to_string())
+        } else {
+            ("Unknown".to_string(), text.to_string())
+        }
+    };
 
     match protocol {
         Protocol::AwsQuery | Protocol::Ec2Query | Protocol::RestXml => match xml::parse_error(body)

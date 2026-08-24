@@ -137,7 +137,10 @@ pub fn service_error(operation: &str, response: &aws_cli_runtime::http::Response
     let (code, message) = match aws_cli_protocol::xml::parse_error(&text) {
         Some(e) => (e.code, e.message),
         // HeadObject and friends answer with an empty body, so the status is all there is.
-        None => (response.status.to_string(), String::new()),
+        None => (
+            response.status.to_string(),
+            aws_cli_runtime::http::reason_phrase(response.status).to_string(),
+        ),
     };
     let mut failure = Failure::new(
         exit::CLIENT_ERROR,

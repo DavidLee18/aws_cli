@@ -34,6 +34,7 @@ hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", 
 http-body-util = "0.1"
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "native-tokio", "tls12", "aws-lc-rs"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "aws-lc-rs"] }
+rustls-pemfile = "2"
 bytes = "1"
 http = "1"
 tracing = "0.1"

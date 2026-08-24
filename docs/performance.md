@@ -61,12 +61,18 @@ Two things that came out of it and are worth keeping in mind:
   now reports the failure and exits non-zero. This was a correctness bug the batching work
   only happened to walk into.
 
-### 2. Next
+### 2. Coverage gaps
 
-Nothing is queued ahead of the deferred items below. The obvious remaining request-count
-targets have been taken: listing is parallel, deletes are batched, credentials are cached.
-What is left is either bandwidth-bound (and unmeasurable here, see below) or a matter of
-API coverage rather than performance.
+Not performance work, but the pivot asked for as much of the AWS API as possible.
+
+- **Event streams are not implemented at all.** No `vnd.amazon.eventstream` framing
+  anywhere in the tree, which means `kinesis subscribe-to-shard`, Bedrock response
+  streaming, Transcribe streaming and `s3api select-object-content` cannot be called.
+  This is the largest functional hole.
+- **`rpcv2Cbor` is not implemented.** Exactly one service speaks only it
+  (`partnercentral-revenue-measurement`) and is therefore unreachable; 15 more offer it
+  alongside a JSON protocol and currently fall back to JSON. CBOR is the more compact
+  encoding, so this is a bytes-on-the-wire win as well as a coverage one.
 
 ### 3. Deferred until a fat pipe is available
 
@@ -78,10 +84,19 @@ These are real but unmeasurable on the current link. Do not implement them blind
 
 Validate on EC2 in-region, or any link well above 36 Mbps.
 
-### 4. Smaller
+### 4. ~~Smaller~~ — done
 
-- `HeadBucket` 404s produce `An error occurred (Unknown) ... :` with an empty message.
-  `missing_key_message` handles the `HeadObject` equivalent; `HeadBucket` has no counterpart.
+- **Body-less failures.** Every HEAD operation answers a failure with a status and no
+  body, so the error parsers fell through to `An error occurred (Unknown) ... :` with an
+  empty message. They now use the status and its reason phrase:
+  `An error occurred (404) when calling the HeadBucket operation: Not Found`.
+- **`--no-verify-ssl` and `--ca-bundle`** were refused rather than implemented (this
+  predates the transport rewrite -- the ureq version refused them identically). Both now
+  work, built on a hand-made `rustls::ClientConfig`; the default path still uses
+  hyper-rustls's native-root loading unchanged.
+- **Connect errors carry their cause.** hyper renders a failed connect as
+  `client error (Connect)` and nothing else. The `source()` chain is now appended, which
+  is the difference between that and `invalid peer certificate: UnknownIssuer`.
 
 ## Rejected, with reasons
 

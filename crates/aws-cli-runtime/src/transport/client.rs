@@ -124,9 +124,10 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 
 /// The process-wide client.
 ///
-/// Built from the first [`Transport`] it sees: the connect timeout lives on the
-/// connector, so it is fixed for the process. Read timeouts are applied per request and
-/// stay adjustable.
+/// Built from the first [`Transport`] it sees: the connect timeout and the TLS
+/// configuration live on the connector, so they are fixed for the process. Read timeouts
+/// are applied per request and stay adjustable. A single CLI invocation resolves the
+/// global arguments once, so every caller passes the same values.
 fn client(transport: &Transport) -> Result<&'static HttpsClient, RuntimeError> {
     static CLIENT: OnceLock<Result<HttpsClient, String>> = OnceLock::new();
     CLIENT
@@ -148,17 +149,121 @@ fn build_client(transport: &Transport) -> Result<HttpsClient, String> {
     http.set_nodelay(true);
     http.enforce_http(false);
 
-    let tls = hyper_rustls::HttpsConnectorBuilder::new()
-        .with_native_roots()
-        .map_err(|e| format!("could not load the system certificate store: {e}"))?
-        .https_or_http()
-        .enable_all_versions()
-        .wrap_connector(http);
+    // The common case keeps hyper-rustls's own native-root loading. `--ca-bundle` and
+    // `--no-verify-ssl` both need a hand-built config, so they take the other branch.
+    let tls = if transport.verify_ssl && transport.ca_bundle.is_none() {
+        hyper_rustls::HttpsConnectorBuilder::new()
+            .with_native_roots()
+            .map_err(|e| format!("could not load the system certificate store: {e}"))?
+            .https_or_http()
+            .enable_all_versions()
+            .wrap_connector(http)
+    } else {
+        hyper_rustls::HttpsConnectorBuilder::new()
+            .with_tls_config(tls_config(transport)?)
+            .https_or_http()
+            .enable_all_versions()
+            .wrap_connector(http)
+    };
 
     Ok(Client::builder(TokioExecutor::new())
         .pool_max_idle_per_host(POOL_MAX_IDLE_PER_HOST)
         .pool_idle_timeout(POOL_IDLE_TIMEOUT)
         .build(tls))
+}
+
+/// The TLS configuration for `--ca-bundle` and `--no-verify-ssl`.
+fn tls_config(transport: &Transport) -> Result<rustls::ClientConfig, String> {
+    let mut roots = rustls::RootCertStore::empty();
+    // With no bundle the store stays empty, which is only reachable under
+    // `--no-verify-ssl`, where the verifier never consults it.
+    if let Some(path) = &transport.ca_bundle {
+        let file = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
+        let mut reader = std::io::BufReader::new(file);
+        let mut added = 0usize;
+        for cert in rustls_pemfile::certs(&mut reader) {
+            let cert = cert.map_err(|e| format!("{path}: {e}"))?;
+            roots.add(cert).map_err(|e| format!("{path}: {e}"))?;
+            added += 1;
+        }
+        // An empty or non-PEM file would otherwise produce a store that trusts nothing,
+        // and every request would fail with an opaque certificate error rather than
+        // naming the real problem.
+        if added == 0 {
+            return Err(format!("{path}: no PEM certificates found"));
+        }
+    }
+
+    // Named explicitly rather than relying on the process-wide default having been
+    // installed already: that only holds because `build_client` installs it a few lines
+    // earlier, which is an ordering dependency nothing states.
+    let provider = rustls::crypto::CryptoProvider::get_default()
+        .cloned()
+        .unwrap_or_else(|| std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider()));
+    let mut config = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .map_err(|e| format!("could not build a TLS configuration: {e}"))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+
+    if !transport.verify_ssl {
+        config.dangerous().set_certificate_verifier(std::sync::Arc::new(NoVerification(provider)));
+    }
+    Ok(config)
+}
+
+/// The `--no-verify-ssl` certificate verifier: accepts any chain.
+///
+/// Signature checking is left intact — only the identity of the peer goes unverified,
+/// which is what the flag asks for. This makes the connection trivially interceptable,
+/// so it exists for talking to test endpoints with self-signed certificates and nothing
+/// else.
+#[derive(Debug)]
+struct NoVerification(std::sync::Arc<rustls::crypto::CryptoProvider>);
+
+impl rustls::client::danger::ServerCertVerifier for NoVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
+    }
 }
 
 /// A byte stream whose exact length is known up front.
@@ -230,6 +335,26 @@ fn build_hyper_request(
     builder.body(body).map_err(|e| RuntimeError::Http(e.to_string()))
 }
 
+/// A connection error with its cause chain.
+///
+/// hyper's own `Display` for a connect failure is just `client error (Connect)`, which
+/// hides the thing the user needs — the certificate was rejected, the name did not
+/// resolve, the port refused. The cause is always one or two `source()` links down.
+fn describe(error: &hyper_util::client::legacy::Error) -> String {
+    use std::error::Error;
+    let mut message = error.to_string();
+    let mut source: Option<&(dyn Error + 'static)> = error.source();
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !message.contains(&text) {
+            message.push_str(": ");
+            message.push_str(&text);
+        }
+        source = cause.source();
+    }
+    message
+}
+
 fn collect_headers(parts: &hyper::http::response::Parts) -> Vec<(String, String)> {
     parts
         .headers
@@ -238,32 +363,12 @@ fn collect_headers(parts: &hyper::http::response::Parts) -> Vec<(String, String)
         .collect()
 }
 
-fn check_unsupported(transport: &Transport) -> Result<(), RuntimeError> {
-    // Both of these change certificate verification. Rather than silently ignoring them
-    // — which would give a false sense of what the request did — an unsupported
-    // combination is reported.
-    if !transport.verify_ssl {
-        return Err(RuntimeError::Http(
-            "--no-verify-ssl is not supported yet; refusing rather than silently verifying"
-                .to_string(),
-        ));
-    }
-    if transport.ca_bundle.is_some() {
-        return Err(RuntimeError::Http(
-            "--ca-bundle is not supported yet; refusing rather than silently ignoring it"
-                .to_string(),
-        ));
-    }
-    Ok(())
-}
-
 /// Send a request and read the whole response body into memory.
 pub fn send(req: &Request, transport: &Transport) -> Result<Response, RuntimeError> {
     runtime().block_on(send_async(req, transport))
 }
 
 pub async fn send_async(req: &Request, transport: &Transport) -> Result<Response, RuntimeError> {
-    check_unsupported(transport)?;
     let client = client(transport)?;
     let hyper_body = into_hyper_body(req.body.clone()).await?;
     let request = build_hyper_request(req, hyper_body)?;
@@ -271,7 +376,7 @@ pub async fn send_async(req: &Request, transport: &Transport) -> Result<Response
     let response = tokio::time::timeout(transport.read_timeout(), client.request(request))
         .await
         .map_err(|_| RuntimeError::Http("request timed out".to_string()))?
-        .map_err(|e| RuntimeError::Http(e.to_string()))?;
+        .map_err(|e| RuntimeError::Http(describe(&e)))?;
 
     let (parts, body) = response.into_parts();
     let headers = collect_headers(&parts);
@@ -314,8 +419,7 @@ pub fn send_to_writer<W: std::io::Write>(
     sink: &mut W,
 ) -> Result<ResponseHead, RuntimeError> {
     runtime().block_on(async {
-        check_unsupported(transport)?;
-        let client = client(transport)?;
+            let client = client(transport)?;
 
         let hyper_body = into_hyper_body(req.body.clone()).await?;
         let request = build_hyper_request(req, hyper_body)?;
@@ -323,7 +427,7 @@ pub fn send_to_writer<W: std::io::Write>(
         let response = tokio::time::timeout(transport.read_timeout(), client.request(request))
             .await
             .map_err(|_| RuntimeError::Http("request timed out".to_string()))?
-            .map_err(|e| RuntimeError::Http(e.to_string()))?;
+            .map_err(|e| RuntimeError::Http(describe(&e)))?;
 
         let (parts, mut body) = response.into_parts();
         let headers = collect_headers(&parts);
@@ -350,4 +454,42 @@ pub fn send_to_writer<W: std::io::Write>(
 
         Ok(ResponseHead { status, headers })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn with_bundle(path: &str) -> Result<rustls::ClientConfig, String> {
+        tls_config(&Transport {
+            verify_ssl: true,
+            ca_bundle: Some(path.to_string()),
+            ..Transport::default()
+        })
+    }
+
+    #[test]
+    fn a_missing_ca_bundle_names_the_file() {
+        let error = with_bundle("/nonexistent/ca.pem").unwrap_err();
+        assert!(error.contains("/nonexistent/ca.pem"), "{error}");
+    }
+
+    /// A bundle that parses to nothing would otherwise build a store trusting nobody,
+    /// and every request would fail with an opaque certificate error instead.
+    #[test]
+    fn a_ca_bundle_with_no_certificates_is_rejected() {
+        let path = std::env::temp_dir().join("awsc-empty-bundle.pem");
+        std::fs::write(&path, b"not a certificate\n").expect("write fixture");
+        let error = with_bundle(path.to_str().expect("utf-8 path")).unwrap_err();
+        assert!(error.contains("no PEM certificates found"), "{error}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `--no-verify-ssl` must not need a bundle to build a usable config.
+    #[test]
+    fn no_verify_ssl_builds_without_roots() {
+        let config =
+            tls_config(&Transport { verify_ssl: false, ..Transport::default() });
+        assert!(config.is_ok());
+    }
 }

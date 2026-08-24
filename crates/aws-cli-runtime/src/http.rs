@@ -135,6 +135,32 @@ fn canonical_query(query: &str) -> String {
     pairs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("&")
 }
 
+/// The status line's reason phrase, for responses that carry no error body.
+///
+/// `HeadBucket` and `HeadObject` answer a failure with a status and nothing else — HEAD
+/// has no body by definition. Without this the error parsers fall through to their
+/// "Unknown" branch and print `An error occurred (Unknown) ... :` with an empty message,
+/// which tells the user nothing about what went wrong.
+pub fn reason_phrase(status: u16) -> &'static str {
+    match status {
+        301 => "Moved Permanently",
+        304 => "Not Modified",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        409 => "Conflict",
+        412 => "Precondition Failed",
+        416 => "Requested Range Not Satisfiable",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        501 => "Not Implemented",
+        503 => "Service Unavailable",
+        _ => "",
+    }
+}
+
 pub fn user_agent() -> String {
     format!("aws-cli-rs/{}", env!("CARGO_PKG_VERSION"))
 }
