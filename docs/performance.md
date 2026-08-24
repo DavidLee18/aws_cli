@@ -104,12 +104,20 @@ Not performance work, but the pivot asked for as much of the AWS API as possible
 - ~~**`rpcv2Cbor` is not implemented.**~~ Done. `partnercentral-revenue-measurement`,
   which speaks only CBOR, is now reachable.
 
-  The 15 services that offer CBOR *alongside* a JSON protocol still take the JSON path:
-  `Protocol::TRAIT_TABLE` is consulted in order and `rpcv2Cbor` is last. Moving it up
-  would switch cloudwatch, gamelift, compute-optimizer and the rest onto the more compact
-  encoding — a real bytes-on-the-wire win — but it would also move 15 working services
-  onto a protocol validated against one obscure service and a local test server. Worth
-  doing behind a measurement, not on the way past.
+  `rpcv2Cbor` is now **first** in `Protocol::TRAIT_TABLE`, which is a preference list
+  rather than a lookup, so all 16 services that declare it use it — cloudwatch, gamelift,
+  compute-optimizer, snowball, appstream and the rest, which previously took an
+  `awsJson` path. CBOR is the more compact encoding of the two they offer: integers are
+  integers rather than decimal text, member names are length-prefixed rather than quoted
+  and escaped.
+
+  Confirmed with `scripts/verify-cbor-requests.py`, a decoder written from RFC 8949
+  rather than from the Rust, so a request it can read is evidence rather than a shared
+  bug. All 16 services round-tripped with no problems reported: correct
+  `smithy-protocol`, `Content-Type` and `Accept` headers, the operation in the path, a
+  body that decodes with no trailing bytes, and a CBOR response parsed back. Nested
+  structures, lists, floats and tag-1 timestamps were all exercised through
+  `cloudwatch put-metric-data`.
 
 ### 3. Deferred until a fat pipe is available
 

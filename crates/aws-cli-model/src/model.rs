@@ -386,13 +386,22 @@ pub enum Protocol {
 }
 
 impl Protocol {
+    /// Consulted in order, so this is a preference list rather than a lookup: sixteen
+    /// services declare more than one protocol and the first match wins.
+    ///
+    /// `rpcv2Cbor` is first because it is the most efficient of them. CBOR is a binary
+    /// encoding — integers are integers rather than decimal text, and member names are
+    /// length-prefixed rather than quoted and escaped — so the same request and response
+    /// are materially smaller than the JSON or XML the same services also speak, and
+    /// neither side has to render or scan decimal digits. The services that offer it
+    /// offer it precisely because it is the one they would rather receive.
     const TRAIT_TABLE: &'static [(&'static str, Protocol)] = &[
+        ("smithy.protocols#rpcv2Cbor", Protocol::Rpcv2Cbor),
         ("aws.protocols#awsJson1_0", Protocol::AwsJson1_0),
         ("aws.protocols#awsJson1_1", Protocol::AwsJson1_1),
         ("aws.protocols#restJson1", Protocol::RestJson1),
         ("aws.protocols#restXml", Protocol::RestXml),
         ("aws.protocols#awsQuery", Protocol::AwsQuery),
         ("aws.protocols#ec2Query", Protocol::Ec2Query),
-        ("smithy.protocols#rpcv2Cbor", Protocol::Rpcv2Cbor),
     ];
 }
