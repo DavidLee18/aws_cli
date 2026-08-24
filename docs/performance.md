@@ -65,10 +65,27 @@ Two things that came out of it and are worth keeping in mind:
 
 Not performance work, but the pivot asked for as much of the AWS API as possible.
 
-- **Event streams are not implemented at all.** No `vnd.amazon.eventstream` framing
-  anywhere in the tree, which means `kinesis subscribe-to-shard`, Bedrock response
-  streaming, Transcribe streaming and `s3api select-object-content` cannot be called.
-  This is the largest functional hole.
+- ~~**Event streams are not implemented at all.**~~ Done, for response streams.
+  `vnd.amazon.eventstream` framing, both checksums, indefinite reassembly across reads,
+  and the `eventHeader`/`eventPayload` split. Events print as JSON Lines, flushed per
+  event — a stream that may never end (`logs start-live-tail`) cannot be collected into
+  one document first.
+
+  Seventeen operations the reference removes *only* because it cannot read an event
+  stream are now visible: `kinesis subscribe-to-shard`, `bedrock-runtime converse-stream`
+  and `invoke-model-with-response-stream`, `lambda invoke-with-response-stream`,
+  `logs get-log-object`, the six bedrock-agent-runtime ones, and the rest.
+  `data/customizations.json` still records what botocore does — the override lives in
+  `customizations.rs`, with a test asserting every entry names a removal that really
+  exists, so a typo cannot silently do nothing.
+
+  **Still missing: input (duplex) event streams** — `transcribe-streaming`,
+  `polly start-speech-synthesis-stream`, `qbusiness chat`,
+  `bedrock-runtime invoke-model-with-bidirectional-stream`, `lexv2-runtime
+  start-conversation`, and the two sagemaker bidirectional ones. Those need SigV4's
+  rolling per-frame signature and a full-duplex connection, which the blocking transport
+  cannot do. They stay hidden: a command that connects and then cannot send would be
+  worse than one that is absent.
 - ~~**`rpcv2Cbor` is not implemented.**~~ Done. `partnercentral-revenue-measurement`,
   which speaks only CBOR, is now reachable.
 

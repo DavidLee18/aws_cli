@@ -35,7 +35,7 @@ pub fn custom_surface() -> &'static crate::custom_surface::CustomSurface {
     &EMBEDDED_SURFACE
 }
 
-/// Whether the reference removes this command from the service.
+/// Whether this command is hidden.
 pub fn is_removed(service: &str, operation: &str) -> bool {
     EMBEDDED.is_removed(service, operation)
 }
@@ -65,12 +65,38 @@ mod tests {
         assert!(is_removed("ses", "delete-verified-email-address"));
         assert!(is_removed("ses", "verify-email-address"));
         assert!(is_removed("ec2", "import-instance"));
-        assert!(is_removed("logs", "get-log-object"));
-        assert!(is_removed("lambda", "invoke-with-response-stream"));
-        assert!(is_removed("kinesis", "subscribe-to-shard"));
         assert!(!is_removed("ses", "send-email"));
         assert!(!is_removed("ec2", "describe-instances"));
         assert!(!is_removed("s3api", "get-object"));
+    }
+
+    /// The reference removes these because it cannot read an event stream. We can, so
+    /// they stay visible — while the duplex ones, which we genuinely cannot do, do not.
+    #[test]
+    fn keeps_the_event_stream_operations_the_reference_drops() {
+        assert!(!is_removed("kinesis", "subscribe-to-shard"));
+        assert!(!is_removed("lambda", "invoke-with-response-stream"));
+        assert!(!is_removed("logs", "get-log-object"));
+        assert!(!is_removed("bedrock-runtime", "converse-stream"));
+        assert!(!is_removed("bedrock-runtime", "invoke-model-with-response-stream"));
+
+        // Input event streams are duplex and stay removed.
+        assert!(is_removed("bedrock-runtime", "invoke-model-with-bidirectional-stream"));
+        assert!(is_removed("polly", "start-speech-synthesis-stream"));
+        assert!(is_removed("qbusiness", "chat"));
+        assert!(is_removed("lexv2-runtime", "start-conversation"));
+
+        // Every override has to name a removal the reference actually makes, or it is
+        // silently doing nothing — a typo would look exactly like success.
+        for (service, operation) in crate::customizations::EVENT_STREAM_OPERATIONS {
+            assert!(
+                EMBEDDED
+                    .removed_operations
+                    .get(*service)
+                    .is_some_and(|ops| ops.iter().any(|o| o == operation)),
+                "{service} {operation} is not in the reference's removal list"
+            );
+        }
     }
 
     #[test]

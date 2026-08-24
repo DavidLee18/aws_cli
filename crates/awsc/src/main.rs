@@ -347,6 +347,57 @@ fn run() -> Result<ExitCode, Failure> {
         return Ok(exit::code(exit::SUCCESS));
     }
 
+    // An event-stream output is a sequence of documents that arrive over time, not one
+    // document at the end, so it is printed as JSON Lines: one event per line, flushed as
+    // it lands. Collecting them into a single array would defeat the point of a stream
+    // that may never end — `logs start-live-tail` runs until interrupted.
+    if let Some(shape) = output_shape.filter(|s| {
+        aws_cli_protocol::eventstream::stream_member(&model, s).is_some()
+    }) {
+        use std::io::Write;
+        let mut stdout = std::io::stdout();
+        let mut stream_error = None;
+        let mut emit = |event: aws_cli_protocol::eventstream::Event| -> Result<(), Failure> {
+            use aws_cli_protocol::eventstream::Event;
+            match event {
+                Event::Event { name, value } => {
+                    let line = serde_json::json!({ name: value });
+                    writeln!(stdout, "{line}")
+                        .map_err(|e| Failure::new(exit::GENERAL_ERROR, e.to_string()))?;
+                    // Per event rather than per buffer: a stream is watched live, and a
+                    // line held in a buffer has not been delivered.
+                    stdout
+                        .flush()
+                        .map_err(|e| Failure::new(exit::GENERAL_ERROR, e.to_string()))?;
+                }
+                // The service ended the stream itself. Recorded rather than returned, so
+                // the events already emitted are not discarded by an early exit.
+                Event::Exception { code, message, .. } | Event::Error { code, message } => {
+                    stream_error = Some(format!(
+                        "An error occurred ({code}) when calling the {} operation: {message}",
+                        op_id.name()
+                    ));
+                }
+                // Not printed to stdout, which must stay parseable, but not dropped in
+                // silence either: a new event type is something the user should see.
+                Event::Unknown { message_type, event_type } => {
+                    eprintln!(
+                        "warning: skipped an unrecognised {message_type} frame{}",
+                        event_type.map(|t| format!(" of type {t}")).unwrap_or_default()
+                    );
+                }
+            }
+            Ok(())
+        };
+        client.call_operation_events(op_id.name(), op, input_shape, shape, input.as_ref(), &mut emit)?;
+        if let Some(message) = stream_error {
+            let mut failure = Failure::new(exit::CLIENT_ERROR, message);
+            failure.service_error_code = Some("EventStreamError".to_string());
+            return Err(failure);
+        }
+        return Ok(exit::code(exit::SUCCESS));
+    }
+
     let value = paginate::run(&paginate::Settings {
         service: &cli_service,
         operation: &parsed.operation,

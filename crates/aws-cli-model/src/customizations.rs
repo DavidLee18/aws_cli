@@ -80,9 +80,49 @@ impl Customizations {
         let bytes = std::fs::read(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
         serde_json::from_slice(&bytes).map_err(|e| format!("parsing {}: {e}", path.display()))
     }
+}
 
+/// Operations the reference drops only because it cannot read an event stream.
+///
+/// `data/customizations.json` is a faithful record of what botocore does, and stays that
+/// way so a refresh from upstream does not have to be hand-edited. This is the list of
+/// removals we deliberately do not honour: the CLI decodes `vnd.amazon.eventstream`, so
+/// there is no reason to hide the operations that use it.
+///
+/// Operations with an event stream on the *input* side stay removed. Those are duplex and
+/// need SigV4's rolling per-frame signature, which the blocking transport cannot do; a
+/// command that connects and then cannot send would be worse than one that is absent.
+pub(crate) const EVENT_STREAM_OPERATIONS: &[(&str, &str)] = &[
+    ("bedrock-agent-runtime", "agentic-retrieve-stream"),
+    ("bedrock-agent-runtime", "invoke-agent"),
+    ("bedrock-agent-runtime", "invoke-flow"),
+    ("bedrock-agent-runtime", "invoke-inline-agent"),
+    ("bedrock-agent-runtime", "optimize-prompt"),
+    ("bedrock-agent-runtime", "retrieve-and-generate-stream"),
+    ("bedrock-agentcore", "invoke-agent-runtime-command"),
+    ("bedrock-agentcore", "invoke-code-interpreter"),
+    ("bedrock-agentcore", "invoke-harness"),
+    ("bedrock-runtime", "converse-stream"),
+    ("bedrock-runtime", "invoke-model-with-response-stream"),
+    ("devops-agent", "send-message"),
+    ("iotsitewise", "invoke-assistant"),
+    ("kinesis", "subscribe-to-shard"),
+    ("lambda", "invoke-with-response-stream"),
+    ("logs", "get-log-object"),
+    ("sagemaker-runtime", "invoke-endpoint-with-response-stream"),
+];
+
+/// Whether this removal is one we deliberately do not honour.
+pub fn is_event_stream_operation(service: &str, operation: &str) -> bool {
+    EVENT_STREAM_OPERATIONS.contains(&(service, operation))
+}
+
+impl Customizations {
     /// Is this operation deleted from the command table?
     pub fn is_removed(&self, service: &str, operation: &str) -> bool {
+        if is_event_stream_operation(service, operation) {
+            return false;
+        }
         if let Some(ops) = self.removed_operations.get(service) {
             if ops.iter().any(|o| o == operation) {
                 return true;

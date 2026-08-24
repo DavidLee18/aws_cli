@@ -10,6 +10,7 @@
 pub mod aws_json;
 pub mod cbor;
 pub mod ec2_query;
+pub mod eventstream;
 pub mod http_binding;
 pub mod json;
 pub mod pagination;

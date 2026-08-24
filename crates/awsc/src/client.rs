@@ -13,6 +13,7 @@ use crate::dispatch;
 use crate::exit;
 use crate::Failure;
 use aws_cli_model::{Model, Protocol};
+use aws_cli_protocol::eventstream;
 use aws_cli_runtime::{credentials, endpoint, http, retry, sigv4};
 use serde_json::Value;
 use std::cell::RefCell;
@@ -279,6 +280,118 @@ impl<'a> Client<'a> {
         }
     }
 
+    /// Issue an operation whose output is an event stream, reporting each event as it
+    /// arrives.
+    ///
+    /// Deliberately not retried. A retry would replay the operation from the beginning,
+    /// and by the time a stream fails the caller has already been handed events from the
+    /// first attempt — re-running it would duplicate them. The `call_operation` path
+    /// retries because nothing has been observed until it returns; here it has.
+    ///
+    /// The transport's read timeout applies per frame, so an idle stream (`StartLiveTail`
+    /// between matches) ends once it exceeds it. `--cli-read-timeout 0` disables that.
+    pub fn call_operation_events(
+        &self,
+        operation_wire_name: &str,
+        op: &aws_cli_model::shape::OperationShape,
+        input_shape: Option<&aws_cli_model::shape::StructureShape>,
+        output_shape: &aws_cli_model::shape::StructureShape,
+        input: Option<&Value>,
+        on_event: &mut dyn FnMut(eventstream::Event) -> Result<(), Failure>,
+    ) -> Result<(), Failure> {
+        let Some((_, union_shape)) = eventstream::stream_member(self.model, output_shape) else {
+            return Err(Failure::new(
+                exit::GENERAL_ERROR,
+                "operation output has no event stream member",
+            ));
+        };
+
+        let wire = dispatch::serialize(
+            self.model,
+            self.protocol,
+            operation_wire_name,
+            op,
+            input_shape,
+            input,
+        )
+        .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
+
+        let mut extra_headers = wire.headers.clone();
+        extra_headers.extend(retry::retry_headers(&retry::new_invocation_id(), 1, 1));
+
+        let request = http::PreparedRequest {
+            method: wire.method.clone(),
+            endpoint: self.endpoint.clone(),
+            path: wire.path.clone(),
+            query: wire.query.clone(),
+            content_type: wire.content_type.clone(),
+            extra_headers,
+            body: http::Body::from_vec(wire.body.clone()),
+        };
+
+        let timestamp = sigv4::format_timestamp(crate::now_unix());
+        let headers = if self.no_sign_request {
+            http::unsigned_headers(&request)
+        } else {
+            http::sign_request(&request, &self.credentials, &timestamp).0
+        };
+        if self.debug {
+            eprintln!("endpoint: {}", request.endpoint.url);
+        }
+
+        let mut sink = EventSink {
+            model: self.model,
+            protocol: self.protocol,
+            union_shape,
+            decoder: eventstream::Decoder::new(),
+            on_event,
+            failure: None,
+        };
+
+        let sent = http::send_to_writer(&request, &headers, &self.transport, &mut sink);
+
+        // A failure raised by the callback or by frame decoding surfaces as an IO error
+        // out of the sink; the real one was stashed on the way past.
+        if let Some(failure) = sink.failure.take() {
+            return Err(failure);
+        }
+        match sent {
+            Err(aws_cli_runtime::RuntimeError::HttpStatus { status, body, headers }) => {
+                let (code, message) = dispatch::parse_error(
+                    self.protocol,
+                    status,
+                    body.as_bytes(),
+                    headers
+                        .iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case("x-amzn-errortype"))
+                        .map(|(_, v)| v.as_str()),
+                );
+                let mut failure = Failure::new(
+                    exit::CLIENT_ERROR,
+                    format!(
+                        "An error occurred ({code}) when calling the \
+                         {operation_wire_name} operation: {message}"
+                    ),
+                );
+                failure.service_error_code = Some(code);
+                Err(failure)
+            }
+            Err(e) => Err(Failure::new(exit::GENERAL_ERROR, e)),
+            Ok(_) => {
+                // Bytes left over mean the connection ended part-way through a frame.
+                // Reporting success here would present a truncated stream as a complete
+                // one, which is the whole failure mode the checksums exist to prevent.
+                if !sink.decoder.is_empty() {
+                    return Err(Failure::new(
+                        exit::GENERAL_ERROR,
+                        "event stream ended in the middle of a frame",
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+
     /// As [`Client::call_operation`], but handing back the raw response.
     ///
     /// Operations with a streaming blob output write their body to a file rather than
@@ -522,5 +635,53 @@ impl<'a> Client<'a> {
             aws_cli_protocol::response_fixups::decode_encoded_keys(&mut document);
         }
         Ok(document)
+    }
+}
+
+/// Feeds response bytes into the event-stream decoder as they arrive.
+///
+/// A `Write` implementation because that is what the transport hands a streaming body,
+/// which means event streams reuse the download path rather than adding a second one.
+struct EventSink<'a> {
+    model: &'a aws_cli_model::Model,
+    protocol: Protocol,
+    union_shape: &'a aws_cli_model::shape::StructureShape,
+    decoder: eventstream::Decoder,
+    on_event: &'a mut dyn FnMut(eventstream::Event) -> Result<(), Failure>,
+    /// The real error, since `Write` can only report an `io::Error`.
+    failure: Option<Failure>,
+}
+
+impl std::io::Write for EventSink<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.decoder.push(buf);
+        loop {
+            let frame = match self.decoder.next_frame() {
+                Ok(Some(frame)) => frame,
+                Ok(None) => return Ok(buf.len()),
+                Err(e) => return Err(self.stop(Failure::new(exit::GENERAL_ERROR, e))),
+            };
+            let event =
+                match eventstream::interpret(self.model, self.protocol, self.union_shape, &frame) {
+                    Ok(event) => event,
+                    Err(e) => return Err(self.stop(Failure::new(exit::GENERAL_ERROR, e))),
+                };
+            if let Err(failure) = (self.on_event)(event) {
+                return Err(self.stop(failure));
+            }
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl EventSink<'_> {
+    /// Stash the real failure and end the transfer.
+    fn stop(&mut self, failure: Failure) -> std::io::Error {
+        let message = failure.message().to_string();
+        self.failure = Some(failure);
+        std::io::Error::other(message)
     }
 }

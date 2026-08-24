@@ -48,13 +48,20 @@ fn command_table_matches_the_corpus_for_every_service() {
         let Some(reference) = corpus.services.get(&table.service) else { continue };
         checked += 1;
 
-        // Every name the binary accepts must be one the reference has. The converse is
-        // not asserted here: the reference also has custom commands and waiters, which
-        // this table does not model.
+        // Every name the binary accepts must be one the reference has, except where we
+        // deliberately go further. The converse is not asserted here: the reference also
+        // has custom commands and waiters, which this table does not model.
         for typed in table.names.keys() {
-            if !reference.operations.contains_key(typed) {
-                problems.push(format!("{} accepts `{typed}`, reference does not", table.service));
+            if reference.operations.contains_key(typed) {
+                continue;
             }
+            // The reference drops these because it cannot read an event stream. We can,
+            // so accepting them is the intended divergence rather than a regression —
+            // and listing them here keeps the test catching every *unintended* one.
+            if aws_cli_model::customizations::is_event_stream_operation(&table.service, typed) {
+                continue;
+            }
+            problems.push(format!("{} accepts `{typed}`, reference does not", table.service));
         }
     }
 
