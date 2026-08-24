@@ -71,8 +71,15 @@ fn validate_structure(
         return;
     };
 
-    // Required members first.
+    // Required members first, except a request event stream: that arrives on stdin
+    // rather than as a parameter, so requiring it would make the operation impossible
+    // to call. `bedrock-runtime invoke-model-with-bidirectional-stream` marks it
+    // required.
+    let stream_member = crate::eventstream::stream_member(model, shape).map(|(name, _)| name);
     for (member_name, member) in &shape.members {
+        if Some(member_name.as_str()) == stream_member {
+            continue;
+        }
         if member.traits.is_required() && !map.contains_key(member_name) {
             errors.messages.push(format!(
                 "Missing required parameter in {}: \"{member_name}\"",

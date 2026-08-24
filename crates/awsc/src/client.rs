@@ -392,6 +392,295 @@ impl<'a> Client<'a> {
         }
     }
 
+    /// Issue a duplex operation: send request events while reading response events.
+    ///
+    /// The threading is the interesting part. Both directions need the model — one to
+    /// encode outgoing events, one to interpret incoming ones — and `Model` is not
+    /// `Sync`, so neither job can be moved off this thread. Instead the two *thread*-side
+    /// jobs are the ones that need nothing but bytes: one thread reads `lines`, another
+    /// runs the HTTP call. Both report into a single channel, and this thread runs an
+    /// event loop over it, holding the model and the signature chain.
+    ///
+    /// That the chain is advanced on one thread, in order, is a correctness requirement
+    /// rather than a convenience: each frame signs over the previous frame's signature,
+    /// so signing two frames concurrently would produce a pair the service rejects.
+    pub fn call_operation_duplex(
+        &self,
+        operation_wire_name: &str,
+        op: &aws_cli_model::shape::OperationShape,
+        input_shape: Option<&aws_cli_model::shape::StructureShape>,
+        output_shape: &aws_cli_model::shape::StructureShape,
+        input: Option<&Value>,
+        lines: Box<dyn Iterator<Item = std::io::Result<String>> + Send>,
+        on_event: &mut dyn FnMut(eventstream::Event) -> Result<(), Failure>,
+    ) -> Result<(), Failure> {
+        use std::sync::mpsc;
+
+        let Some(input_shape) = input_shape else {
+            return Err(Failure::new(exit::GENERAL_ERROR, "operation has no input to stream"));
+        };
+        let Some((_, request_union)) = eventstream::stream_member(self.model, input_shape) else {
+            return Err(Failure::new(
+                exit::GENERAL_ERROR,
+                "operation input has no event stream member",
+            ));
+        };
+        let Some((_, response_union)) = eventstream::stream_member(self.model, output_shape) else {
+            return Err(Failure::new(
+                exit::GENERAL_ERROR,
+                "operation output has no event stream member",
+            ));
+        };
+
+        // The initial request carries no body: the stream member is not serialised into
+        // it, only the members bound to the URI, query and headers.
+        let wire = dispatch::serialize(
+            self.model,
+            self.protocol,
+            operation_wire_name,
+            op,
+            Some(input_shape),
+            input,
+        )
+        .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
+
+        let mut extra_headers = wire.headers.clone();
+        extra_headers.extend(retry::retry_headers(&retry::new_invocation_id(), 1, 1));
+        extra_headers
+            .push(("x-amz-content-sha256".into(), http::STREAMING_EVENTS_SHA256.to_string()));
+
+        let request = http::PreparedRequest {
+            method: wire.method.clone(),
+            endpoint: self.endpoint.clone(),
+            path: wire.path.clone(),
+            query: wire.query.clone(),
+            content_type: Some(EVENT_STREAM_CONTENT_TYPE.to_string()),
+            extra_headers,
+            body: http::Body::EventStream,
+        };
+
+        let timestamp = sigv4::format_timestamp(crate::now_unix());
+        let (headers, seed) = if self.no_sign_request {
+            (http::unsigned_headers(&request), String::new())
+        } else {
+            let (h, s) = http::sign_request(&request, &self.credentials, &timestamp);
+            (h, s.signature)
+        };
+        if self.debug {
+            eprintln!("endpoint: {}", request.endpoint.url);
+        }
+
+        let (wake_tx, wake_rx) = mpsc::channel::<Wake>();
+        let (frame_tx, frame_rx) = mpsc::channel::<Vec<u8>>();
+
+        let line_tx = wake_tx.clone();
+        let reader = std::thread::spawn(move || {
+            for line in lines {
+                let wake = match line {
+                    Ok(line) => Wake::Line(line),
+                    Err(e) => Wake::InputFailed(e.to_string()),
+                };
+                let failed = matches!(wake, Wake::InputFailed(_));
+                if line_tx.send(wake).is_err() || failed {
+                    return;
+                }
+            }
+            let _ = line_tx.send(Wake::InputDone);
+        });
+
+        let http_tx = wake_tx.clone();
+        let transport = self.transport.clone();
+        let caller = std::thread::spawn(move || {
+            let mut sink = ChannelSink(http_tx.clone());
+            let result = http::send_duplex(
+                &request,
+                &headers,
+                &transport,
+                move |sender| {
+                    // Ends when the event loop drops its sender, which closes the
+                    // request body and tells the service the stream is over.
+                    while let Ok(bytes) = frame_rx.recv() {
+                        if sender.send(bytes).is_err() {
+                            return;
+                        }
+                    }
+                },
+                &mut sink,
+            );
+            let _ = http_tx.send(Wake::Finished(result.err()));
+        });
+        // The loop's own clone would otherwise keep the channel open forever.
+        drop(wake_tx);
+
+        let outcome = self.pump_duplex(
+            operation_wire_name,
+            request_union,
+            response_union,
+            &wake_rx,
+            frame_tx,
+            &seed,
+            on_event,
+        );
+        let _ = reader.join();
+        let _ = caller.join();
+        outcome
+    }
+
+    /// The event loop: one thread, holding the model and the signature chain.
+    #[allow(clippy::too_many_arguments)]
+    fn pump_duplex(
+        &self,
+        operation_wire_name: &str,
+        request_union: &aws_cli_model::shape::StructureShape,
+        response_union: &aws_cli_model::shape::StructureShape,
+        wake_rx: &std::sync::mpsc::Receiver<Wake>,
+        frame_tx: std::sync::mpsc::Sender<Vec<u8>>,
+        seed: &str,
+        on_event: &mut dyn FnMut(eventstream::Event) -> Result<(), Failure>,
+    ) -> Result<(), Failure> {
+        let mut frames = Some(frame_tx);
+        let mut prior = seed.to_string();
+        let mut decoder = eventstream::Decoder::new();
+
+        while let Ok(wake) = wake_rx.recv() {
+            match wake {
+                Wake::Line(line) => {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    let inner = self.encode_request_event(request_union, &line)?;
+                    let signed = self.sign_event_frame(&mut prior, &inner);
+                    if let Some(tx) = &frames {
+                        if tx.send(signed).is_err() {
+                            frames = None;
+                        }
+                    }
+                }
+                Wake::InputDone => {
+                    // An empty signed frame is how the protocol says "no more input".
+                    // Without it the service waits for more rather than finishing.
+                    let end = self.sign_event_frame(&mut prior, &[]);
+                    if let Some(tx) = &frames {
+                        let _ = tx.send(end);
+                    }
+                    frames = None;
+                }
+                // Dropping the sender here closes the request body, so the service
+                // sees the stream end rather than waiting for frames that never come.
+                Wake::InputFailed(message) => {
+                    drop(frames.take());
+                    return Err(Failure::new(exit::GENERAL_ERROR, message));
+                }
+                Wake::Response(bytes) => {
+                    decoder.push(&bytes);
+                    loop {
+                        let frame = decoder
+                            .next_frame()
+                            .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
+                        let Some(frame) = frame else { break };
+                        let event = eventstream::interpret(
+                            self.model,
+                            self.protocol,
+                            response_union,
+                            &frame,
+                        )
+                        .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
+                        on_event(event)?;
+                    }
+                }
+                Wake::Finished(error) => {
+                    drop(frames.take());
+                    if let Some(error) = error {
+                        return Err(self.duplex_failure(operation_wire_name, error));
+                    }
+                    if !decoder.is_empty() {
+                        return Err(Failure::new(
+                            exit::GENERAL_ERROR,
+                            "event stream ended in the middle of a frame",
+                        ));
+                    }
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// One line of input: `{"EventName": {...}}`, the same shape an output event prints.
+    fn encode_request_event(
+        &self,
+        request_union: &aws_cli_model::shape::StructureShape,
+        line: &str,
+    ) -> Result<Vec<u8>, Failure> {
+        let document: Value = serde_json::from_str(line).map_err(|e| {
+            Failure::new(exit::PARAM_VALIDATION, format!("input event is not JSON: {e}"))
+        })?;
+        let object = document.as_object().filter(|o| o.len() == 1).ok_or_else(|| {
+            Failure::new(
+                exit::PARAM_VALIDATION,
+                "each input line must be a JSON object with exactly one key, \
+                 naming the event: {\"AudioEvent\": {...}}",
+            )
+        })?;
+        let (name, value) = object.iter().next().expect("exactly one key");
+        eventstream::encode_event(self.model, self.protocol, request_union, name, value)
+            .map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))
+    }
+
+    /// Wrap one frame in its signature and advance the chain.
+    fn sign_event_frame(&self, prior: &mut String, inner: &[u8]) -> Vec<u8> {
+        use aws_cli_protocol::eventstream::HeaderValue;
+
+        let now = crate::now_unix();
+        let date = vec![(":date".to_string(), HeaderValue::Timestamp(now * 1000))];
+        let date_headers = eventstream::encode_headers(&date);
+
+        let timestamp = sigv4::format_timestamp(now);
+        let ctx = sigv4::SigningContext {
+            credentials: &self.credentials,
+            region: &self.endpoint.signing_region,
+            service: &self.endpoint.signing_name,
+            timestamp: &timestamp,
+        };
+        let signature = sigv4::sign_event(&ctx, prior, &date_headers, inner);
+        let raw = hex_decode(&signature);
+        *prior = signature;
+
+        let mut headers = date;
+        headers.push((":chunk-signature".to_string(), HeaderValue::Bytes(raw)));
+        eventstream::encode(&headers, inner)
+    }
+
+    fn duplex_failure(
+        &self,
+        operation_wire_name: &str,
+        error: aws_cli_runtime::RuntimeError,
+    ) -> Failure {
+        match error {
+            aws_cli_runtime::RuntimeError::HttpStatus { status, body, headers } => {
+                let (code, message) = dispatch::parse_error(
+                    self.protocol,
+                    status,
+                    body.as_bytes(),
+                    headers
+                        .iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case("x-amzn-errortype"))
+                        .map(|(_, v)| v.as_str()),
+                );
+                let mut failure = Failure::new(
+                    exit::CLIENT_ERROR,
+                    format!(
+                        "An error occurred ({code}) when calling the \
+                         {operation_wire_name} operation: {message}"
+                    ),
+                );
+                failure.service_error_code = Some(code);
+                failure
+            }
+            other => Failure::new(exit::GENERAL_ERROR, other),
+        }
+    }
+
     /// As [`Client::call_operation`], but handing back the raw response.
     ///
     /// Operations with a streaming blob output write their body to a file rather than
@@ -684,4 +973,49 @@ impl EventSink<'_> {
         self.failure = Some(failure);
         std::io::Error::other(message)
     }
+}
+
+/// The content type of a request whose body is an event stream.
+const EVENT_STREAM_CONTENT_TYPE: &str = "application/vnd.amazon.eventstream";
+
+/// What the event loop waits on. Both worker threads report through one channel, because
+/// the loop has to interleave them and `std::sync::mpsc` has no select.
+enum Wake {
+    /// A line of input to turn into a request event.
+    Line(String),
+    /// Input is exhausted; the stream should be closed.
+    InputDone,
+    InputFailed(String),
+    /// Raw response bytes, in whatever sizes the network produced.
+    Response(Vec<u8>),
+    /// The HTTP call returned, with its error if it had one.
+    Finished(Option<aws_cli_runtime::RuntimeError>),
+}
+
+/// Forwards response bytes into the event loop's channel.
+struct ChannelSink(std::sync::mpsc::Sender<Wake>);
+
+impl std::io::Write for ChannelSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .send(Wake::Response(buf.to_vec()))
+            .map(|()| buf.len())
+            .map_err(|_| std::io::Error::other("the event loop stopped reading"))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Hex back to bytes, for the chunk signature: the string-to-sign uses hex, the frame
+/// header carries the raw 32 bytes.
+fn hex_decode(hex: &str) -> Vec<u8> {
+    hex.as_bytes()
+        .chunks(2)
+        .filter_map(|pair| {
+            let text = std::str::from_utf8(pair).ok()?;
+            u8::from_str_radix(text, 16).ok()
+        })
+        .collect()
 }

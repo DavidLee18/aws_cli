@@ -265,7 +265,7 @@ fn run() -> Result<ExitCode, Failure> {
     // reports them with argparse's wording and a usage block rather than as a parameter
     // validation failure.
     let missing =
-        args::missing_required_flags(input_shape, &parsed, &cli_service, &parsed.operation);
+        args::missing_required_flags(&model, input_shape, &parsed, &cli_service, &parsed.operation);
     if !missing.is_empty() {
         return Err(Failure::new(
             exit::PARAM_VALIDATION,
@@ -389,7 +389,35 @@ fn run() -> Result<ExitCode, Failure> {
             }
             Ok(())
         };
-        client.call_operation_events(op_id.name(), op, input_shape, shape, input.as_ref(), &mut emit)?;
+        // A duplex operation also *sends* events. They come from stdin as JSON Lines, in
+        // the same `{"EventName": {...}}` shape the response events print, so the two
+        // halves of a conversation are written the same way.
+        let duplex = input_shape
+            .is_some_and(|s| aws_cli_protocol::eventstream::stream_member(&model, s).is_some());
+        if duplex {
+            // `stdin().lock()` yields a guard that cannot cross threads, and `Stdin`
+            // itself is not `BufRead`; wrapping it gives both.
+            let lines =
+                Box::new(std::io::BufRead::lines(std::io::BufReader::new(std::io::stdin())));
+            client.call_operation_duplex(
+                op_id.name(),
+                op,
+                input_shape,
+                shape,
+                input.as_ref(),
+                lines,
+                &mut emit,
+            )?;
+        } else {
+            client.call_operation_events(
+                op_id.name(),
+                op,
+                input_shape,
+                shape,
+                input.as_ref(),
+                &mut emit,
+            )?;
+        }
         if let Some(message) = stream_error {
             let mut failure = Failure::new(exit::CLIENT_ERROR, message);
             failure.service_error_code = Some("EventStreamError".to_string());

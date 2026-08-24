@@ -80,11 +80,11 @@ mod tests {
         assert!(!is_removed("bedrock-runtime", "converse-stream"));
         assert!(!is_removed("bedrock-runtime", "invoke-model-with-response-stream"));
 
-        // Input event streams are duplex and stay removed.
-        assert!(is_removed("bedrock-runtime", "invoke-model-with-bidirectional-stream"));
-        assert!(is_removed("polly", "start-speech-synthesis-stream"));
-        assert!(is_removed("qbusiness", "chat"));
-        assert!(is_removed("lexv2-runtime", "start-conversation"));
+        // Duplex operations too, now that request events can be signed and sent.
+        assert!(!is_removed("bedrock-runtime", "invoke-model-with-bidirectional-stream"));
+        assert!(!is_removed("polly", "start-speech-synthesis-stream"));
+        assert!(!is_removed("qbusiness", "chat"));
+        assert!(!is_removed("lexv2-runtime", "start-conversation"));
 
         // Every override has to name a removal the reference actually makes, or it is
         // silently doing nothing — a typo would look exactly like success.

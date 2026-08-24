@@ -5,7 +5,7 @@ use crate::sigv4::{self, Credentials, SigningContext, SigningRequest};
 use crate::transport::{self};
 use crate::RuntimeError;
 
-pub use crate::transport::{Body, Response, ResponseHead, Transport};
+pub use crate::transport::{Body, BodySender, Response, ResponseHead, Transport};
 
 /// A request built by the protocol layer, ready to sign and send.
 pub struct PreparedRequest {
@@ -72,7 +72,14 @@ fn requires_content_sha256(signing_name: &str) -> bool {
 ///
 /// Only S3 accepts it, and file-backed bodies only ever arise from S3 uploads, so the
 /// mismatch is unreachable rather than merely unlikely.
+/// The sentinel a duplex request signs instead of a body hash: the frames are signed
+/// individually as they are produced, so there is nothing to hash up front.
+pub const STREAMING_EVENTS_SHA256: &str = "STREAMING-AWS4-HMAC-SHA256-EVENTS";
+
 pub fn payload_hash(body: &Body, signing_name: &str) -> String {
+    if matches!(body, Body::EventStream) {
+        return STREAMING_EVENTS_SHA256.to_string();
+    }
     use sha2::{Digest, Sha256};
     match body.as_bytes() {
         Some(bytes) => Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect(),
@@ -224,6 +231,18 @@ pub fn send_to_writer<W: std::io::Write>(
     sink: &mut W,
 ) -> Result<ResponseHead, RuntimeError> {
     transport::send_to_writer(&transport_request(req, headers), transport_opts, sink)
+}
+
+/// Send a request whose body is produced while the response is read. See
+/// [`transport::send_duplex`].
+pub fn send_duplex<W: std::io::Write>(
+    req: &PreparedRequest,
+    headers: &[(String, String)],
+    transport_opts: &Transport,
+    produce: impl FnOnce(transport::BodySender) + Send + 'static,
+    sink: &mut W,
+) -> Result<ResponseHead, RuntimeError> {
+    transport::send_duplex(&transport_request(req, headers), transport_opts, produce, sink)
 }
 
 #[cfg(test)]

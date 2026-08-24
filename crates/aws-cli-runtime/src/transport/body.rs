@@ -16,6 +16,10 @@ pub enum Body {
     Bytes(Bytes),
     /// A byte range of a file, read lazily while the request is being sent.
     FileRange { path: PathBuf, offset: u64, len: u64 },
+    /// A duplex event stream: the bytes do not exist yet and each frame carries its own
+    /// signature, so the request itself is signed over a sentinel rather than a hash.
+    /// Only [`crate::transport::send_duplex`] can actually send one.
+    EventStream,
 }
 
 impl Default for Body {
@@ -33,11 +37,11 @@ impl Body {
         }
     }
 
-    /// Content-Length for the request. Always known — AWS SigV4 has no use for chunked
-    /// transfer encoding on the paths this client takes.
+    /// Content-Length for the request, where there is one. An event stream has no
+    /// length: that is the whole point of it.
     pub fn len(&self) -> u64 {
         match self {
-            Body::Empty => 0,
+            Body::Empty | Body::EventStream => 0,
             Body::Bytes(b) => b.len() as u64,
             Body::FileRange { len, .. } => *len,
         }
@@ -53,7 +57,7 @@ impl Body {
         match self {
             Body::Empty => Some(&[]),
             Body::Bytes(b) => Some(b),
-            Body::FileRange { .. } => None,
+            Body::FileRange { .. } | Body::EventStream => None,
         }
     }
 }

@@ -304,6 +304,11 @@ async fn into_hyper_body(body: Body) -> Result<BoxBody<Bytes, std::io::Error>, R
         Body::Bytes(b) => Ok(Full::new(b)
             .map_err(|e: std::convert::Infallible| match e {})
             .boxed()),
+        // Only `send_duplex` can send one, and it builds its own body rather than
+        // going through here.
+        Body::EventStream => Err(RuntimeError::Http(
+            "an event-stream body cannot be sent as an ordinary request".to_string(),
+        )),
         Body::FileRange { path, offset, len } => {
             use tokio::io::{AsyncReadExt, AsyncSeekExt};
             let mut file = tokio::fs::File::open(&path)
@@ -413,6 +418,122 @@ pub async fn send_async(req: &Request, transport: &Transport) -> Result<Response
 ///
 /// An error status is *not* streamed: the body is a short error document the caller needs
 /// to parse, so it comes back in [`Err`] as text.
+/// The write end of a streaming request body.
+///
+/// Handed to the producer, which runs on its own thread and blocks on the channel — so a
+/// slow service applies back-pressure to whatever is generating events instead of the
+/// frames piling up in memory.
+pub struct BodySender(tokio::sync::mpsc::Sender<Bytes>);
+
+/// The request ended before a chunk could be queued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamClosed;
+
+impl std::fmt::Display for StreamClosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the request stream is closed")
+    }
+}
+
+impl std::error::Error for StreamClosed {}
+
+impl BodySender {
+    /// Append a chunk, blocking while the queue is full.
+    pub fn send(&self, bytes: Vec<u8>) -> Result<(), StreamClosed> {
+        self.0.blocking_send(Bytes::from(bytes)).map_err(|_| StreamClosed)
+    }
+}
+
+/// A body fed from a channel, with no length known up front.
+///
+/// Unlike [`SizedStream`], an unknown size is *correct* here: a duplex request has no
+/// idea how many frames it will send. HTTP/2 carries that natively, and HTTP/1.1 falls
+/// back to chunked, which is what the event-stream protocol expects.
+struct ChannelBody {
+    receiver: tokio::sync::mpsc::Receiver<Bytes>,
+}
+
+impl hyper::body::Body for ChannelBody {
+    type Data = Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
+        self.receiver.poll_recv(cx).map(|next| next.map(|bytes| Ok(Frame::data(bytes))))
+    }
+}
+
+/// How many chunks may sit in the request-body channel before the producer blocks.
+const BODY_QUEUE: usize = 16;
+
+/// Issue a request whose body is produced while the response is being read.
+///
+/// This is what a duplex event stream needs and what the rest of the transport cannot
+/// do: `send` and `send_to_writer` both finish sending before they read. Here the
+/// producer runs on its own thread for the life of the call, and the response is read
+/// concurrently — the client may still be sending audio while transcripts come back.
+///
+/// The read timeout applies per response frame, not to the call as a whole; a duplex
+/// stream can legitimately last for hours.
+pub fn send_duplex<W: std::io::Write>(
+    req: &Request,
+    transport: &Transport,
+    produce: impl FnOnce(BodySender) + Send + 'static,
+    sink: &mut W,
+) -> Result<ResponseHead, RuntimeError> {
+    runtime().block_on(async {
+        let client = client(transport)?;
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(BODY_QUEUE);
+        // A plain OS thread rather than a tokio task: the producer is blocking code
+        // (reading stdin, signing frames) and would stall the runtime's worker.
+        let producer = std::thread::spawn(move || produce(BodySender(tx)));
+
+        let request = build_hyper_request(req, ChannelBody { receiver: rx }.boxed())?;
+
+        // Resolves once the response *headers* arrive, which for a duplex stream is long
+        // before the request body is finished.
+        let response = tokio::time::timeout(transport.read_timeout(), client.request(request))
+            .await
+            .map_err(|_| RuntimeError::Http("request timed out".to_string()))?
+            .map_err(|e| RuntimeError::Http(describe(&e)))?;
+
+        let (parts, mut body) = response.into_parts();
+        let headers = collect_headers(&parts);
+        let status = parts.status.as_u16();
+
+        if status >= 400 {
+            let collected = body.collect().await.map_err(|e| RuntimeError::Http(e.to_string()))?;
+            return Err(RuntimeError::HttpStatus {
+                status,
+                body: String::from_utf8_lossy(&collected.to_bytes()).into_owned(),
+                headers,
+            });
+        }
+
+        let mut result = Ok(());
+        while let Some(frame) = tokio::time::timeout(transport.read_timeout(), body.frame())
+            .await
+            .map_err(|_| RuntimeError::Http("request timed out".to_string()))?
+        {
+            let frame = frame.map_err(|e| RuntimeError::Http(e.to_string()))?;
+            if let Ok(chunk) = frame.into_data() {
+                if let Err(e) = sink.write_all(&chunk) {
+                    result = Err(RuntimeError::Http(e.to_string()));
+                    break;
+                }
+            }
+        }
+
+        // Joined rather than detached: the producer owns the sender, and leaving it
+        // running would keep a thread writing into a request that has already ended.
+        let _ = producer.join();
+        result.map(|()| ResponseHead { status, headers })
+    })
+}
+
 pub fn send_to_writer<W: std::io::Write>(
     req: &Request,
     transport: &Transport,

@@ -79,13 +79,28 @@ Not performance work, but the pivot asked for as much of the AWS API as possible
   `customizations.rs`, with a test asserting every entry names a removal that really
   exists, so a typo cannot silently do nothing.
 
-  **Still missing: input (duplex) event streams** — `transcribe-streaming`,
-  `polly start-speech-synthesis-stream`, `qbusiness chat`,
-  `bedrock-runtime invoke-model-with-bidirectional-stream`, `lexv2-runtime
-  start-conversation`, and the two sagemaker bidirectional ones. Those need SigV4's
-  rolling per-frame signature and a full-duplex connection, which the blocking transport
-  cannot do. They stay hidden: a command that connects and then cannot send would be
-  worse than one that is absent.
+  **Duplex streams work too.** Request events are read from stdin as JSON Lines in the
+  same `{"EventName": {...}}` shape response events print. Each frame carries its own
+  signature in a chain seeded by the initial request's, which is why the chain is
+  advanced on one thread in order — signing two frames concurrently produces a pair the
+  service rejects.
+
+  The threading is worth remembering: both directions need the model, and `Model` is not
+  `Sync`, so neither encoding nor interpreting can leave the main thread. The two jobs
+  that *are* moved off it are the ones needing only bytes — reading stdin, and running
+  the HTTP call. They report into one channel and the main thread runs an event loop over
+  it.
+
+  Verified against `scripts/verify-event-signing.py`, which re-implements the signing
+  chain from the spec in Python: agreement between it and the Rust is evidence rather
+  than a tautology. It also proves the duplex property by timestamp — a reply arrives
+  1.8s before the next request frame is sent — and the negative control (signing with the
+  wrong secret) is rejected, so the check is not vacuous.
+
+  Blobs inside an event are base64 in **both** directions, unlike blob parameters
+  elsewhere in the CLI, which are raw text in and base64 out. That asymmetry is
+  botocore's; a stream cannot live with it, because its blobs are audio and model output
+  with no text form, and a stream is something you feed back what you were just given.
 - ~~**`rpcv2Cbor` is not implemented.**~~ Done. `partnercentral-revenue-measurement`,
   which speaks only CBOR, is now reachable.
 

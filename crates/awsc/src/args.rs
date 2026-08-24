@@ -321,6 +321,7 @@ pub fn build_input_named(
 /// `--generate-cli-skeleton` is present, since those legitimately supply or replace the
 /// parameters.
 pub fn missing_required_flags(
+    model: &aws_cli_model::Model,
     input_shape: Option<&StructureShape>,
     parsed: &Parsed,
     service: &str,
@@ -330,10 +331,16 @@ pub fn missing_required_flags(
         return Vec::new();
     }
     let Some(shape) = input_shape else { return Vec::new() };
+    // A request event stream is read from stdin, not passed as a flag, so demanding one
+    // would make the operation impossible to invoke. `bedrock-runtime` marks its stream
+    // member required.
+    let stream_member =
+        aws_cli_protocol::eventstream::stream_member(model, shape).map(|(name, _)| name);
     shape
         .members
         .iter()
         .filter(|(_, member)| member.traits.is_required())
+        .filter(|(name, _)| Some(name.as_str()) != stream_member)
         .filter(|(name, _)| proxy_hidden_member(service, operation) != Some(name.as_str()))
         .map(|(name, _)| {
             // The renamed form is what the user must actually pass: `route53

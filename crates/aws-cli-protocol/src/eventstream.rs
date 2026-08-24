@@ -201,6 +201,74 @@ fn decode_header_value(kind: u8, bytes: &[u8]) -> Result<(HeaderValue, &[u8]), P
     })
 }
 
+/// Encode one header's name, type and value.
+fn encode_header(name: &str, value: &HeaderValue, out: &mut Vec<u8>) {
+    out.push(name.len() as u8);
+    out.extend_from_slice(name.as_bytes());
+    match value {
+        HeaderValue::Bool(true) => out.push(0),
+        HeaderValue::Bool(false) => out.push(1),
+        HeaderValue::Byte(n) => {
+            out.push(2);
+            out.push(*n as u8);
+        }
+        HeaderValue::Short(n) => {
+            out.push(3);
+            out.extend_from_slice(&n.to_be_bytes());
+        }
+        HeaderValue::Int(n) => {
+            out.push(4);
+            out.extend_from_slice(&n.to_be_bytes());
+        }
+        HeaderValue::Long(n) => {
+            out.push(5);
+            out.extend_from_slice(&n.to_be_bytes());
+        }
+        HeaderValue::Bytes(b) => {
+            out.push(6);
+            out.extend_from_slice(&(b.len() as u16).to_be_bytes());
+            out.extend_from_slice(b);
+        }
+        HeaderValue::String(s) => {
+            out.push(7);
+            out.extend_from_slice(&(s.len() as u16).to_be_bytes());
+            out.extend_from_slice(s.as_bytes());
+        }
+        HeaderValue::Timestamp(n) => {
+            out.push(8);
+            out.extend_from_slice(&n.to_be_bytes());
+        }
+        HeaderValue::Uuid(u) => {
+            out.push(9);
+            out.extend_from_slice(u);
+        }
+    }
+}
+
+/// The header block on its own, which event-stream signing hashes separately.
+pub fn encode_headers(headers: &[(String, HeaderValue)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (name, value) in headers {
+        encode_header(name, value, &mut out);
+    }
+    out
+}
+
+/// Build a complete frame, both checksums included.
+pub fn encode(headers: &[(String, HeaderValue)], payload: &[u8]) -> Vec<u8> {
+    let header_bytes = encode_headers(headers);
+    let total = (PRELUDE + header_bytes.len() + payload.len() + TRAILER) as u32;
+
+    let mut out = Vec::with_capacity(total as usize);
+    out.extend_from_slice(&total.to_be_bytes());
+    out.extend_from_slice(&(header_bytes.len() as u32).to_be_bytes());
+    out.extend_from_slice(&crc32(&out).to_be_bytes());
+    out.extend_from_slice(&header_bytes);
+    out.extend_from_slice(payload);
+    out.extend_from_slice(&crc32(&out).to_be_bytes());
+    out
+}
+
 /// Buffers bytes as they arrive and hands back whole frames.
 ///
 /// A streaming response is read in whatever chunk sizes the network produces, which have
@@ -337,6 +405,161 @@ pub fn interpret(
             event_type: frame.header_str(":event-type").map(str::to_string),
         }),
     }
+}
+
+/// Build the frame for one outgoing event.
+///
+/// The mirror of [`interpret`]: `name` picks the union member, and `value` is the same
+/// document shape this module hands back for an incoming event of that type. That
+/// symmetry is the point — what the CLI prints for a response event is what it accepts
+/// for a request event.
+pub fn encode_event(
+    model: &Model,
+    protocol: Protocol,
+    union_shape: &StructureShape,
+    name: &str,
+    value: &Value,
+) -> Result<Vec<u8>, ProtocolError> {
+    let member = union_shape.members.get(name).ok_or_else(|| {
+        ProtocolError::Unsupported(format!("`{name}` is not an event of this stream"))
+    })?;
+
+    let mut headers = vec![
+        (":message-type".to_string(), HeaderValue::String("event".to_string())),
+        (":event-type".to_string(), HeaderValue::String(name.to_string())),
+    ];
+
+    let Some(Shape::Structure(shape)) = model.shape(&member.target) else {
+        return Ok(encode(&headers, &[]));
+    };
+
+    let empty = Map::new();
+    let members = value.as_object().unwrap_or(&empty);
+
+    let mut payload = Vec::new();
+    let mut body = Map::new();
+    let mut content_type = None;
+
+    for (member_name, event_member) in &shape.members {
+        let Some(field) = members.get(member_name) else { continue };
+        if field.is_null() {
+            continue;
+        }
+        if event_member.traits.has("smithy.api#eventHeader") {
+            if let Some(header) = json_header(field) {
+                headers.push((member_name.clone(), header));
+            }
+        } else if event_member.traits.has("smithy.api#eventPayload") {
+            content_type = Some(match model.shape(&event_member.target) {
+                // A blob member arrives as base64, the same way it is printed.
+                Some(Shape::Blob(_)) => {
+                    payload = field
+                        .as_str()
+                        .and_then(crate::shapes::base64_decode)
+                        .unwrap_or_default();
+                    "application/octet-stream"
+                }
+                Some(Shape::Structure(_)) => {
+                    payload = serialize_body(model, protocol, &event_member.target, field)?;
+                    body_content_type(protocol)
+                }
+                _ => {
+                    payload = field.as_str().unwrap_or_default().as_bytes().to_vec();
+                    "text/plain"
+                }
+            });
+        } else {
+            body.insert(member_name.clone(), field.clone());
+        }
+    }
+
+    if content_type.is_none() && !body.is_empty() {
+        let document = Value::Object(body);
+        payload = serialize_structure_body(model, protocol, shape, &document)?;
+        content_type = Some(body_content_type(protocol));
+    }
+
+
+    headers.push((
+        ":content-type".to_string(),
+        HeaderValue::String(content_type.unwrap_or("application/octet-stream").to_string()),
+    ));
+    Ok(encode(&headers, &payload))
+}
+
+fn body_content_type(protocol: Protocol) -> &'static str {
+    match protocol {
+        Protocol::RestXml | Protocol::AwsQuery | Protocol::Ec2Query => "text/xml",
+        _ => "application/json",
+    }
+}
+
+fn serialize_body(
+    model: &Model,
+    protocol: Protocol,
+    target: &ShapeId,
+    value: &Value,
+) -> Result<Vec<u8>, ProtocolError> {
+    match model.shape(target) {
+        Some(Shape::Structure(shape)) => serialize_structure_body(model, protocol, shape, value),
+        _ => Ok(Vec::new()),
+    }
+}
+
+/// Every duplex operation modelled today is `restJson1`, so the body is JSON. An XML
+/// input stream would need a serializer that does not exist yet, and saying so beats
+/// sending an empty frame.
+fn serialize_structure_body(
+    model: &Model,
+    protocol: Protocol,
+    shape: &StructureShape,
+    value: &Value,
+) -> Result<Vec<u8>, ProtocolError> {
+    if matches!(protocol, Protocol::RestXml | Protocol::AwsQuery | Protocol::Ec2Query) {
+        return Err(ProtocolError::Unsupported(
+            "sending an XML event stream is not implemented".to_string(),
+        ));
+    }
+    let mut wire = crate::json::serialize_structure(model, protocol, shape, value)?;
+    pass_blobs_through(model, shape, value, &mut wire);
+    Ok(crate::json::to_python_json(&wire).into_bytes())
+}
+
+/// Put blob members back as the caller wrote them.
+///
+/// Elsewhere in the CLI a blob parameter is raw text that gets base64-encoded on the way
+/// out, while a blob in a *response* is printed as the base64 from the wire — an
+/// asymmetry inherited from botocore. Event streams cannot live with it: their blobs are
+/// audio and model output, which have no text form, and a stream is something you feed
+/// back what you were just given. So here a blob is base64 in both directions, and this
+/// undoes the generic serializer's second encoding.
+fn pass_blobs_through(
+    model: &Model,
+    shape: &StructureShape,
+    input: &Value,
+    wire: &mut Value,
+) {
+    let (Some(members), Some(out)) = (input.as_object(), wire.as_object_mut()) else { return };
+    for (name, member) in &shape.members {
+        if !matches!(model.shape(&member.target), Some(Shape::Blob(_))) {
+            continue;
+        }
+        let Some(Value::String(original)) = members.get(name) else { continue };
+        let wire_name = crate::shapes::json_name(name, member);
+        if let Some(slot) = out.get_mut(wire_name) {
+            *slot = Value::String(original.clone());
+        }
+    }
+}
+
+/// A JSON value as an event-stream header. Types the format cannot carry are skipped.
+fn json_header(value: &Value) -> Option<HeaderValue> {
+    Some(match value {
+        Value::Bool(b) => HeaderValue::Bool(*b),
+        Value::String(s) => HeaderValue::String(s.clone()),
+        Value::Number(n) => HeaderValue::Long(n.as_i64()?),
+        _ => return None,
+    })
 }
 
 /// Decode one event's structure: header-bound members from the frame headers, and the
@@ -821,6 +1044,105 @@ mod tests {
             }
             other => panic!("expected an event, got {other:?}"),
         }
+    }
+
+    /// `encode` must agree byte for byte with the hand-rolled builder above, which is an
+    /// independent implementation of the same spec. Using the encoder to build the
+    /// decoder's fixtures would let a shared mistake pass both ways.
+    #[test]
+    fn the_encoder_agrees_with_the_hand_built_frames() {
+        let headers = [
+            (":message-type".to_string(), HeaderValue::String("event".into())),
+            ("n".to_string(), HeaderValue::Long(-9)),
+            ("flag".to_string(), HeaderValue::Bool(true)),
+            ("raw".to_string(), HeaderValue::Bytes(vec![9, 8, 7])),
+        ];
+        let by_hand = frame(
+            &[
+                (":message-type", HeaderValue::String("event".into())),
+                ("n", HeaderValue::Long(-9)),
+                ("flag", HeaderValue::Bool(true)),
+                ("raw", HeaderValue::Bytes(vec![9, 8, 7])),
+            ],
+            b"body",
+        );
+        assert_eq!(encode(&headers, b"body"), by_hand);
+        assert_eq!(encode(&[], b""), frame(&[], b""));
+    }
+
+    /// What the CLI prints for an incoming event is what it accepts for an outgoing one.
+    #[test]
+    fn an_encoded_event_decodes_back_to_the_same_document() {
+        let model = json_model();
+        let union = structure(&model, "com.x#Stream");
+        let value = serde_json::json!({"SequenceNumber": "42", "Count": 7});
+        let bytes =
+            encode_event(&model, Protocol::AwsJson1_1, &union, "Rec", &value).unwrap();
+        let event =
+            interpret(&model, Protocol::AwsJson1_1, &union, &decode(&bytes).unwrap()).unwrap();
+        assert_eq!(event, Event::Event { name: "Rec".into(), value });
+    }
+
+    /// The header/payload split has to survive the round trip too, or an audio chunk
+    /// ends up inside the JSON body where the service will not look for it.
+    #[test]
+    fn an_encoded_event_keeps_the_header_and_payload_split() {
+        let model = json_model();
+        let union = structure(&model, "com.x#Stream");
+        let value = serde_json::json!({"Kind": "audio", "Bytes": "cmF3"});
+        let bytes =
+            encode_event(&model, Protocol::AwsJson1_1, &union, "Chunk", &value).unwrap();
+        let frame = decode(&bytes).unwrap();
+        assert_eq!(frame.header_str("Kind"), Some("audio"));
+        assert_eq!(frame.payload, b"raw");
+        assert_eq!(frame.header_str(":content-type"), Some("application/octet-stream"));
+
+        let event = interpret(&model, Protocol::AwsJson1_1, &union, &frame).unwrap();
+        assert_eq!(event, Event::Event { name: "Chunk".into(), value });
+    }
+
+    /// A blob in an event *body* (not the payload) must survive a round trip unchanged.
+    /// The generic JSON serializer base64-encodes blob input, which would encode an
+    /// already-base64 audio chunk a second time — and the service would decode it to
+    /// base64 text rather than to audio.
+    #[test]
+    fn a_body_blob_is_base64_in_both_directions() {
+        let model = Model::from_json(
+            br#"{"smithy":"2.0","shapes":{
+              "com.x#S":{"type":"service","version":"1","traits":{}},
+              "com.x#Bin":{"type":"blob"},
+              "com.x#Str":{"type":"string"},
+              "com.x#Audio":{"type":"structure","members":{
+                "audioChunk":{"target":"com.x#Bin"},
+                "label":{"target":"com.x#Str"}}},
+              "com.x#Stream":{"type":"union","traits":{"smithy.api#streaming":{}},
+                "members":{"Audio":{"target":"com.x#Audio"}}}}}"#,
+        )
+        .expect("fixture model");
+        let union = structure(&model, "com.x#Stream");
+        // "aGk=" is base64 for "hi".
+        let value = serde_json::json!({"audioChunk": "aGk=", "label": "one"});
+        let bytes =
+            encode_event(&model, Protocol::RestJson1, &union, "Audio", &value).unwrap();
+        let frame = decode(&bytes).unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&frame.payload),
+            r#"{"audioChunk": "aGk=", "label": "one"}"#
+        );
+
+        let event = interpret(&model, Protocol::RestJson1, &union, &frame).unwrap();
+        assert_eq!(event, Event::Event { name: "Audio".into(), value });
+    }
+
+    #[test]
+    fn refuses_an_event_the_stream_does_not_have() {
+        let model = json_model();
+        let union = structure(&model, "com.x#Stream");
+        let error =
+            encode_event(&model, Protocol::AwsJson1_1, &union, "Nope", &serde_json::json!({}))
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("not an event of this stream"), "{error}");
     }
 
     #[test]

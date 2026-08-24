@@ -121,6 +121,37 @@ pub fn sign_canonical_request(ctx: &SigningContext<'_>, canonical_request: &str)
     (string_to_sign, signature)
 }
 
+/// The algorithm name for signing one frame of a request event stream.
+pub const EVENT_ALGORITHM: &str = "AWS4-HMAC-SHA256-PAYLOAD";
+
+/// Sign one frame of an outgoing event stream.
+///
+/// Every frame of a duplex request carries its own signature, and they form a chain:
+/// each frame signs over the signature of the one before it, with the initial HTTP
+/// request's signature as the seed. That is why this takes `prior_signature` and why a
+/// caller must feed the result back in for the next frame — sending frames out of order,
+/// or re-signing one, breaks the chain and the service rejects everything after it.
+///
+/// `date_headers` is the encoded event-stream header block containing `:date` alone —
+/// the frame's headers *minus* the signature header, which cannot sign itself. It is
+/// passed in already encoded because the framing lives in the protocol crate, which sits
+/// beside this one rather than below it.
+pub fn sign_event(
+    ctx: &SigningContext<'_>,
+    prior_signature: &str,
+    date_headers: &[u8],
+    payload: &[u8],
+) -> String {
+    let string_to_sign = format!(
+        "{EVENT_ALGORITHM}\n{}\n{}\n{prior_signature}\n{}\n{}",
+        ctx.timestamp,
+        ctx.scope(),
+        hex(Sha256::digest(date_headers)),
+        hex(Sha256::digest(payload)),
+    );
+    sign_string_to_sign(ctx, &string_to_sign)
+}
+
 pub fn sign_string_to_sign(ctx: &SigningContext<'_>, string_to_sign: &str) -> String {
     hex(derive_signature(ctx, string_to_sign.as_bytes()))
 }

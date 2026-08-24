@@ -89,9 +89,9 @@ impl Customizations {
 /// removals we deliberately do not honour: the CLI decodes `vnd.amazon.eventstream`, so
 /// there is no reason to hide the operations that use it.
 ///
-/// Operations with an event stream on the *input* side stay removed. Those are duplex and
-/// need SigV4's rolling per-frame signature, which the blocking transport cannot do; a
-/// command that connects and then cannot send would be worse than one that is absent.
+/// Duplex operations — an event stream on the input side as well as the output — are
+/// included too. They send request events as JSON Lines on stdin, each frame carrying its
+/// own signature in the chain seeded by the initial request.
 pub(crate) const EVENT_STREAM_OPERATIONS: &[(&str, &str)] = &[
     ("bedrock-agent-runtime", "agentic-retrieve-stream"),
     ("bedrock-agent-runtime", "invoke-agent"),
@@ -110,6 +110,12 @@ pub(crate) const EVENT_STREAM_OPERATIONS: &[(&str, &str)] = &[
     ("lambda", "invoke-with-response-stream"),
     ("logs", "get-log-object"),
     ("sagemaker-runtime", "invoke-endpoint-with-response-stream"),
+    // Duplex: these also stream events in the request.
+    ("bedrock-runtime", "invoke-model-with-bidirectional-stream"),
+    ("connecthealth", "start-medical-scribe-listening-session"),
+    ("lexv2-runtime", "start-conversation"),
+    ("polly", "start-speech-synthesis-stream"),
+    ("qbusiness", "chat"),
 ];
 
 /// Whether this removal is one we deliberately do not honour.
