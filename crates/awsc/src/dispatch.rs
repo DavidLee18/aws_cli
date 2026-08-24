@@ -6,6 +6,7 @@
 
 use aws_cli_model::shape::{OperationShape, StructureShape};
 use aws_cli_model::{Model, Protocol};
+use aws_cli_runtime::http::Body;
 use aws_cli_protocol::{
     aws_json, cbor, ec2_query, http_binding, json, query, response_fixups, xml, ProtocolError,
 };
@@ -21,8 +22,42 @@ pub struct WireRequest {
     pub content_type: Option<String>,
     /// Protocol-specific headers, such as `X-Amz-Target`.
     pub headers: Vec<(String, String)>,
-    /// Bytes, not text: `rpcv2Cbor` bodies are binary.
-    pub body: Vec<u8>,
+    /// Bytes, not text: `rpcv2Cbor` bodies are binary — and a streaming payload is not
+    /// bytes at all, but a file read while the request is in flight.
+    pub body: aws_cli_runtime::http::Body,
+}
+
+/// Whether the service requires a checksum header on this operation's request body.
+///
+/// Two spellings: `aws.protocols#httpChecksum` with `requestChecksumRequired` (S3), and
+/// the older `smithy.api#httpChecksumRequired` (S3 Control). Without it the service
+/// refuses the request outright — `PutBucketTagging` answers "Missing required header for
+/// this request: Content-MD5 OR x-amz-checksum-*".
+fn requires_request_checksum(op: &OperationShape) -> bool {
+    if op.traits.has("smithy.api#httpChecksumRequired") {
+        return true;
+    }
+    op.traits
+        .get("aws.protocols#httpChecksum")
+        .and_then(|v| v.get("requestChecksumRequired").cloned())
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Attach `Content-MD5` when the operation demands a checksum.
+///
+/// Only for a body already in memory: a streaming payload would have to be read twice,
+/// and no operation that requires a checksum takes one.
+fn add_request_checksum(op: &OperationShape, wire: &mut WireRequest) {
+    if !requires_request_checksum(op) {
+        return;
+    }
+    let Some(bytes) = wire.body.as_bytes() else { return };
+    use base64ct::{Base64, Encoding};
+    use md5::{Digest, Md5};
+    wire
+        .headers
+        .push(("Content-MD5".to_string(), Base64::encode_string(&Md5::digest(bytes))));
 }
 
 /// Build the request for an operation.
@@ -36,6 +71,29 @@ pub fn serialize(
 ) -> Result<WireRequest, ProtocolError> {
     let api_version = model.service().map(|s| s.version.clone()).unwrap_or_default();
 
+    let mut wire = serialize_for_protocol(
+        model,
+        protocol,
+        &api_version,
+        operation_wire_name,
+        op,
+        input_shape,
+        input,
+    )?;
+    add_request_checksum(op, &mut wire);
+    Ok(wire)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn serialize_for_protocol(
+    model: &Model,
+    protocol: Protocol,
+    api_version: &str,
+    operation_wire_name: &str,
+    op: &OperationShape,
+    input_shape: Option<&StructureShape>,
+    input: Option<&Value>,
+) -> Result<WireRequest, ProtocolError> {
     match protocol {
         Protocol::AwsQuery => Ok(WireRequest {
             method: "POST".into(),
@@ -43,14 +101,10 @@ pub fn serialize(
             query: String::new(),
             content_type: Some(FORM_CONTENT_TYPE.into()),
             headers: Vec::new(),
-            body: query::serialize(
-                model,
-                operation_wire_name,
-                &api_version,
-                input_shape,
-                input,
-            )?
-            .into_bytes(),
+            body: Body::from_vec(
+                query::serialize(model, operation_wire_name, api_version, input_shape, input)?
+                    .into_bytes(),
+            ),
         }),
 
         Protocol::Ec2Query => Ok(WireRequest {
@@ -59,14 +113,10 @@ pub fn serialize(
             query: String::new(),
             content_type: Some(FORM_CONTENT_TYPE.into()),
             headers: Vec::new(),
-            body: ec2_query::serialize(
-                model,
-                operation_wire_name,
-                &api_version,
-                input_shape,
-                input,
-            )?
-            .into_bytes(),
+            body: Body::from_vec(
+                ec2_query::serialize(model, operation_wire_name, api_version, input_shape, input)?
+                    .into_bytes(),
+            ),
         }),
 
         Protocol::AwsJson1_0 | Protocol::AwsJson1_1 => {
@@ -85,13 +135,14 @@ pub fn serialize(
                 query: String::new(),
                 content_type: Some(request.content_type),
                 headers: vec![("x-amz-target".into(), request.target)],
-                body: request.body.into_bytes(),
+                body: Body::from_vec(request.body.into_bytes()),
             })
         }
 
         Protocol::RestJson1 | Protocol::RestXml => serialize_rest(
             model,
             protocol,
+            operation_wire_name,
             op,
             input_shape,
             input,
@@ -108,7 +159,7 @@ pub fn serialize(
                 (cbor::PROTOCOL_HEADER.0.into(), cbor::PROTOCOL_HEADER.1.into()),
                 ("accept".into(), cbor::CONTENT_TYPE.into()),
             ],
-            body: cbor::serialize(model, input_shape, input)?,
+            body: Body::from_vec(cbor::serialize(model, input_shape, input)?),
         }),
 
         Protocol::Unknown => Err(ProtocolError::Unsupported(format!("{protocol:?}"))),
@@ -121,6 +172,7 @@ const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded; charset=utf-
 fn serialize_rest(
     model: &Model,
     protocol: Protocol,
+    operation_wire_name: &str,
     op: &OperationShape,
     input_shape: Option<&StructureShape>,
     input: Option<&Value>,
@@ -139,7 +191,7 @@ fn serialize_rest(
             query: String::new(),
             content_type: None,
             headers: Vec::new(),
-            body: Vec::new(),
+            body: Body::Empty,
         });
     };
 
@@ -159,6 +211,33 @@ fn serialize_rest(
         }
     };
 
+    // A streaming payload is a file to send, not a value to encode. The member's value is
+    // the path, and it is described rather than read so a 5 GB upload stays a file handle
+    // instead of a 5 GB allocation.
+    let streaming_payload = bound.payload_member.as_deref().and_then(|name| {
+        let member = shape.members.get(name)?;
+        let target = model.shape(&member.target)?;
+        match target {
+            aws_cli_model::Shape::Blob(blob) if blob.traits.has("smithy.api#streaming") => {
+                values.get(name)?.as_str().map(str::to_string)
+            }
+            _ => None,
+        }
+    });
+    if let Some(path) = streaming_payload {
+        let len = std::fs::metadata(&path)
+            .map_err(|e| ProtocolError::Unsupported(format!("{path}: {e}")))?
+            .len();
+        return Ok(WireRequest {
+            method: http.method,
+            path: bound.path,
+            query: encode_query(&bound.query),
+            content_type: None,
+            headers: bound.headers,
+            body: Body::FileRange { path: path.into(), offset: 0, len },
+        });
+    }
+
     let (body, content_type) = match protocol {
         Protocol::RestJson1 => {
             let encoded = if bound.payload_member.is_some() {
@@ -173,24 +252,65 @@ fn serialize_rest(
         }
         // botocore sends NO Content-Type for restXml, even with an XML body; the spec
         // says application/xml but the reference omits it, and services accept that.
+        Protocol::RestXml => (
+            xml_request_body(model, shape, &bound, values, operation_wire_name)?,
+            None,
+        ),
         _ => (String::new(), None),
     };
-
-    let query = bound
-        .query
-        .iter()
-        .map(|(k, v)| if v.is_empty() { k.clone() } else { format!("{k}={v}") })
-        .collect::<Vec<_>>()
-        .join("&");
 
     Ok(WireRequest {
         method: http.method,
         path: bound.path,
-        query,
+        query: encode_query(&bound.query),
         content_type,
         headers: bound.headers,
-        body: body.into_bytes(),
+        body: Body::from_vec(body.into_bytes()),
     })
+}
+
+fn encode_query(pairs: &[(String, String)]) -> String {
+    pairs
+        .iter()
+        .map(|(k, v)| if v.is_empty() { k.clone() } else { format!("{k}={v}") })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// The XML request body for a `restXml` operation.
+///
+/// Either the payload member serialised on its own, or the members the HTTP bindings did
+/// not claim wrapped in the operation's request element. Returning an empty string when
+/// there is nothing to send is right; returning one when there *is* something was the bug
+/// — `s3api put-bucket-tagging` sent no body at all and the service saw an empty request.
+fn xml_request_body(
+    model: &Model,
+    shape: &StructureShape,
+    bound: &http_binding::BoundRequest,
+    values: &Value,
+    operation_wire_name: &str,
+) -> Result<String, ProtocolError> {
+    if let Some(name) = &bound.payload_member {
+        let Some(member) = shape.members.get(name) else { return Ok(String::new()) };
+        let Some(value) = values.get(name) else { return Ok(String::new()) };
+        if value.is_null() {
+            return Ok(String::new());
+        }
+        return xml::serialize_payload(model, name, member, value);
+    }
+
+    let mut object = serde_json::Map::new();
+    for name in &bound.body_members {
+        if let Some(v) = values.get(name) {
+            if !v.is_null() {
+                object.insert(name.clone(), v.clone());
+            }
+        }
+    }
+    if object.is_empty() {
+        return Ok(String::new());
+    }
+    xml::serialize_request(model, shape, operation_wire_name, &Value::Object(object))
 }
 
 /// Parse a successful response body into the JSON the CLI prints.

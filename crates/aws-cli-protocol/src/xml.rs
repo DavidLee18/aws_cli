@@ -1,10 +1,10 @@
-//! Shape-driven XML response parsing for the query and restXml protocols.
+//! Shape-driven XML for the query and restXml protocols: responses in, requests out.
 //!
 //! The output shape decides how each element is interpreted: a `list` member repeats, a
 //! `map` becomes an object, a scalar is coerced by type. Parsing blind would lose that —
 //! a single-element list is indistinguishable from a scalar in XML alone.
 
-use aws_cli_model::shape::StructureShape;
+use aws_cli_model::shape::{Member, StructureShape};
 use aws_cli_model::{Model, Shape, ShapeId};
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -231,6 +231,303 @@ fn parse_value(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Writing request bodies
+// ---------------------------------------------------------------------------
+
+/// The element name a member is written under: `xmlName` if it has one, else its own.
+fn element_name<'a>(member_name: &'a str, member: &'a Member) -> &'a str {
+    member
+        .traits
+        .get("smithy.api#xmlName")
+        .and_then(|v| v.as_str())
+        .unwrap_or(member_name)
+}
+
+/// Escape text for an element body or attribute value.
+fn escape(text: &str, out: &mut String) {
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            other => out.push(other),
+        }
+    }
+}
+
+/// Serialise an operation's un-bound members as its request document.
+///
+/// The root element is the input shape's `xmlName` when it has one, and the operation
+/// name otherwise — S3 names most of them (`Tagging`, `CORSConfiguration`), and where it
+/// does not the operation name is what the service expects.
+pub fn serialize_request(
+    model: &Model,
+    shape: &StructureShape,
+    operation_wire_name: &str,
+    values: &Value,
+) -> Result<String, ProtocolError> {
+    let root = shape
+        .traits
+        .get("smithy.api#xmlName")
+        .and_then(|v| v.as_str())
+        .unwrap_or(operation_wire_name);
+
+    let mut out = String::new();
+    out.push('<');
+    out.push_str(root);
+    if let Some(ns) = namespace(model, &shape.traits) {
+        out.push_str(&format!(" xmlns=\"{ns}\""));
+    }
+    out.push_str(&attributes(shape, values));
+    out.push('>');
+    write_members(model, shape, values, &mut out)?;
+    out.push_str(&format!("</{root}>"));
+    Ok(out)
+}
+
+/// Serialise the single member that is the whole payload.
+pub fn serialize_payload(
+    model: &Model,
+    member_name: &str,
+    member: &Member,
+    value: &Value,
+) -> Result<String, ProtocolError> {
+    let shape = model
+        .shape(&member.target)
+        .ok_or_else(|| ProtocolError::UnknownShape(member.target.to_string()))?;
+
+    // A blob or string payload is the body verbatim, not an XML document.
+    match shape {
+        Shape::Blob(_) => return Ok(value.as_str().unwrap_or_default().to_string()),
+        Shape::String(_) | Shape::Enum(_) => {
+            return Ok(value.as_str().unwrap_or_default().to_string())
+        }
+        _ => {}
+    }
+
+    // The payload's own element name wins over the member's, since the document element
+    // is the shape rather than the field that referenced it.
+    let root = shape
+        .traits()
+        .get("smithy.api#xmlName")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| element_name(member_name, member))
+        .to_string();
+
+    let mut out = String::new();
+    out.push('<');
+    out.push_str(&root);
+    if let Some(ns) = namespace(model, shape.traits()) {
+        out.push_str(&format!(" xmlns=\"{ns}\""));
+    }
+    if let Shape::Structure(s) | Shape::Union(s) = shape {
+        out.push_str(&attributes(s, value));
+    }
+    out.push('>');
+    match shape {
+        Shape::Structure(s) | Shape::Union(s) => write_members(model, s, value, &mut out)?,
+        _ => write_scalar(value, &mut out),
+    }
+    out.push_str(&format!("</{root}>"));
+    Ok(out)
+}
+
+/// The `xmlns` for a request document.
+///
+/// The shape's own namespace wins, but S3 and the other restXml services declare theirs
+/// once on the *service* and expect every request body to carry it — the reference emits
+/// `xmlns="http://s3.amazonaws.com/doc/2006-03-01/"` on documents whose shape says
+/// nothing about namespaces at all.
+fn namespace(model: &Model, traits: &aws_cli_model::shape::Traits) -> Option<String> {
+    let from = |t: &aws_cli_model::shape::Traits| {
+        t.get("smithy.api#xmlNamespace")
+            .and_then(|v| v.get("uri").cloned())
+            .and_then(|v| v.as_str().map(str::to_string))
+    };
+    from(traits).or_else(|| model.service().ok().and_then(|s| from(&s.traits)))
+}
+
+/// The attributes a structure contributes to its own start tag.
+///
+/// Exactly one member in the whole catalogue uses `xmlAttribute` — S3's `Grantee$Type`,
+/// named `xsi:type` — but a grant written with it as a child element is silently the
+/// wrong document, and S3 rejects the request rather than misreading it.
+fn attributes(shape: &StructureShape, values: &Value) -> String {
+    let Some(map) = values.as_object() else { return String::new() };
+    let mut out = String::new();
+    for (member_name, member) in &shape.members {
+        if !member.traits.has("smithy.api#xmlAttribute") {
+            continue;
+        }
+        let Some(value) = map.get(member_name) else { continue };
+        let Some(text) = value.as_str() else { continue };
+        let name = element_name(member_name, member);
+        // A prefixed attribute needs its prefix bound on the same element; `xsi` is the
+        // only one that occurs, and botocore emits the schema-instance URI for it.
+        if let Some(prefix) = name.split_once(':').map(|(p, _)| p) {
+            out.push_str(&format!(
+                " xmlns:{prefix}=\"http://www.w3.org/2001/XMLSchema-instance\""
+            ));
+        }
+        out.push_str(&format!(" {name}=\""));
+        escape(text, &mut out);
+        out.push('"');
+    }
+    out
+}
+
+fn write_members(
+    model: &Model,
+    shape: &StructureShape,
+    values: &Value,
+    out: &mut String,
+) -> Result<(), ProtocolError> {
+    let Some(map) = values.as_object() else { return Ok(()) };
+    for (member_name, member) in &shape.members {
+        // Attributes were written into the start tag already.
+        if member.traits.has("smithy.api#xmlAttribute") {
+            continue;
+        }
+        let Some(value) = map.get(member_name) else { continue };
+        if value.is_null() {
+            continue;
+        }
+        write_member(model, member_name, member, value, out)?;
+    }
+    Ok(())
+}
+
+fn write_member(
+    model: &Model,
+    member_name: &str,
+    member: &Member,
+    value: &Value,
+    out: &mut String,
+) -> Result<(), ProtocolError> {
+    let name = element_name(member_name, member);
+    let target = model
+        .shape(&member.target)
+        .ok_or_else(|| ProtocolError::UnknownShape(member.target.to_string()))?;
+
+    match target {
+        Shape::List(list) | Shape::Set(list) => {
+            let Some(items) = value.as_array() else { return Ok(()) };
+            // `xmlFlattened` sits on the member as often as on the list shape, and the
+            // difference is whether the items are wrapped: flattened repeats the member
+            // element, otherwise the items sit inside it under the list member's name.
+            let flattened = member.traits.has("smithy.api#xmlFlattened")
+                || target.traits().has("smithy.api#xmlFlattened");
+            let item_name = element_name("member", &list.member);
+            if flattened {
+                for item in items {
+                    write_element(model, name, &list.member, item, out)?;
+                }
+            } else {
+                out.push_str(&format!("<{name}>"));
+                for item in items {
+                    write_element(model, item_name, &list.member, item, out)?;
+                }
+                out.push_str(&format!("</{name}>"));
+            }
+        }
+        Shape::Map(map_shape) => {
+            let Some(entries) = value.as_object() else { return Ok(()) };
+            let flattened = member.traits.has("smithy.api#xmlFlattened")
+                || target.traits().has("smithy.api#xmlFlattened");
+            let key_name = element_name("key", &map_shape.key);
+            let value_name = element_name("value", &map_shape.value);
+            if !flattened {
+                out.push_str(&format!("<{name}>"));
+            }
+            for (k, v) in entries {
+                let entry = if flattened { name } else { "entry" };
+                out.push_str(&format!("<{entry}>"));
+                out.push_str(&format!("<{key_name}>"));
+                escape(k, out);
+                out.push_str(&format!("</{key_name}>"));
+                write_element(model, value_name, &map_shape.value, v, out)?;
+                out.push_str(&format!("</{entry}>"));
+            }
+            if !flattened {
+                out.push_str(&format!("</{name}>"));
+            }
+        }
+        _ => write_element(model, name, member, value, out)?,
+    }
+    Ok(())
+}
+
+/// One element: `<name>...</name>`, recursing for structures.
+fn write_element(
+    model: &Model,
+    name: &str,
+    member: &Member,
+    value: &Value,
+    out: &mut String,
+) -> Result<(), ProtocolError> {
+    let target = model
+        .shape(&member.target)
+        .ok_or_else(|| ProtocolError::UnknownShape(member.target.to_string()))?;
+
+    match target {
+        Shape::Structure(s) | Shape::Union(s) => {
+            out.push_str(&format!("<{name}{}>", attributes(s, value)));
+            write_members(model, s, value, out)?;
+            out.push_str(&format!("</{name}>"));
+        }
+        Shape::List(_) | Shape::Set(_) | Shape::Map(_) => {
+            // A nested collection is named by the member that holds it.
+            write_member(model, name, member, value, out)?;
+        }
+        Shape::Blob(_) => {
+            out.push_str(&format!("<{name}>"));
+            // Blobs travel base64-encoded, as they do in every other protocol.
+            if let Some(text) = value.as_str() {
+                out.push_str(&crate::shapes::base64_encode(text.as_bytes()));
+            }
+            out.push_str(&format!("</{name}>"));
+        }
+        Shape::Timestamp(_) => {
+            out.push_str(&format!("<{name}>"));
+            let format = crate::shapes::TimestampFormat::resolve(
+                crate::shapes::Protocol::RestXml,
+                crate::shapes::Location::Body,
+                member,
+            );
+            match value {
+                Value::String(text) => match crate::shapes::parse_timestamp(text) {
+                    Some(unix) => escape(&format.format(unix), out),
+                    None => escape(text, out),
+                },
+                Value::Number(n) => {
+                    if let Some(unix) = n.as_i64() {
+                        escape(&format.format(unix), out);
+                    }
+                }
+                _ => {}
+            }
+            out.push_str(&format!("</{name}>"));
+        }
+        _ => {
+            out.push_str(&format!("<{name}>"));
+            write_scalar(value, out);
+            out.push_str(&format!("</{name}>"));
+        }
+    }
+    Ok(())
+}
+
+fn write_scalar(value: &Value, out: &mut String) {
+    match value {
+        Value::String(text) => escape(text, out),
+        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        Value::Number(n) => out.push_str(&n.to_string()),
+        _ => {}
+    }
+}
+
 /// A service-level error returned in an XML error document.
 #[derive(Debug)]
 pub struct XmlError {
@@ -312,6 +609,153 @@ mod flattened_tests {
 
 #[cfg(test)]
 mod tests {
+    fn request_model() -> Model {
+        Model::from_json(
+            br#"{"smithy":"2.0","shapes":{
+              "com.x#S":{"type":"service","version":"1",
+                "traits":{"smithy.api#xmlNamespace":{"uri":"http://example.com/doc/"}}},
+              "com.x#Str":{"type":"string"},
+              "com.x#Num":{"type":"integer"},
+              "com.x#Flag":{"type":"boolean"},
+              "com.x#Tag":{"type":"structure","members":{
+                "Key":{"target":"com.x#Str"},
+                "Value":{"target":"com.x#Str"}}},
+              "com.x#TagSet":{"type":"list","member":{"target":"com.x#Tag",
+                "traits":{"smithy.api#xmlName":"Tag"}}},
+              "com.x#Names":{"type":"list","member":{"target":"com.x#Str"},
+                "traits":{"smithy.api#xmlFlattened":{}}},
+              "com.x#Grantee":{"type":"structure","members":{
+                "Type":{"target":"com.x#Str","traits":{
+                  "smithy.api#xmlAttribute":{},"smithy.api#xmlName":"xsi:type"}},
+                "URI":{"target":"com.x#Str"}}},
+              "com.x#Config":{"type":"structure","members":{
+                "TagSet":{"target":"com.x#TagSet"},
+                "Names":{"target":"com.x#Names","traits":{"smithy.api#xmlName":"Name"}},
+                "Enabled":{"target":"com.x#Flag"},
+                "Count":{"target":"com.x#Num"},
+                "Grantee":{"target":"com.x#Grantee"}}},
+              "com.x#Input":{"type":"structure","members":{
+                "Config":{"target":"com.x#Config",
+                  "traits":{"smithy.api#httpPayload":{}}}}}}}"#,
+        )
+        .expect("fixture model")
+    }
+
+    fn structure_of(model: &Model, id: &str) -> StructureShape {
+        let id = ShapeId::parse(id).expect("shape id");
+        match model.shape(&id).expect("shape present") {
+            Shape::Structure(s) | Shape::Union(s) => s.clone(),
+            other => panic!("expected a structure, got {other:?}"),
+        }
+    }
+
+    /// The service's namespace applies to request documents whose own shape declares
+    /// none — the reference emits it on every S3 body.
+    #[test]
+    fn a_request_document_carries_the_service_namespace() {
+        let model = request_model();
+        let shape = structure_of(&model, "com.x#Config");
+        let body = serialize_request(
+            &model,
+            &shape,
+            "PutConfig",
+            &serde_json::json!({"Count": 3}),
+        )
+        .unwrap();
+        assert_eq!(
+            body,
+            "<PutConfig xmlns=\"http://example.com/doc/\"><Count>3</Count></PutConfig>"
+        );
+    }
+
+    /// A wrapped list nests its items; a flattened one repeats the member element. Get
+    /// this backwards and the service reads an empty collection.
+    #[test]
+    fn wraps_lists_unless_they_are_flattened() {
+        let model = request_model();
+        let shape = structure_of(&model, "com.x#Config");
+        let body = serialize_request(
+            &model,
+            &shape,
+            "PutConfig",
+            &serde_json::json!({
+                "TagSet": [{"Key": "k", "Value": "v"}],
+                "Names": ["a", "b"]
+            }),
+        )
+        .unwrap();
+        assert!(
+            body.contains("<TagSet><Tag><Key>k</Key><Value>v</Value></Tag></TagSet>"),
+            "{body}"
+        );
+        assert!(body.contains("<Name>a</Name><Name>b</Name>"), "{body}");
+    }
+
+    /// `xmlAttribute` members belong in the start tag, with their prefix bound.
+    #[test]
+    fn writes_attribute_members_as_attributes() {
+        let model = request_model();
+        let shape = structure_of(&model, "com.x#Config");
+        let body = serialize_request(
+            &model,
+            &shape,
+            "PutConfig",
+            &serde_json::json!({"Grantee": {"Type": "Group", "URI": "u"}}),
+        )
+        .unwrap();
+        assert!(
+            body.contains(
+                "<Grantee xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" \
+                 xsi:type=\"Group\"><URI>u</URI></Grantee>"
+            ),
+            "{body}"
+        );
+    }
+
+    /// A payload member is the document itself, named by its own shape.
+    #[test]
+    fn a_payload_member_becomes_the_document() {
+        let model = request_model();
+        let input = structure_of(&model, "com.x#Input");
+        let member = input.members.get("Config").expect("Config member");
+        let body =
+            serialize_payload(&model, "Config", member, &serde_json::json!({"Count": 1})).unwrap();
+        assert_eq!(
+            body,
+            "<Config xmlns=\"http://example.com/doc/\"><Count>1</Count></Config>"
+        );
+    }
+
+    #[test]
+    fn escapes_text_that_would_close_an_element() {
+        let model = request_model();
+        let shape = structure_of(&model, "com.x#Config");
+        let body = serialize_request(
+            &model,
+            &shape,
+            "PutConfig",
+            &serde_json::json!({"TagSet": [{"Key": "a&b", "Value": "<c>"}]}),
+        )
+        .unwrap();
+        assert!(body.contains("<Key>a&amp;b</Key>"), "{body}");
+        assert!(body.contains("<Value>&lt;c&gt;</Value>"), "{body}");
+    }
+
+    /// Booleans are `true`/`false`, not `True` — Python's spelling would be rejected.
+    #[test]
+    fn writes_booleans_the_way_xml_spells_them() {
+        let model = request_model();
+        let shape = structure_of(&model, "com.x#Config");
+        let body = serialize_request(
+            &model,
+            &shape,
+            "PutConfig",
+            &serde_json::json!({"Enabled": false}),
+        )
+        .unwrap();
+        assert!(body.contains("<Enabled>false</Enabled>"), "{body}");
+    }
+
     use super::*;
 
     #[test]

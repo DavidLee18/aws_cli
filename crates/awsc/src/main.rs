@@ -114,7 +114,7 @@ fn main() -> ExitCode {
 fn run() -> Result<ExitCode, Failure> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
 
-    let parsed = match args::parse(&argv) {
+    let mut parsed = match args::parse(&argv) {
         Ok(args::Outcome::Run(p)) => p,
         // `help`/`--version` succeed; bare `awsc` prints usage but is a usage error, at
         // 252, matching the reference.
@@ -238,6 +238,12 @@ fn run() -> Result<ExitCode, Failure> {
         }
         return Ok(exit::code(exit::SUCCESS));
     }
+
+    // `parse` could not tell a list's values from a trailing positional, so hand back the
+    // tokens that were not the flag's. This runs before the outfile is read, since the
+    // outfile is exactly such a positional.
+    let operation = parsed.operation.clone();
+    args::rebalance(&model, input_shape, &cli_service, &operation, &mut parsed);
 
     // Operations whose output is a streaming blob gain a required trailing positional
     // naming the file to write. The reference injects it universally

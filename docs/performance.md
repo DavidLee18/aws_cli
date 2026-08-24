@@ -175,17 +175,47 @@ Validate on EC2 in-region, or any link well above 36 Mbps.
   `client error (Connect)` and nothing else. The `source()` chain is now appended, which
   is the difference between that and `invalid peer certificate: UnknownIssuer`.
 
-### 6. Open, found while confirming the above
+### 6. ~~Request bodies and argument arity~~ — done
 
-- **Multi-value arguments drop everything after the first.** `--instance-ids i-1 i-2`
-  sends only `i-1`; the parser takes one value per flag and the rest vanish into
-  positionals with no error. Affects every protocol — reproduced on `ec2` with the CBOR
-  work stashed. The fix is model-driven greediness (a list member takes many values, a
-  scalar takes one) and it collides with the trailing `outfile` positional that
-  streaming-output operations use, so it needs its own change.
-- **`s3api put-object --body <file>` fails with `MissingContentLength`.** Pre-existing;
-  reproduced with all of this session's work stashed. The high-level `s3 cp` path is
-  unaffected and round-trips correctly.
+Four bugs, all of the same family: something the request needed was silently absent.
+
+**Argument arity was guessed syntactically.** `parse` took exactly one value per flag, so
+`--instance-ids i-1 i-2` sent only `i-1` — the rest vanished into positionals with no
+error. Taking *every* following token instead would have eaten `get-object`'s trailing
+outfile, so arity has to come from the shape: a list member keeps them all, a scalar one,
+a boolean none. `parse` now collects greedily and `args::rebalance` hands back what did
+not belong, once the model is loaded. It runs before the outfile is read, because the
+outfile is exactly such a positional.
+
+The `aws s3` tree answers the same question up front — its flags are hand-written, not
+modelled — from a table in `s3::flag_arity`. That fixed a third bug found on the way:
+`s3 cp --recursive SRC DST` failed with `Unknown options: SRC`, because the boolean
+swallowed it; the flag only worked when written last. A test reads `transfer.rs`'s own
+match arms and asserts the table agrees with them, since a flag missing from it silently
+gets `Arity::One` and swallows a positional again.
+
+**restXml sent no request body at all.** There was no XML request serializer — the arm
+was `_ => (String::new(), None)`. 160 operations across s3, s3-control, cloudfront and
+route-53 were affected; `s3api put-bucket-tagging` sent an empty document and the service
+saw an empty request. The serializer mirrors the response parser: `xmlName`, wrapped vs
+`xmlFlattened` lists, maps, `xmlAttribute` (exactly one member in the whole catalogue —
+S3's `Grantee$Type` — but ACL grants are wrong without it), and the service-level
+`xmlNamespace` that every S3 body carries.
+
+Bodies were compared byte-for-byte against the reference for six operations. Only member
+*order* differed: the reference emits the user's input order, this emits model order.
+Checked live rather than assumed — S3 accepted model order and read both documents back
+correctly, so it is order-tolerant and the difference does not matter.
+
+**A streaming payload was encoded rather than sent.** `put-object --body <file>` hashed
+an empty body and S3 answered `MissingContentLength`. The member's value is a path, and
+it is now described as a `Body::FileRange` rather than read, so a 5 GB upload stays a file
+handle.
+
+**`Content-MD5` was never sent.** 27 S3 operations and 37 in S3 Control carry
+`aws.protocols#httpChecksum` with `requestChecksumRequired`, and refuse the request
+without it. Verified live: tagging, lifecycle, CORS, versioning, ownership controls and
+`delete-objects` all round-trip through a temporary bucket, which was then deleted.
 
 ## Rejected, with reasons
 

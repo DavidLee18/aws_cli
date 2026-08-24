@@ -387,7 +387,7 @@ impl<'a> Client<'a> {
             query: wire.query.clone(),
             content_type: wire.content_type.clone(),
             extra_headers,
-            body: http::Body::from_vec(wire.body.clone()),
+            body: wire.body.clone(),
         };
 
         let timestamp = sigv4::format_timestamp(crate::now_unix());
@@ -768,7 +768,7 @@ impl<'a> Client<'a> {
             &self.operation_path(&wire.path),
             &wire.query,
             &wire.headers,
-            http::Body::from_vec(wire.body),
+            wire.body,
         )?;
 
         if response.status >= 400 {
@@ -848,7 +848,7 @@ impl<'a> Client<'a> {
                 query: wire.query.clone(),
                 content_type: wire.content_type.clone(),
                 extra_headers,
-                body: http::Body::from_vec(wire.body.clone()),
+                body: wire.body.clone(),
             };
 
             // Re-signed each attempt, since the timestamp changes.

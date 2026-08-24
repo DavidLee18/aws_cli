@@ -21,6 +21,37 @@ use crate::client::Globals;
 use crate::exit;
 use crate::Failure;
 
+/// How many values an `aws s3` flag takes.
+///
+/// The s3 tree parses its own flags out of `Parsed::extras`, but the generic splitter has
+/// to know where a flag's values stop and the command's positionals start — without it
+/// `s3 cp --recursive SRC DST` hands `SRC` to `--recursive` and then rejects it as an
+/// unknown option, so the flag only worked when written last.
+///
+/// Kept beside the parser that consumes these flags, so the two cannot drift apart
+/// silently; `flag_arity_covers_every_flag` checks that they agree.
+pub fn flag_arity(flag: &str) -> crate::args::Arity {
+    use crate::args::Arity;
+    match flag {
+        "--recursive"
+        | "--dryrun"
+        | "--dry-run"
+        | "--quiet"
+        | "--only-show-errors"
+        | "--no-progress"
+        | "--human-readable"
+        | "--summarize"
+        | "--follow-symlinks"
+        | "--no-follow-symlinks"
+        | "--delete"
+        | "--size-only"
+        | "--exact-timestamps" => Arity::None,
+        // `--grants a=b=c d=e=f` takes every following token.
+        "--grants" => Arity::Many,
+        _ => Arity::One,
+    }
+}
+
 /// Percent-encode one path segment for an S3 object key.
 ///
 /// `/` is deliberately left alone — it separates key components in the URL — and the
@@ -179,6 +210,84 @@ pub fn dispatch(parsed: &Parsed, globals: &Globals) -> Result<std::process::Exit
 
 #[cfg(test)]
 mod tests {
+    /// The arity table is a second copy of knowledge that lives in `transfer.rs`'s match
+    /// arms, and a flag missing from it silently gets `Arity::One` — which swallows a
+    /// positional and produces "Unknown options: <path>". This checks the two agree by
+    /// reading the parser's own source.
+    #[test]
+    fn flag_arity_covers_every_flag() {
+        use crate::args::Arity;
+        let sources = [
+            include_str!("transfer.rs"),
+            include_str!("ls.rs"),
+            include_str!("bucket.rs"),
+            include_str!("sync.rs"),
+        ];
+
+        for source in sources {
+            let lines: Vec<&str> = source.lines().collect();
+            for (index, line) in lines.iter().enumerate() {
+                let line = line.trim();
+                // Match-arm lines of the form `"--flag" | "--other" => ...`.
+                let Some((patterns, rest)) = line.split_once("=>") else { continue };
+                if !patterns.trim_start().starts_with('"') {
+                    continue;
+                }
+                // A braced arm continues over several lines, and that is where
+                // `--concurrency` reads its value — stopping at the first line would
+                // call it a boolean.
+                let mut body = rest.to_string();
+                if rest.trim_end().ends_with('{') {
+                    let mut depth = 1i32;
+                    for next in lines.iter().skip(index + 1) {
+                        depth += next.matches('{').count() as i32;
+                        depth -= next.matches('}').count() as i32;
+                        body.push_str(next);
+                        if depth <= 0 {
+                            break;
+                        }
+                    }
+                }
+                let body = body.as_str();
+                let flags: Vec<&str> = patterns
+                    .split('|')
+                    .map(|p| p.trim().trim_matches('"'))
+                    .filter(|p| p.starts_with("--"))
+                    .collect();
+                if flags.is_empty() {
+                    continue;
+                }
+                // An arm that reads a value calls `take` or `value`; one that does not is
+                // a boolean. `--grants` consumes its own tokens in a loop.
+                let reads_value = body.contains("take(") || body.contains("value(");
+                for flag in flags {
+                    if flag == "--grants" {
+                        assert_eq!(flag_arity(flag), Arity::Many, "{flag}");
+                        continue;
+                    }
+                    let expected = if reads_value { Arity::One } else { Arity::None };
+                    assert_eq!(
+                        flag_arity(flag),
+                        expected,
+                        "{flag}: the table and the parser disagree"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The flags whose position used to matter, spelled out.
+    #[test]
+    fn boolean_flags_take_no_value() {
+        use crate::args::Arity;
+        for flag in ["--recursive", "--dryrun", "--delete", "--size-only", "--human-readable"] {
+            assert_eq!(flag_arity(flag), Arity::None, "{flag}");
+        }
+        for flag in ["--exclude", "--include", "--storage-class", "--acl"] {
+            assert_eq!(flag_arity(flag), Arity::One, "{flag}");
+        }
+    }
+
     use super::*;
 
     /// The distinction that broke signing against real S3: a path keeps its separators,

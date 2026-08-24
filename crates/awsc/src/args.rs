@@ -46,12 +46,34 @@ pub struct Parsed {
     /// Positional tokens after the operation name. Only custom commands use these
     /// (`codecommit credential-helper get`); the modeled path rejects them.
     pub positionals: Vec<String>,
+    /// Values a flag consumed beyond its first, with their argv positions.
+    ///
+    /// Parsing is purely syntactic: it cannot tell `--instance-ids i-1 i-2` (a list
+    /// taking both) from `--key k out.txt` (a scalar followed by a positional). Both are
+    /// collected here and [`rebalance`] decides once the model is known.
+    pub flag_extras: BTreeMap<String, Vec<(usize, String)>>,
     /// Non-global tokens exactly as they appeared in argv, in order.
     ///
     /// `parameters` loses both the ordering and the `--flag=value` vs `--flag value`
     /// distinction, and the reference reports unknown options by joining these raw tokens
     /// with `,` — so `--bogus=x` is one token but `--bogus x` is two.
     pub extras: Vec<String>,
+}
+
+/// How many values a flag takes.
+///
+/// Splitting argv needs this and cannot derive it: `--instance-ids i-1 i-2` and
+/// `--key k out.txt` are the same shape syntactically. The modeled path defers the
+/// question to [`rebalance`]; the `aws s3` tree answers it up front, since its flags are
+/// hand-written rather than modelled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arity {
+    /// A boolean: the flag is the whole argument.
+    None,
+    /// One value; anything after it is a positional.
+    One,
+    /// A list: every consecutive value belongs to it.
+    Many,
 }
 
 pub fn parse(argv: &[String]) -> Result<Outcome, String> {
@@ -100,6 +122,7 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
         generate_skeleton: None,
         color: None,
         positionals: Vec::new(),
+        flag_extras: BTreeMap::new(),
         extras: Vec::new(),
     };
 
@@ -210,12 +233,41 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
                 parsed.extras.push(arg.clone());
                 let value = if inline.is_some() {
                     Some(take_value()?)
-                } else if argv.get(i + 1).is_some_and(|n| !n.starts_with("--")) {
-                    i += 1;
-                    parsed.extras.push(argv[i].clone());
-                    Some(argv[i].clone())
                 } else {
-                    None
+                    // Take the consecutive non-flag tokens this flag can hold. For the
+                    // `s3` tree that is known now; for a modeled operation it is not, so
+                    // everything is taken and `rebalance` hands back what did not belong.
+                    let limit = match if owns_its_arguments {
+                        crate::s3::flag_arity(other)
+                    } else {
+                        Arity::Many
+                    } {
+                        Arity::None => 0,
+                        Arity::One => 1,
+                        Arity::Many => usize::MAX,
+                    };
+                    let mut values: Vec<(usize, String)> = Vec::new();
+                    while values.len() < limit
+                        && argv.get(i + 1).is_some_and(|n| !n.starts_with("--"))
+                    {
+                        i += 1;
+                        parsed.extras.push(argv[i].clone());
+                        values.push((i, argv[i].clone()));
+                    }
+                    let first = values.first().map(|(_, v)| v.clone());
+                    if values.len() > 1 {
+                        parsed.flag_extras.insert(other.to_string(), values.clone());
+                    }
+                    // Joined so a list member sees every value; `bind_value` splits a
+                    // scalar list on whitespace, which is the same shape the reference
+                    // produces from `--instance-ids i-1 i-2`.
+                    match values.len() {
+                        0 => None,
+                        1 => first,
+                        _ => Some(
+                            values.iter().map(|(_, v)| v.as_str()).collect::<Vec<_>>().join(" "),
+                        ),
+                    }
                 };
                 parsed.parameters.insert(other.to_string(), value);
             }
@@ -309,6 +361,77 @@ pub fn build_input_named(
         out.insert((*member_name).clone(), value);
     }
     Ok(Some(Value::Object(out)))
+}
+
+fn arity(model: &Model, member: &aws_cli_model::shape::Member) -> Arity {
+    match model.shape(&member.target) {
+        Some(Shape::Boolean(_)) => Arity::None,
+        Some(Shape::List(_) | Shape::Set(_)) => Arity::Many,
+        _ => Arity::One,
+    }
+}
+
+/// Return the values that belong to a positional rather than to the flag that swallowed
+/// them.
+///
+/// `parse` takes every consecutive non-flag token after a flag, because it cannot tell
+/// `--instance-ids i-1 i-2` from `--key k out.txt`. The model can: a list member keeps
+/// them all, a scalar keeps one, a boolean keeps none. Without this, `s3api get-object
+/// --bucket b --key k out.txt` writes to a file named `k out.txt` — and before it,
+/// `--instance-ids i-1 i-2` silently queried only `i-1`.
+pub fn rebalance(
+    model: &Model,
+    input_shape: Option<&StructureShape>,
+    service: &str,
+    operation: &str,
+    parsed: &mut Parsed,
+) {
+    if parsed.flag_extras.is_empty() {
+        return;
+    }
+    let Some(shape) = input_shape else { return };
+    // Same mapping the binder uses, so a renamed flag resolves to the same member.
+    let by_flag: BTreeMap<String, &aws_cli_model::shape::Member> = shape
+        .members
+        .iter()
+        .map(|(name, member)| {
+            let derived = naming::xform_name(name, "-");
+            let renamed = surface_overlays::rename_argument(service, operation, &derived);
+            (format!("--{}", proxy_rename(service, operation, &renamed)), member)
+        })
+        .collect();
+
+    let mut returned: Vec<(usize, String)> = Vec::new();
+    for (flag, values) in std::mem::take(&mut parsed.flag_extras) {
+        let lookup =
+            flag.strip_prefix("--no-").map(|r| format!("--{r}")).unwrap_or_else(|| flag.clone());
+        let keep = by_flag
+            .get(&lookup)
+            .map(|member| arity(model, member))
+            // An unknown flag keeps one value, which is what it would have had before;
+            // the unknown-option error that follows names the flag either way.
+            .unwrap_or(Arity::One);
+        let keep = match keep {
+            Arity::None => 0,
+            Arity::One => 1,
+            Arity::Many => values.len(),
+        };
+        if keep >= values.len() {
+            continue;
+        }
+        returned.extend(values[keep..].iter().cloned());
+        let kept: Vec<&str> = values[..keep].iter().map(|(_, v)| v.as_str()).collect();
+        parsed.parameters.insert(
+            flag,
+            if kept.is_empty() { None } else { Some(kept.join(" ")) },
+        );
+    }
+
+    // Argv order, so a trailing outfile stays trailing.
+    returned.sort_by_key(|(index, _)| *index);
+    for (_, value) in returned {
+        parsed.positionals.push(value);
+    }
 }
 
 /// The flags an operation requires that the user did not supply.
@@ -562,6 +685,82 @@ pub fn merge_cli_input(built: &mut Value, document: &Value) -> Result<(), String
 
 #[cfg(test)]
 mod tests {
+    /// A list member takes every value; a scalar takes one and hands the rest back as
+    /// positionals. Getting this wrong is silent both ways: `--instance-ids i-1 i-2`
+    /// queried only `i-1`, and greedily fixing that would have eaten `get-object`'s
+    /// outfile.
+    #[test]
+    fn splits_flag_values_from_positionals_by_shape() {
+        let model = aws_cli_model::Model::from_json(
+            br#"{"smithy":"2.0","shapes":{
+              "com.x#S":{"type":"service","version":"1","traits":{}},
+              "com.x#Str":{"type":"string"},
+              "com.x#Flag":{"type":"boolean"},
+              "com.x#Ids":{"type":"list","member":{"target":"com.x#Str"}},
+              "com.x#In":{"type":"structure","members":{
+                "InstanceIds":{"target":"com.x#Ids"},
+                "Key":{"target":"com.x#Str"},
+                "DryRun":{"target":"com.x#Flag"}}}}}"#,
+        )
+        .expect("fixture model");
+        let id = aws_cli_model::ShapeId::parse("com.x#In").expect("shape id");
+        let shape = match model.shape(&id).expect("shape present") {
+            Shape::Structure(s) => s.clone(),
+            other => panic!("expected a structure, got {other:?}"),
+        };
+
+        let argv: Vec<String> =
+            ["svc", "op", "--instance-ids", "i-1", "i-2", "--key", "k", "out.txt"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        let Outcome::Run(mut parsed) = parse(&argv).expect("parses") else {
+            panic!("expected a run")
+        };
+        rebalance(&model, Some(&shape), "svc", "op", &mut parsed);
+
+        assert_eq!(
+            parsed.parameters.get("--instance-ids"),
+            Some(&Some("i-1 i-2".to_string()))
+        );
+        assert_eq!(parsed.parameters.get("--key"), Some(&Some("k".to_string())));
+        assert_eq!(parsed.positionals, vec!["out.txt".to_string()]);
+
+        // And the list really becomes two elements, not one string.
+        let bound = build_input_named(&model, Some(&shape), &parsed.parameters, "svc", "op")
+            .expect("binds")
+            .expect("some input");
+        assert_eq!(bound["InstanceIds"], serde_json::json!(["i-1", "i-2"]));
+    }
+
+    /// A boolean keeps nothing: every token after it is a positional.
+    #[test]
+    fn a_boolean_flag_returns_all_its_tokens() {
+        let model = aws_cli_model::Model::from_json(
+            br#"{"smithy":"2.0","shapes":{
+              "com.x#S":{"type":"service","version":"1","traits":{}},
+              "com.x#Flag":{"type":"boolean"},
+              "com.x#In":{"type":"structure","members":{
+                "DryRun":{"target":"com.x#Flag"}}}}}"#,
+        )
+        .expect("fixture model");
+        let id = aws_cli_model::ShapeId::parse("com.x#In").expect("shape id");
+        let shape = match model.shape(&id).expect("shape present") {
+            Shape::Structure(s) => s.clone(),
+            other => panic!("expected a structure, got {other:?}"),
+        };
+        let argv: Vec<String> = ["svc", "op", "--dry-run", "a", "b"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let Outcome::Run(mut parsed) = parse(&argv).expect("parses") else {
+            panic!("expected a run")
+        };
+        rebalance(&model, Some(&shape), "svc", "op", &mut parsed);
+        assert_eq!(parsed.parameters.get("--dry-run"), Some(&None));
+        assert_eq!(parsed.positionals, vec!["a".to_string(), "b".to_string()]);
+    }
+
     use super::*;
 
     fn argv(items: &[&str]) -> Vec<String> {
