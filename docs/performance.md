@@ -111,15 +111,47 @@ Not performance work, but the pivot asked for as much of the AWS API as possible
   integers rather than decimal text, member names are length-prefixed rather than quoted
   and escaped.
 
-  Confirmed with `scripts/verify-cbor-requests.py`, a decoder written from RFC 8949
+  Confirmed twice. `scripts/verify-cbor-requests.py` is a decoder written from RFC 8949
   rather than from the Rust, so a request it can read is evidence rather than a shared
-  bug. All 16 services round-tripped with no problems reported: correct
-  `smithy-protocol`, `Content-Type` and `Accept` headers, the operation in the path, a
-  body that decodes with no trailing bytes, and a CBOR response parsed back. Nested
-  structures, lists, floats and tag-1 timestamps were all exercised through
-  `cloudwatch put-metric-data`.
+  bug: all 16 round-tripped with correct `smithy-protocol`, `Content-Type` and `Accept`
+  headers, the operation in the path, a body that decodes and consumes itself exactly,
+  and a CBOR response parsed back. `cloudwatch put-metric-data` exercised a structure
+  nested in a list, a float, and a tag-1 timestamp.
 
-### 3. Deferred until a fat pipe is available
+  Then against **live AWS**: 13 of the 16 returned real data, and the other three
+  answered *modelled business errors* (`InvalidParameterValueException`,
+  `ValidationException`) — which equally prove the round trip, since a protocol failure
+  looks like `UnknownOperationException` or a 415, not a business error.
+
+  That live pass is what found the endpoint bug below. Only the offline check had been
+  run when the flip was committed, and it could not have caught it: a local endpoint
+  override bypasses ruleset resolution entirely.
+
+### 3. Operation-level endpoint parameters
+
+`smithy.rules#staticContextParams` was not read at all, and that resolves a *different
+host* rather than failing. `arc-region-switch list-plans` sets `UseControlPlaneEndpoint`
+and belongs on `arc-region-switch-control-plane.<region>.api.aws`; without it the request
+went to `arc-region-switch.<region>.api.aws`, which answers `UnknownOperationException`
+with an empty message. 297 operations across 8 services carry the trait.
+
+Reading it exposed a second gap immediately: `s3api` never supplied `Bucket` to the
+ruleset. That had been harmless, because with `Bucket` unset S3's ruleset fell through to
+path-style — but `create-bucket` sets `UseS3ExpressControlEndpoint`, so once static
+params were honoured *every* bucket resolved to the S3 Express control endpoint.
+
+Supplying `Bucket` then exposed a third: the endpoint accounts for the bucket (in the host
+for virtual-host addressing, in `path_prefix` for a dotted name that no wildcard
+certificate matches), while the operation's `smithy.api#http` URI template still starts
+with `/{Bucket}` — so the bucket appeared twice and every `s3api` call taking a bucket
+returned 404 or `NoSuchKey`. `Client::operation_path` drops the segment, matching only a
+whole one so a bucket named `logs` cannot eat the `/logs-2` of an unrelated path.
+
+The lesson worth keeping: two of those three only appeared *after* the previous fix, and
+none of them are visible against a local endpoint override. Endpoint resolution has to be
+checked against real AWS.
+
+### 4. Deferred until a fat pipe is available
 
 These are real but unmeasurable on the current link. Do not implement them blind:
 
@@ -129,7 +161,7 @@ These are real but unmeasurable on the current link. Do not implement them blind
 
 Validate on EC2 in-region, or any link well above 36 Mbps.
 
-### 4. ~~Smaller~~ — done
+### 5. ~~Smaller~~ — done
 
 - **Body-less failures.** Every HEAD operation answers a failure with a status and no
   body, so the error parsers fell through to `An error occurred (Unknown) ... :` with an
@@ -142,6 +174,18 @@ Validate on EC2 in-region, or any link well above 36 Mbps.
 - **Connect errors carry their cause.** hyper renders a failed connect as
   `client error (Connect)` and nothing else. The `source()` chain is now appended, which
   is the difference between that and `invalid peer certificate: UnknownIssuer`.
+
+### 6. Open, found while confirming the above
+
+- **Multi-value arguments drop everything after the first.** `--instance-ids i-1 i-2`
+  sends only `i-1`; the parser takes one value per flag and the rest vanish into
+  positionals with no error. Affects every protocol — reproduced on `ec2` with the CBOR
+  work stashed. The fix is model-driven greediness (a list member takes many values, a
+  scalar takes one) and it collides with the trailing `outfile` positional that
+  streaming-output operations use, so it needs its own change.
+- **`s3api put-object --body <file>` fails with `MissingContentLength`.** Pre-existing;
+  reproduced with all of this session's work stashed. The high-level `s3 cp` path is
+  unaffected and round-trips correctly.
 
 ## Rejected, with reasons
 

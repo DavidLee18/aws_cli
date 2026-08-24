@@ -100,16 +100,65 @@ pub struct Client<'a> {
     retry: RefCell<retry::RetryPolicy>,
     debug: bool,
     no_sign_request: bool,
+    /// The bucket handed to the endpoint ruleset, if any.
+    ///
+    /// When it is set the endpoint has already accounted for the bucket — in the host
+    /// for virtual-host addressing, in `path_prefix` for path-style — so the operation's
+    /// own URI template must not repeat it. See [`Client::operation_path`].
+    endpoint_bucket: Option<String>,
 }
 
 impl<'a> Client<'a> {
+
+    /// The operation's path, with the bucket removed when the endpoint already carries it.
+    ///
+    /// S3's ruleset resolves the bucket into the endpoint: `my-bucket` becomes the host
+    /// `my-bucket.s3.<region>.amazonaws.com`, and a name a virtual host cannot express
+    /// (one containing a dot) becomes a path prefix instead. Either way the bucket is
+    /// already in the URL, while the operation's `smithy.api#http` URI template still
+    /// starts with `/{Bucket}` — so leaving both in place asks for
+    /// `my-bucket.s3.../my-bucket`, which S3 answers with 404 or NoSuchKey.
+    fn operation_path(&self, path: &str) -> String {
+        let Some(bucket) = &self.endpoint_bucket else { return path.to_string() };
+        let Some(rest) = path.strip_prefix('/').and_then(|p| p.strip_prefix(bucket.as_str()))
+        else {
+            return path.to_string();
+        };
+        // Only a whole segment counts: a bucket named `logs` must not eat the `/logs-2`
+        // of a key that merely starts the same way.
+        if !rest.is_empty() && !rest.starts_with('/') {
+            return path.to_string();
+        }
+        if rest.is_empty() { "/".to_string() } else { rest.to_string() }
+    }
+
     /// Resolve the endpoint and credentials for an already-loaded model.
     ///
     /// The model is borrowed rather than owned because `main` resolves the operation's
     /// shapes out of it before deciding whether a client is needed at all —
     /// `--generate-cli-skeleton` never builds one.
     pub fn new(model: &'a Model, globals: &Globals) -> Result<Client<'a>, Failure> {
-        Client::for_bucket(model, globals, None)
+        Client::build(model, globals, None, None)
+    }
+
+    /// As [`Client::new`], but letting the operation and its arguments contribute
+    /// endpoint parameters. Some operations resolve to a different host than their
+    /// siblings, and for S3 the bucket decides the host outright.
+    pub fn for_operation(
+        model: &'a Model,
+        globals: &Globals,
+        operation: &aws_cli_model::shape::OperationShape,
+        input: Option<&Value>,
+    ) -> Result<Client<'a>, Failure> {
+        // S3's ruleset branches on the bucket name — a directory bucket
+        // (`...--x-s3`) resolves to the S3 Express control endpoint and an ordinary one
+        // does not. Without the bucket, `create-bucket`'s
+        // `UseS3ExpressControlEndpoint` static parameter sends every bucket to Express.
+        let bucket = input
+            .and_then(|v| v.get("Bucket"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        Client::build(model, globals, bucket.as_deref(), Some(operation))
     }
 
     /// As [`Client::new`], but supplying S3's `Bucket` endpoint parameter.
@@ -120,6 +169,15 @@ impl<'a> Client<'a> {
         model: &'a Model,
         globals: &Globals,
         bucket: Option<&str>,
+    ) -> Result<Client<'a>, Failure> {
+        Client::build(model, globals, bucket, None)
+    }
+
+    fn build(
+        model: &'a Model,
+        globals: &Globals,
+        bucket: Option<&str>,
+        operation: Option<&aws_cli_model::shape::OperationShape>,
     ) -> Result<Client<'a>, Failure> {
         let protocol = model.protocol().map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
         // The profile's `region` key is the last step of botocore's precedence, and
@@ -132,10 +190,12 @@ impl<'a> Client<'a> {
             region,
             endpoint_url: globals.endpoint_url.clone(),
             bucket: bucket.map(str::to_string),
+            static_context: operation.map(endpoint::static_context_params).unwrap_or_default(),
             ..Default::default()
         };
         // A ruleset that rejects the inputs, or a missing region, is a configuration
         // problem (253). The ruleset's own wording beats anything we would substitute.
+        let endpoint_bucket = ep_params.bucket.clone();
         let ep = endpoint::resolve(&model, &ep_params).map_err(|e| match e {
             endpoint::EndpointError::Rules(_) | endpoint::EndpointError::NoRegion => {
                 Failure::new(exit::CONFIGURATION, e)
@@ -171,6 +231,7 @@ impl<'a> Client<'a> {
             retry: RefCell::new(retry::RetryPolicy::from_environment()),
             debug: globals.debug,
             no_sign_request: globals.no_sign_request,
+            endpoint_bucket,
         })
     }
 
@@ -322,7 +383,7 @@ impl<'a> Client<'a> {
         let request = http::PreparedRequest {
             method: wire.method.clone(),
             endpoint: self.endpoint.clone(),
-            path: wire.path.clone(),
+            path: self.operation_path(&wire.path),
             query: wire.query.clone(),
             content_type: wire.content_type.clone(),
             extra_headers,
@@ -452,7 +513,7 @@ impl<'a> Client<'a> {
         let request = http::PreparedRequest {
             method: wire.method.clone(),
             endpoint: self.endpoint.clone(),
-            path: wire.path.clone(),
+            path: self.operation_path(&wire.path),
             query: wire.query.clone(),
             content_type: Some(EVENT_STREAM_CONTENT_TYPE.to_string()),
             extra_headers,
@@ -704,7 +765,7 @@ impl<'a> Client<'a> {
 
         let response = self.send_raw(
             &wire.method,
-            &wire.path,
+            &self.operation_path(&wire.path),
             &wire.query,
             &wire.headers,
             http::Body::from_vec(wire.body),
@@ -783,7 +844,7 @@ impl<'a> Client<'a> {
             let request = http::PreparedRequest {
                 method: wire.method.clone(),
                 endpoint: self.endpoint.clone(),
-                path: wire.path.clone(),
+                path: self.operation_path(&wire.path),
                 query: wire.query.clone(),
                 content_type: wire.content_type.clone(),
                 extra_headers,
@@ -1018,4 +1079,41 @@ fn hex_decode(hex: &str) -> Vec<u8> {
             u8::from_str_radix(text, 16).ok()
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    /// `Client::operation_path`'s logic, exercised without building a client.
+    fn strip(bucket: Option<&str>, path: &str) -> String {
+        let Some(bucket) = bucket else { return path.to_string() };
+        let Some(rest) = path.strip_prefix('/').and_then(|p| p.strip_prefix(bucket)) else {
+            return path.to_string();
+        };
+        if !rest.is_empty() && !rest.starts_with('/') {
+            return path.to_string();
+        }
+        if rest.is_empty() { "/".to_string() } else { rest.to_string() }
+    }
+
+    #[test]
+    fn drops_the_bucket_the_endpoint_already_carries() {
+        assert_eq!(strip(Some("b"), "/b"), "/");
+        assert_eq!(strip(Some("b"), "/b/key.txt"), "/key.txt");
+        assert_eq!(strip(Some("my.dotted.bucket"), "/my.dotted.bucket/k"), "/k");
+    }
+
+    /// A bucket name that merely prefixes the next segment must not be eaten: with
+    /// bucket `logs`, the path `/logs-2/k` belongs to a different bucket entirely.
+    #[test]
+    fn only_a_whole_segment_counts() {
+        assert_eq!(strip(Some("logs"), "/logs-2/k"), "/logs-2/k");
+        assert_eq!(strip(Some("logs"), "/other/k"), "/other/k");
+    }
+
+    /// With no bucket in the endpoint the path is untouched, which is every service
+    /// other than S3.
+    #[test]
+    fn leaves_other_services_alone() {
+        assert_eq!(strip(None, "/service/X/operation/Y"), "/service/X/operation/Y");
+    }
 }

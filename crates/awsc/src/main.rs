@@ -307,7 +307,12 @@ fn run() -> Result<ExitCode, Failure> {
     // The ruleset decides the endpoint, and may supply a signing region that differs
     // from the client region. Credentials and endpoint resolve here, after the skeleton
     // short-circuit, so `--generate-cli-skeleton` still works with no credentials.
-    let client = client::Client::new(&model, &client::Globals::from_parsed(&parsed))?;
+    let client = client::Client::for_operation(
+        &model,
+        &client::Globals::from_parsed(&parsed),
+        op,
+        input.as_ref(),
+    )?;
 
     // Client-side validation runs before any network work, exactly as the reference
     // does — the error text and exit code both differ from letting the service reject.

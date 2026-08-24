@@ -57,6 +57,42 @@ pub struct EndpointParams {
     /// form (`https://<bucket>.s3.<region>.amazonaws.com/<key>`) that the reference
     /// produces — a different host, and so a different signature.
     pub bucket: Option<String>,
+    /// The operation's `smithy.rules#staticContextParams`, by parameter name.
+    ///
+    /// These are constants the *operation* contributes to its own endpoint resolution,
+    /// and leaving them out silently resolves a different host rather than failing:
+    /// `arc-region-switch list-plans` sets `UseControlPlaneEndpoint` and belongs on
+    /// `arc-region-switch-control-plane...`, but without it lands on
+    /// `arc-region-switch...`, which answers `UnknownOperationException`.
+    pub static_context: BTreeMap<String, Value>,
+}
+
+/// Read an operation's `smithy.rules#staticContextParams` into ruleset values.
+///
+/// Shape: `{"UseControlPlaneEndpoint": {"value": true}}`.
+pub fn static_context_params(
+    operation: &aws_cli_model::shape::OperationShape,
+) -> BTreeMap<String, Value> {
+    let mut out = BTreeMap::new();
+    let Some(serde_json::Value::Object(params)) =
+        operation.traits.get("smithy.rules#staticContextParams")
+    else {
+        return out;
+    };
+    for (name, spec) in params {
+        let Some(value) = spec.get("value") else { continue };
+        let converted = match value {
+            serde_json::Value::Bool(b) => Value::Bool(*b),
+            serde_json::Value::String(s) => Value::String(s.clone()),
+            serde_json::Value::Number(n) => match n.as_i64() {
+                Some(i) => Value::Int(i),
+                None => continue,
+            },
+            _ => continue,
+        };
+        out.insert(name.clone(), converted);
+    }
+    out
 }
 
 /// Resolve the endpoint for an operation.
@@ -105,6 +141,10 @@ pub fn resolve(
             // Matched by name: `Bucket` is an operation parameter, not a builtin.
             _ if name == "Bucket" => {
                 params.bucket.clone().map(Value::String).unwrap_or(Value::None)
+            }
+            // The operation's own static parameters, also matched by name.
+            _ if params.static_context.contains_key(name) => {
+                params.static_context.get(name).cloned().unwrap_or(Value::None)
             }
             // Everything else (S3 path-style, STS global endpoint, account-id modes)
             // takes its declared default. Wiring those to real config is future work;
@@ -194,6 +234,50 @@ pub fn resolve_region(explicit: Option<&str>, profile_region: Option<&str>) -> O
 
 #[cfg(test)]
 mod tests {
+    /// Operation-level static parameters steer endpoint resolution, and leaving them
+    /// out resolves a *different host* rather than failing — `arc-region-switch
+    /// list-plans` belongs on the control-plane endpoint and answers
+    /// `UnknownOperationException` anywhere else.
+    #[test]
+    fn reads_static_context_params_off_an_operation() {
+        let model = aws_cli_model::Model::from_json(
+            br#"{"smithy":"2.0","shapes":{
+              "com.x#S":{"type":"service","version":"1","traits":{}},
+              "com.x#Op":{"type":"operation","traits":{
+                "smithy.rules#staticContextParams":{
+                  "UseControlPlaneEndpoint":{"value":true},
+                  "ServiceType":{"value":"ACM"},
+                  "Count":{"value":3}}}}}}"#,
+        )
+        .expect("fixture model");
+        let id = aws_cli_model::ShapeId::parse("com.x#Op").expect("shape id");
+        let op = match model.shape(&id).expect("shape present") {
+            aws_cli_model::Shape::Operation(op) => op.clone(),
+            other => panic!("expected an operation, got {other:?}"),
+        };
+        let params = static_context_params(&op);
+        assert_eq!(params.get("UseControlPlaneEndpoint"), Some(&Value::Bool(true)));
+        assert_eq!(params.get("ServiceType"), Some(&Value::String("ACM".into())));
+        assert_eq!(params.get("Count"), Some(&Value::Int(3)));
+    }
+
+    /// An operation without the trait contributes nothing, which is almost all of them.
+    #[test]
+    fn an_operation_without_the_trait_contributes_nothing() {
+        let model = aws_cli_model::Model::from_json(
+            br#"{"smithy":"2.0","shapes":{
+              "com.x#S":{"type":"service","version":"1","traits":{}},
+              "com.x#Op":{"type":"operation"}}}"#,
+        )
+        .expect("fixture model");
+        let id = aws_cli_model::ShapeId::parse("com.x#Op").expect("shape id");
+        let op = match model.shape(&id).expect("shape present") {
+            aws_cli_model::Shape::Operation(op) => op.clone(),
+            other => panic!("expected an operation, got {other:?}"),
+        };
+        assert!(static_context_params(&op).is_empty());
+    }
+
     use super::*;
 
     #[test]
