@@ -57,7 +57,11 @@ pub struct EndpointParams {
     /// form (`https://<bucket>.s3.<region>.amazonaws.com/<key>`) that the reference
     /// produces — a different host, and so a different signature.
     pub bucket: Option<String>,
-    /// The operation's `smithy.rules#staticContextParams`, by parameter name.
+    /// Endpoint parameters the operation contributes, by ruleset parameter name.
+    ///
+    /// Two sources, both handled here: `smithy.rules#staticContextParams` (constants
+    /// declared on the operation) and `smithy.rules#contextParam` (the value of one of
+    /// its input members).
     ///
     /// These are constants the *operation* contributes to its own endpoint resolution,
     /// and leaving them out silently resolves a different host rather than failing:
@@ -91,6 +95,48 @@ pub fn static_context_params(
             _ => continue,
         };
         out.insert(name.clone(), converted);
+    }
+    out
+}
+
+/// Read the operation's `smithy.rules#contextParam` members into ruleset values.
+///
+/// The member-bound sibling of [`static_context_params`]: the *argument the user passed*
+/// becomes an endpoint parameter. `s3control` binds `AccountId` this way and every one of
+/// its 97 operations resolves through it, so without this the whole service answers
+/// "AccountId is required but not set" no matter what was on the command line.
+///
+/// Shape: `{"name": "AccountId"}` on the member; `name` is the ruleset parameter, which
+/// need not match the member's own name.
+pub fn context_params(
+    model: &Model,
+    operation: &aws_cli_model::shape::OperationShape,
+    input: Option<&serde_json::Value>,
+) -> BTreeMap<String, Value> {
+    let mut out = BTreeMap::new();
+    let (Some(input), Some(reference)) = (input, operation.input.as_ref()) else { return out };
+    let Some(aws_cli_model::Shape::Structure(shape)) = model.shape(&reference.target) else {
+        return out;
+    };
+
+    for (member_name, member) in &shape.members {
+        let Some(spec) = member.traits.get("smithy.rules#contextParam") else { continue };
+        let name = spec
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(member_name.as_str())
+            .to_string();
+        let Some(value) = input.get(member_name) else { continue };
+        let converted = match value {
+            serde_json::Value::String(text) => Value::String(text.clone()),
+            serde_json::Value::Bool(b) => Value::Bool(*b),
+            serde_json::Value::Number(n) => match n.as_i64() {
+                Some(i) => Value::Int(i),
+                None => continue,
+            },
+            _ => continue,
+        };
+        out.insert(name, converted);
     }
     out
 }
@@ -234,6 +280,63 @@ pub fn resolve_region(explicit: Option<&str>, profile_region: Option<&str>) -> O
 
 #[cfg(test)]
 mod tests {
+    /// A `contextParam` member turns the user's argument into an endpoint parameter.
+    /// `s3control` routes every one of its operations through `AccountId` this way, and
+    /// without it the whole service answers "AccountId is required but not set".
+    #[test]
+    fn reads_context_params_from_the_input() {
+        let model = aws_cli_model::Model::from_json(
+            br#"{"smithy":"2.0","shapes":{
+              "com.x#S":{"type":"service","version":"1","traits":{}},
+              "com.x#Str":{"type":"string"},
+              "com.x#In":{"type":"structure","members":{
+                "AccountId":{"target":"com.x#Str",
+                  "traits":{"smithy.rules#contextParam":{"name":"AccountId"}}},
+                "Renamed":{"target":"com.x#Str",
+                  "traits":{"smithy.rules#contextParam":{"name":"OutpostId"}}},
+                "Plain":{"target":"com.x#Str"}}},
+              "com.x#Op":{"type":"operation","input":{"target":"com.x#In"}}}}"#,
+        )
+        .expect("fixture model");
+        let id = aws_cli_model::ShapeId::parse("com.x#Op").expect("shape id");
+        let op = match model.shape(&id).expect("shape present") {
+            aws_cli_model::Shape::Operation(op) => op.clone(),
+            other => panic!("expected an operation, got {other:?}"),
+        };
+
+        let input = serde_json::json!({"AccountId": "1234", "Renamed": "op-1", "Plain": "x"});
+        let params = context_params(&model, &op, Some(&input));
+        assert_eq!(params.get("AccountId"), Some(&Value::String("1234".into())));
+        // The ruleset parameter is named by the trait, not by the member.
+        assert_eq!(params.get("OutpostId"), Some(&Value::String("op-1".into())));
+        assert_eq!(params.get("Renamed"), None);
+        // A member without the trait contributes nothing.
+        assert_eq!(params.get("Plain"), None);
+    }
+
+    /// An argument the user did not pass must not appear as an empty parameter: the
+    /// ruleset distinguishes unset from empty and would take a different branch.
+    #[test]
+    fn an_absent_argument_contributes_no_parameter() {
+        let model = aws_cli_model::Model::from_json(
+            br#"{"smithy":"2.0","shapes":{
+              "com.x#S":{"type":"service","version":"1","traits":{}},
+              "com.x#Str":{"type":"string"},
+              "com.x#In":{"type":"structure","members":{
+                "AccountId":{"target":"com.x#Str",
+                  "traits":{"smithy.rules#contextParam":{"name":"AccountId"}}}}},
+              "com.x#Op":{"type":"operation","input":{"target":"com.x#In"}}}}"#,
+        )
+        .expect("fixture model");
+        let id = aws_cli_model::ShapeId::parse("com.x#Op").expect("shape id");
+        let op = match model.shape(&id).expect("shape present") {
+            aws_cli_model::Shape::Operation(op) => op.clone(),
+            other => panic!("expected an operation, got {other:?}"),
+        };
+        assert!(context_params(&model, &op, Some(&serde_json::json!({}))).is_empty());
+        assert!(context_params(&model, &op, None).is_empty());
+    }
+
     /// Operation-level static parameters steer endpoint resolution, and leaving them
     /// out resolves a *different host* rather than failing — `arc-region-switch
     /// list-plans` belongs on the control-plane endpoint and answers

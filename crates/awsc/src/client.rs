@@ -158,7 +158,7 @@ impl<'a> Client<'a> {
             .and_then(|v| v.get("Bucket"))
             .and_then(|v| v.as_str())
             .map(str::to_string);
-        Client::build(model, globals, bucket.as_deref(), Some(operation))
+        Client::build(model, globals, bucket.as_deref(), Some((operation, input)))
     }
 
     /// As [`Client::new`], but supplying S3's `Bucket` endpoint parameter.
@@ -177,7 +177,7 @@ impl<'a> Client<'a> {
         model: &'a Model,
         globals: &Globals,
         bucket: Option<&str>,
-        operation: Option<&aws_cli_model::shape::OperationShape>,
+        operation: Option<(&aws_cli_model::shape::OperationShape, Option<&Value>)>,
     ) -> Result<Client<'a>, Failure> {
         let protocol = model.protocol().map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
         // The profile's `region` key is the last step of botocore's precedence, and
@@ -190,7 +190,16 @@ impl<'a> Client<'a> {
             region,
             endpoint_url: globals.endpoint_url.clone(),
             bucket: bucket.map(str::to_string),
-            static_context: operation.map(endpoint::static_context_params).unwrap_or_default(),
+            // Both sources feed one parameter set. The operation's constants are
+            // applied last so a static declaration wins over an argument, which is the
+            // order the Smithy spec gives them.
+            static_context: operation
+                .map(|(op, input)| {
+                    let mut params = endpoint::context_params(model, op, input);
+                    params.extend(endpoint::static_context_params(op));
+                    params
+                })
+                .unwrap_or_default(),
             ..Default::default()
         };
         // A ruleset that rejects the inputs, or a missing region, is a configuration

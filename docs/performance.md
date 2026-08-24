@@ -127,7 +127,7 @@ Not performance work, but the pivot asked for as much of the AWS API as possible
   run when the flip was committed, and it could not have caught it: a local endpoint
   override bypasses ruleset resolution entirely.
 
-### 3. Operation-level endpoint parameters
+### 3. ~~Operation-level endpoint parameters~~ — done
 
 `smithy.rules#staticContextParams` was not read at all, and that resolves a *different
 host* rather than failing. `arc-region-switch list-plans` sets `UseControlPlaneEndpoint`
@@ -147,9 +147,20 @@ with `/{Bucket}` — so the bucket appeared twice and every `s3api` call taking 
 returned 404 or `NoSuchKey`. `Client::operation_path` drops the segment, matching only a
 whole one so a bucket named `logs` cannot eat the `/logs-2` of an unrelated path.
 
-The lesson worth keeping: two of those three only appeared *after* the previous fix, and
-none of them are visible against a local endpoint override. Endpoint resolution has to be
-checked against real AWS.
+A fourth followed, found on returning to the branch: the *member-bound* sibling,
+`smithy.rules#contextParam`, was not read either. It puts the value of an input argument
+into the ruleset — `s3control` binds `AccountId` that way, and every one of its **97
+operations** resolves through it, so the entire service answered "AccountId is required but
+not set" no matter what was passed. Seven services declare the trait; the other six were
+checked live and were already resolving correctly (their parameters only matter for
+ARN-routed and multi-region-access-point cases), so `s3control` took the whole of the
+damage. Both sources now feed one parameter set, with the operation's constants applied
+last.
+
+The lesson worth keeping: three of those four only appeared *after* the previous fix, and
+none of them are visible against a local endpoint override — it bypasses ruleset
+resolution entirely. Endpoint resolution has to be checked against real AWS, and the whole
+sweep re-run after each step rather than just the case being chased.
 
 ### 4. Deferred until a fat pipe is available
 
