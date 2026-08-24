@@ -39,13 +39,16 @@ impl TimestampFormat {
                 Protocol::AwsJson1_0 | Protocol::AwsJson1_1 | Protocol::RestJson1 => {
                     TimestampFormat::EpochSeconds
                 }
+                // `rpcv2Cbor` always uses epoch seconds, under a CBOR tag, and ignores
+                // any `timestampFormat` on the member. `cbor.rs` encodes that directly
+                // and never asks here; this arm is for completeness.
+                Protocol::Rpcv2Cbor => TimestampFormat::EpochSeconds,
                 // The XML/query family, plus anything unrecognised: `date-time` is the
                 // Smithy-wide default, so it is the right fallback for a protocol we do
                 // not implement rather than a panic.
                 Protocol::RestXml
                 | Protocol::AwsQuery
                 | Protocol::Ec2Query
-                | Protocol::Rpcv2Cbor
                 | Protocol::Unknown => TimestampFormat::DateTime,
             },
         }

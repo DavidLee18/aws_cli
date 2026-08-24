@@ -5,9 +5,10 @@
 //! `json` (the body encoding shared by all three JSON protocols).
 //!
 //! Implemented: `awsQuery`, `ec2Query`, `awsJson1_0`, `awsJson1_1`, `restJson1`,
-//! `restXml`. Not implemented: `rpcv2Cbor`.
+//! `restXml`, `rpcv2Cbor`.
 
 pub mod aws_json;
+pub mod cbor;
 pub mod ec2_query;
 pub mod http_binding;
 pub mod json;

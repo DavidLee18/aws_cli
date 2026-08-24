@@ -7,7 +7,7 @@
 use aws_cli_model::shape::{OperationShape, StructureShape};
 use aws_cli_model::{Model, Protocol};
 use aws_cli_protocol::{
-    aws_json, ec2_query, http_binding, json, query, response_fixups, xml, ProtocolError,
+    aws_json, cbor, ec2_query, http_binding, json, query, response_fixups, xml, ProtocolError,
 };
 use serde_json::Value;
 
@@ -21,7 +21,8 @@ pub struct WireRequest {
     pub content_type: Option<String>,
     /// Protocol-specific headers, such as `X-Amz-Target`.
     pub headers: Vec<(String, String)>,
-    pub body: String,
+    /// Bytes, not text: `rpcv2Cbor` bodies are binary.
+    pub body: Vec<u8>,
 }
 
 /// Build the request for an operation.
@@ -48,7 +49,8 @@ pub fn serialize(
                 &api_version,
                 input_shape,
                 input,
-            )?,
+            )?
+            .into_bytes(),
         }),
 
         Protocol::Ec2Query => Ok(WireRequest {
@@ -63,7 +65,8 @@ pub fn serialize(
                 &api_version,
                 input_shape,
                 input,
-            )?,
+            )?
+            .into_bytes(),
         }),
 
         Protocol::AwsJson1_0 | Protocol::AwsJson1_1 => {
@@ -82,7 +85,7 @@ pub fn serialize(
                 query: String::new(),
                 content_type: Some(request.content_type),
                 headers: vec![("x-amz-target".into(), request.target)],
-                body: request.body,
+                body: request.body.into_bytes(),
             })
         }
 
@@ -94,9 +97,21 @@ pub fn serialize(
             input,
         ),
 
-        Protocol::Rpcv2Cbor | Protocol::Unknown => Err(ProtocolError::Unsupported(format!(
-            "{protocol:?}"
-        ))),
+        // Smithy RPC v2 CBOR names the operation in the URL rather than a header, and
+        // `Accept` is required: the service will not assume the client wants CBOR back.
+        Protocol::Rpcv2Cbor => Ok(WireRequest {
+            method: "POST".into(),
+            path: cbor::request_path(model.service_id().name(), operation_wire_name),
+            query: String::new(),
+            content_type: Some(cbor::CONTENT_TYPE.into()),
+            headers: vec![
+                (cbor::PROTOCOL_HEADER.0.into(), cbor::PROTOCOL_HEADER.1.into()),
+                ("accept".into(), cbor::CONTENT_TYPE.into()),
+            ],
+            body: cbor::serialize(model, input_shape, input)?,
+        }),
+
+        Protocol::Unknown => Err(ProtocolError::Unsupported(format!("{protocol:?}"))),
     }
 }
 
@@ -124,7 +139,7 @@ fn serialize_rest(
             query: String::new(),
             content_type: None,
             headers: Vec::new(),
-            body: String::new(),
+            body: Vec::new(),
         });
     };
 
@@ -174,7 +189,7 @@ fn serialize_rest(
         query,
         content_type,
         headers: bound.headers,
-        body,
+        body: body.into_bytes(),
     })
 }
 
@@ -187,7 +202,7 @@ pub fn parse_response(
     protocol: Protocol,
     operation_wire_name: &str,
     output_shape: Option<&StructureShape>,
-    body: &str,
+    body: &[u8],
 ) -> Result<Value, ProtocolError> {
     let mut value = parse_body(model, protocol, operation_wire_name, output_shape, body)?;
     if let Some(shape) = output_shape {
@@ -202,18 +217,23 @@ fn parse_body(
     protocol: Protocol,
     operation_wire_name: &str,
     output_shape: Option<&StructureShape>,
-    body: &str,
+    body: &[u8],
 ) -> Result<Value, ProtocolError> {
+    // Only CBOR needs the raw bytes; the rest are text protocols. Lossy rather than
+    // strict, because a response that is almost UTF-8 should still be parsed as far as
+    // it goes instead of failing whole.
+    let text = || String::from_utf8_lossy(body);
     match protocol {
-        Protocol::AwsQuery => xml::parse_response(model, operation_wire_name, output_shape, body),
-        Protocol::Ec2Query => ec2_query::parse_response(model, output_shape, body),
+        Protocol::AwsQuery => {
+            xml::parse_response(model, operation_wire_name, output_shape, &text())
+        }
+        Protocol::Ec2Query => ec2_query::parse_response(model, output_shape, &text()),
         Protocol::AwsJson1_0 | Protocol::AwsJson1_1 | Protocol::RestJson1 => {
-            aws_json::parse_response(model, protocol, output_shape, body)
+            aws_json::parse_response(model, protocol, output_shape, &text())
         }
-        Protocol::RestXml => xml::parse_response(model, operation_wire_name, output_shape, body),
-        Protocol::Rpcv2Cbor | Protocol::Unknown => {
-            Err(ProtocolError::Unsupported(format!("{protocol:?}")))
-        }
+        Protocol::RestXml => xml::parse_response(model, operation_wire_name, output_shape, &text()),
+        Protocol::Rpcv2Cbor => cbor::parse_response(model, output_shape, body),
+        Protocol::Unknown => Err(ProtocolError::Unsupported(format!("{protocol:?}"))),
     }
 }
 
@@ -221,9 +241,10 @@ fn parse_body(
 pub fn parse_error(
     protocol: Protocol,
     status: u16,
-    body: &str,
+    raw: &[u8],
     error_type_header: Option<&str>,
 ) -> (String, String) {
+    let body = &String::from_utf8_lossy(raw);
     // A body-less failure — every HEAD operation — carries the status and nothing else.
     // Reporting that as `(Unknown)` with an empty message describes nothing; the status
     // is the only fact available, so use it.
@@ -232,11 +253,17 @@ pub fn parse_error(
         if text.is_empty() {
             (status.to_string(), aws_cli_runtime::http::reason_phrase(status).to_string())
         } else {
-            ("Unknown".to_string(), text.to_string())
+            // A CBOR body is binary, so its lossy text is noise rather than a message.
+            let readable = if protocol == Protocol::Rpcv2Cbor { "" } else { text };
+            ("Unknown".to_string(), readable.to_string())
         }
     };
 
     match protocol {
+        Protocol::Rpcv2Cbor => match cbor::parse_error(raw) {
+            Some(e) => (e.code, e.message),
+            None => fallback(),
+        },
         Protocol::AwsQuery | Protocol::Ec2Query | Protocol::RestXml => match xml::parse_error(body)
         {
             Some(e) => (e.code, e.message),

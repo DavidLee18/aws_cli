@@ -69,10 +69,15 @@ Not performance work, but the pivot asked for as much of the AWS API as possible
   anywhere in the tree, which means `kinesis subscribe-to-shard`, Bedrock response
   streaming, Transcribe streaming and `s3api select-object-content` cannot be called.
   This is the largest functional hole.
-- **`rpcv2Cbor` is not implemented.** Exactly one service speaks only it
-  (`partnercentral-revenue-measurement`) and is therefore unreachable; 15 more offer it
-  alongside a JSON protocol and currently fall back to JSON. CBOR is the more compact
-  encoding, so this is a bytes-on-the-wire win as well as a coverage one.
+- ~~**`rpcv2Cbor` is not implemented.**~~ Done. `partnercentral-revenue-measurement`,
+  which speaks only CBOR, is now reachable.
+
+  The 15 services that offer CBOR *alongside* a JSON protocol still take the JSON path:
+  `Protocol::TRAIT_TABLE` is consulted in order and `rpcv2Cbor` is last. Moving it up
+  would switch cloudwatch, gamelift, compute-optimizer and the rest onto the more compact
+  encoding — a real bytes-on-the-wire win — but it would also move 15 working services
+  onto a protocol validated against one obscure service and a local test server. Worth
+  doing behind a measurement, not on the way past.
 
 ### 3. Deferred until a fat pipe is available
 

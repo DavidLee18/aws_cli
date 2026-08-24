@@ -305,14 +305,14 @@ impl<'a> Client<'a> {
             &wire.path,
             &wire.query,
             &wire.headers,
-            http::Body::from_vec(wire.body.into_bytes()),
+            http::Body::from_vec(wire.body),
         )?;
 
         if response.status >= 400 {
             let (code, message) = dispatch::parse_error(
                 self.protocol,
                 response.status,
-                &response.text(),
+                response.bytes(),
                 response.header("x-amzn-errortype").as_deref(),
             );
             let mut failure = Failure::new(
@@ -385,7 +385,7 @@ impl<'a> Client<'a> {
                 query: wire.query.clone(),
                 content_type: wire.content_type.clone(),
                 extra_headers,
-                body: http::Body::from_vec(wire.body.clone().into_bytes()),
+                body: http::Body::from_vec(wire.body.clone()),
             };
 
             // Re-signed each attempt, since the timestamp changes.
@@ -426,7 +426,7 @@ impl<'a> Client<'a> {
                             dispatch::parse_error(
                                 self.protocol,
                                 response.status,
-                                &response.text(),
+                                response.bytes(),
                                 response.header("x-amzn-errortype").as_deref(),
                             )
                             .0,
@@ -462,7 +462,7 @@ impl<'a> Client<'a> {
             let (code, message) = dispatch::parse_error(
                 self.protocol,
                 response.status,
-                &response.text(),
+                response.bytes(),
                 response.header("x-amzn-errortype").as_deref(),
             );
             // The reference appends the retry count only when the attempt limit was
@@ -501,7 +501,7 @@ impl<'a> Client<'a> {
             self.protocol,
             operation_wire_name,
             output_shape,
-            &response.text(),
+            response.bytes(),
         );
         let from_body = match parsed_body {
             Ok(value) => value,
