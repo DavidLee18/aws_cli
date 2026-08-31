@@ -41,7 +41,7 @@ echo "generating ${gib} GiB payload"
 dd if=/dev/urandom of="$payload" bs=1M count=$((gib * 1024)) status=none
 [ "$(wc -c < "$payload")" -eq "$bytes" ] || { echo "payload is the wrong size"; exit 1; }
 
-[ -f "$results" ] || printf 'test\tvariant\trun\tdirection\tseconds\tMB_per_s\tslowdowns\tpool_throttles\tdistinct_peers\n' > "$results"
+[ -f "$results" ] || printf 'test\tvariant\trun\tdirection\tseconds\tMB_per_s\tslowdowns\tpool_throttles\tdistinct_peers\tmem_avail_MB\n' > "$results"
 
 # The host the client actually connects to, taken from the client rather than assumed:
 # the endpoint comes out of the vendored ruleset, and guessing it would pin the wrong name.
@@ -78,11 +78,12 @@ run() {
 
   secs=$(echo "$end - $start" | bc)
   mbps=$(echo "scale=1; $bytes / $secs / 1048576" | bc)
-  printf '%s\t%s\t%s\t%s\t%.1f\t%s\t%s\t%s\t%s\n' \
+  printf '%s\t%s\t%s\t%s\t%.1f\t%s\t%s\t%s\t%s\t%s\n' \
     "$test" "$variant" "$run" "$direction" "$secs" "$mbps" \
     "$(grep -c 'code SlowDown' "$log" || true)" \
     "$(grep -c 'THROTTLED' "$log" || true)" \
-    "$(sort -u "$peers" | grep -c . || true)" | tee -a "$results"
+    "$(sort -u "$peers" | grep -c . || true)" \
+    "$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)" | tee -a "$results"
 }
 
 # ---------------------------------------------------------------- 1. throttling vs load
@@ -100,6 +101,7 @@ for i in $(seq 1 "$repeats"); do
       "$awsc" s3 cp "s3://$bucket/pool-$conc.bin" /dev/shm/back.bin "${conc_flag[@]}" --no-progress
     cmp -s "$payload" /dev/shm/back.bin || { echo "ROUND TRIP CORRUPTED at conc=$conc"; exit 1; }
     rm -f /dev/shm/back.bin
+    sync
   done
 done
 
