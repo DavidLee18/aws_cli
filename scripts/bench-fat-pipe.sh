@@ -27,11 +27,12 @@ trap 'rm -rf "$work"' EXIT
 payload="$work/payload.bin"
 results=./fat-pipe-results.tsv
 
-# Incompressible, so nothing in the path can cheat. `openssl rand` is far faster than
-# /dev/urandom for gigabyte-scale payloads.
+# Incompressible, so nothing in the path can cheat. Not `openssl rand`: its count is an
+# int, so a 2 GiB request is one byte past INT_MAX and it writes nothing.
 echo "generating ${gib} GiB payload"
-openssl rand -out "$payload" $((gib * 1024 * 1024 * 1024))
+dd if=/dev/urandom of="$payload" bs=1M count=$((gib * 1024)) status=none
 bytes=$(wc -c < "$payload")
+[ "$bytes" -eq $((gib * 1024 * 1024 * 1024)) ] || { echo "payload is $bytes bytes, expected $((gib * 1024 * 1024 * 1024))"; exit 1; }
 
 [ -f "$results" ] || printf 'direction\tchunk\tconcurrency\tseconds\tMB_per_s\tdistinct_peers\tpeer_samples\n' > "$results"
 
