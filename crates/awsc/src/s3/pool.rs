@@ -9,10 +9,17 @@
 //! machine rather than a constant.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 /// How often the supervisor re-measures.
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(150);
+/// How long an idle worker waits before re-checking the target unprompted.
+///
+/// A backstop against a missed wakeup, not the mechanism -- growth notifies. Measured on
+/// this machine, 64 threads idling for 2s: a 25ms poll loop costs 94.6ms of CPU, the
+/// condvar with this backstop costs 11.4ms.
+const IDLE_BACKSTOP: Duration = Duration::from_millis(250);
 /// Ramp while throughput improves by at least this fraction.
 const IMPROVEMENT: f64 = 1.05;
 /// Back off when it falls by more than this fraction.
@@ -22,6 +29,66 @@ const DEFAULT_WORKERS: usize = 10;
 /// The next worker count while throughput is still improving.
 fn grown(current: usize, ceiling: usize) -> usize {
     (current + (current / 2).max(2)).min(ceiling)
+}
+
+/// How the controller gives capacity back when throughput degrades.
+///
+/// Growth is multiplicative, so a matching back-off keeps the two on the same timescale;
+/// a fixed step does not. Which one is right is decided by replaying both against the
+/// measured throughput curve -- see the simulation tests -- not by taste.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Backoff {
+    /// One worker per sample.
+    Step,
+    /// A quarter of the current count, at least one.
+    ///
+    /// Not yet in production use: the noisy replay favours it (9% fewer workers held for
+    /// equal throughput at +/-15% noise), but "fewer connections" only pays if
+    /// connections provoke throttling, and that measurement is still outstanding. Flip
+    /// `BACKOFF` once it lands.
+    #[allow(dead_code)]
+    Proportional,
+}
+
+/// The back-off the pool actually uses.
+const BACKOFF: Backoff = Backoff::Step;
+
+fn shrunk(current: usize, floor: usize, how: Backoff) -> usize {
+    let step = match how {
+        Backoff::Step => 1,
+        Backoff::Proportional => (current / 4).max(1),
+    };
+    current.saturating_sub(step).max(floor)
+}
+
+/// What the controller carries between samples.
+#[derive(Clone, Copy, Debug)]
+struct Control {
+    target: usize,
+    best_rate: f64,
+    floor: usize,
+}
+
+/// One control decision, split out from the timing and the atomics so it can be replayed
+/// against a measured throughput curve instead of argued about. `supervise` is this
+/// function plus a clock.
+fn decide(state: Control, rate: f64, ceiling: usize, throttled: bool, backoff: Backoff) -> Control {
+    // Throttling is a direct instruction; obey it before looking at throughput.
+    if throttled {
+        // Throttling overrides the floor: the service is the authority here.
+        return Control { target: (state.target / 2).max(1), best_rate: 0.0, floor: 1 };
+    }
+    if rate > state.best_rate * IMPROVEMENT {
+        let target =
+            if state.target < ceiling { grown(state.target, ceiling) } else { state.target };
+        return Control { target, best_rate: rate.max(state.best_rate), ..state };
+    }
+    if rate < state.best_rate * DEGRADATION && state.target > state.floor {
+        // Slower than our best despite more workers: we have overshot. Let the new, lower
+        // level set the benchmark rather than chasing a peak we can no longer reach.
+        return Control { target: shrunk(state.target, state.floor, backoff), best_rate: rate, ..state };
+    }
+    state
 }
 
 /// The hard ceiling when the caller does not pin one.
@@ -54,6 +121,16 @@ pub struct Pool {
     throttled: AtomicBool,
     /// Set once the work is done, to stop the supervisor.
     done: AtomicBool,
+    /// Whether to report every control decision on stderr, from `AWSC_POOL_TRACE`.
+    ///
+    /// The pool's worker count and its throttle events are otherwise unobservable from
+    /// outside the process, which makes questions like "does this ceiling provoke
+    /// SlowDown from S3" unanswerable except by guessing.
+    trace: bool,
+    /// Wakes workers idling above the target when it grows, or when the jobs run out.
+    /// The counter exists to give the condvar a mutex to pair with; only the signal
+    /// matters.
+    wake: (Mutex<u64>, Condvar),
 }
 
 impl Pool {
@@ -71,7 +148,16 @@ impl Pool {
             units: AtomicU64::new(0),
             throttled: AtomicBool::new(false),
             done: AtomicBool::new(false),
+            trace: std::env::var_os("AWSC_POOL_TRACE").is_some(),
+            wake: (Mutex::new(0), Condvar::new()),
         }
+    }
+
+    /// Let workers idling above the target re-check it.
+    fn wake_idle(&self) {
+        let (lock, cv) = &self.wake;
+        *lock.lock().expect("mutex") += 1;
+        cv.notify_all();
     }
 
     pub fn record_bytes(&self, count: u64) {
@@ -120,11 +206,18 @@ impl Pool {
                         if next.load(Ordering::Relaxed) >= jobs.len() {
                             return;
                         }
-                        std::thread::sleep(Duration::from_millis(25));
+                        // Wait to be told the target grew rather than polling for it.
+                        let (lock, cv) = &self.wake;
+                        let guard = lock.lock().expect("mutex");
+                        let _ = cv.wait_timeout(guard, IDLE_BACKSTOP).expect("mutex");
                         continue;
                     }
                     let index = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(job) = jobs.get(index) else { return };
+                    let Some(job) = jobs.get(index) else {
+                        // The jobs are gone; anyone still idling should stop waiting.
+                        self.wake_idle();
+                        return;
+                    };
                     work(job);
                     self.record_unit();
                 });
@@ -157,34 +250,27 @@ impl Pool {
             last_units = units;
             last_at = now;
 
-            let current = self.target.load(Ordering::Relaxed);
-
-            // Throttling is a direct instruction; obey it before looking at throughput.
-            if self.throttled.swap(false, Ordering::Relaxed) {
-                // Throttling overrides the floor: the service is the authority here.
-                floor = 1;
-                self.target.store((current / 2).max(1), Ordering::Relaxed);
-                best_rate = 0.0;
-                continue;
+            let state = Control {
+                target: self.target.load(Ordering::Relaxed),
+                best_rate,
+                floor,
+            };
+            let throttled = self.throttled.swap(false, Ordering::Relaxed);
+            let next = decide(state, rate, ceiling, throttled, BACKOFF);
+            self.target.store(next.target, Ordering::Relaxed);
+            if next.target > state.target {
+                self.wake_idle();
             }
-
-            if rate > best_rate * IMPROVEMENT {
-                // Still getting faster — add capacity, by half again rather than by a
-                // fixed step. A 2 GiB upload on a fast link is over in two seconds, or
-                // roughly thirteen samples; stepping by two from ten never reached the
-                // optimum before the transfer ended, which is why adapting measured
-                // slower than pinning 40. Growing multiplicatively gets there in four.
-                best_rate = rate.max(best_rate);
-                if current < ceiling {
-                    self.target.store(grown(current, ceiling), Ordering::Relaxed);
-                }
-            } else if rate < best_rate * DEGRADATION && current > floor {
-                // Slower than our best despite more workers: we have overshot.
-                self.target.store(current - 1, Ordering::Relaxed);
-                // Let the new, lower level set the benchmark rather than chasing a peak
-                // we can no longer reach.
-                best_rate = rate;
+            if self.trace && (throttled || next.target != state.target) {
+                eprintln!(
+                    "pool: workers {} -> {} rate {rate:.1}/s{}",
+                    state.target,
+                    next.target,
+                    if throttled { " THROTTLED" } else { "" }
+                );
             }
+            best_rate = next.best_rate;
+            floor = next.floor;
         }
     }
 }
@@ -214,6 +300,138 @@ mod tests {
         let pool = Pool::new(None);
         let jobs: Vec<u32> = Vec::new();
         pool.run(&jobs, true, |_| panic!("should not run"));
+    }
+
+    /// Throughput at a given worker count, in MB/s, from the in-region measurement on a
+    /// c7g.xlarge against S3 (2 GiB per run, uploads): 10 -> 607, 20 -> 1049, 40 -> 1096,
+    /// 80 -> 1072, 160 -> 1049. Linearly interpolated between the measured points, held
+    /// flat outside them. This is the plant the controller is steering; using the real
+    /// curve is what makes the simulation evidence rather than an opinion.
+    fn measured_rate(workers: usize) -> f64 {
+        const CURVE: [(usize, f64); 5] =
+            [(10, 607.0), (20, 1049.0), (40, 1096.0), (80, 1072.0), (160, 1049.0)];
+        let w = workers as f64;
+        if workers <= CURVE[0].0 {
+            // Below the measured floor, assume it scales down proportionally: one worker
+            // cannot be doing 607 MB/s.
+            return CURVE[0].1 * w / CURVE[0].0 as f64;
+        }
+        for pair in CURVE.windows(2) {
+            let ((w0, r0), (w1, r1)) = (pair[0], pair[1]);
+            if workers <= w1 {
+                let t = (w - w0 as f64) / (w1 - w0) as f64;
+                return r0 + (r1 - r0) * t;
+            }
+        }
+        CURVE[CURVE.len() - 1].1
+    }
+
+    /// Replay the controller against that curve and report the worker trajectory.
+    fn replay(backoff: Backoff, samples: usize, throttle_at: Option<usize>) -> Vec<usize> {
+        let ceiling = MAX_WORKERS;
+        let mut state =
+            Control { target: DEFAULT_WORKERS, best_rate: 0.0, floor: DEFAULT_WORKERS };
+        let mut trace = vec![state.target];
+        for i in 0..samples {
+            let throttled = throttle_at == Some(i);
+            // The rate the plant returns for the worker count currently in force.
+            let rate = measured_rate(state.target);
+            state = decide(state, rate, ceiling, throttled, backoff);
+            trace.push(state.target);
+        }
+        trace
+    }
+
+    /// The same replay with jitter on each sample, which is what decides the back-off
+    /// question: a noiseless curve never overshoots the knee, so the two back-offs are
+    /// indistinguishable on it. Sampling noise is what pushes `best_rate` above what the
+    /// plant can repeat, and the degradation branch -- the only place the back-off shape
+    /// is used -- fires only then.
+    fn replay_noisy(backoff: Backoff, samples: usize, percent: u64) -> Vec<usize> {
+        let ceiling = MAX_WORKERS;
+        let mut state =
+            Control { target: DEFAULT_WORKERS, best_rate: 0.0, floor: DEFAULT_WORKERS };
+        let mut trace = vec![state.target];
+        // A fixed LCG, so the comparison between back-offs sees identical noise.
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        for _ in 0..samples {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let swing = (seed >> 33) % (2 * percent + 1);
+            let factor = 1.0 + (swing as f64 - percent as f64) / 100.0;
+            state = decide(state, measured_rate(state.target) * factor, ceiling, false, backoff);
+            trace.push(state.target);
+        }
+        trace
+    }
+
+    /// With noisy samples, does either back-off oscillate badly, and does the choice
+    /// change the throughput the pool actually sustains?
+    #[test]
+    fn the_back_off_shape_is_chosen_on_the_noisy_replay() {
+        for percent in [5u64, 15] {
+            for backoff in [Backoff::Step, Backoff::Proportional] {
+                let trace = replay_noisy(backoff, 200, percent);
+                let tail = &trace[100..];
+                let lo = *tail.iter().min().expect("non-empty");
+                let hi = *tail.iter().max().expect("non-empty");
+                let mean_rate: f64 =
+                    tail.iter().map(|w| measured_rate(*w)).sum::<f64>() / tail.len() as f64;
+                let mean_workers: f64 =
+                    tail.iter().map(|w| *w as f64).sum::<f64>() / tail.len() as f64;
+                println!(
+                    "noise +/-{percent}% {backoff:?}: workers {lo}-{hi} (mean {mean_workers:.1}), sustained {mean_rate:.0} MB/s"
+                );
+                assert!(lo >= DEFAULT_WORKERS, "{backoff:?} fell to {lo}, under the floor");
+            }
+        }
+    }
+
+    /// Where the controller settles, and how long it takes, against the measured curve.
+    /// The optimum is 40-80 workers; anything that parks far above that is running hotter
+    /// than the link rewards, and anything far below is leaving throughput unused.
+    #[test]
+    fn the_controller_settles_near_the_measured_optimum() {
+        for backoff in [Backoff::Step, Backoff::Proportional] {
+            let trace = replay(backoff, 40, None);
+            let settled = *trace.last().expect("non-empty");
+            assert!(
+                (20..=MAX_WORKERS).contains(&settled),
+                "{backoff:?} settled at {settled}: {trace:?}"
+            );
+            println!("{backoff:?} settled at {settled} workers ({:.0} MB/s)", measured_rate(settled));
+        }
+    }
+
+    /// After the service throttles, how long before throughput is back?
+    ///
+    /// Measured in throughput, not in worker count: the curve is flat from ~36 workers
+    /// up, so "back to 40 workers" is the wrong question -- 36 workers already deliver 99%
+    /// of what 40 do, and the controller correctly stops climbing there.
+    ///
+    /// Caveat on the model: the plant is quasi-static, i.e. the rate is assumed to follow
+    /// the worker count within one sample. Real throughput lags, so these sample counts
+    /// are a lower bound on recovery, useful for comparing the two back-offs against each
+    /// other rather than as absolute timings.
+    #[test]
+    fn recovery_after_a_throttle_is_measured_not_assumed() {
+        let peak = measured_rate(40);
+        let mut report = Vec::new();
+        for backoff in [Backoff::Step, Backoff::Proportional] {
+            let trace = replay(backoff, 60, Some(12));
+            let recovered = trace[13..]
+                .iter()
+                .position(|w| measured_rate(*w) >= peak * 0.95)
+                .map(|i| i + 1);
+            let settled = *trace.last().expect("non-empty");
+            println!(
+                "{backoff:?}: pre-throttle {}, cut to {}, {:?} samples to 95% of peak, settled {settled}",
+                trace[12], trace[13], recovered
+            );
+            report.push((backoff, recovered));
+        }
+        for (backoff, recovered) in report {
+            assert!(recovered.is_some(), "{backoff:?} never regained 95% of peak");
+        }
     }
 
     /// The ramp has to arrive before the transfer ends. A fast 2 GiB transfer is about

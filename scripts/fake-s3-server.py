@@ -10,6 +10,13 @@ from xml.sax.saxutils import unescape
 DELAY = float(os.environ.get('FAKE_S3_DELAY', '0'))
 # Any key containing this string is refused by DeleteObjects, to exercise partial failure.
 DENY_KEY = os.environ.get('FAKE_S3_DENY_KEY', '')
+# FAKE_S3_SLOWDOWN="from:until" answers requests in that counter window with a 503
+# SlowDown, which is the only way to exercise the client's throttle-and-recover path
+# without provoking real S3. A window rather than a probability, so the recovery is
+# observable as a single episode with a known start and end.
+SLOWDOWN = os.environ.get('FAKE_S3_SLOWDOWN', '')
+SLOWDOWN_FROM, SLOWDOWN_UNTIL = (
+    (int(SLOWDOWN.split(':')[0]), int(SLOWDOWN.split(':')[1])) if SLOWDOWN else (0, 0))
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
@@ -97,8 +104,21 @@ class Handler(BaseHTTPRequestHandler):
                 % (s3code, xml_escape(msg))).encode()
         self._send(code, body, {'Content-Type': 'application/xml'})
 
+    def _throttling(self):
+        if not SLOWDOWN:
+            return False
+        with LOCK:
+            n = REQUESTS[0]
+        return SLOWDOWN_FROM <= n < SLOWDOWN_UNTIL
+
     def do_PUT(self):
         bucket, key, q = self._split()
+        if self._throttling():
+            # Drain the body first, or the connection desynchronises.
+            length = int(self.headers.get('Content-Length', 0))
+            if length:
+                self.rfile.read(length)
+            return self._error(503, 'SlowDown', 'Please reduce your request rate.')
         length = int(self.headers.get('Content-Length', 0))
         data = self.rfile.read(length) if length else b''
         with LOCK:

@@ -239,6 +239,50 @@ transfer), clamped to S3's 5 MiB minimum and doubled as needed to stay under 10,
 `scripts/bench-fat-pipe.sh` runs the sweep; it must run in-region, and its downloads must
 land somewhere other than an EBS volume or they measure the disk.
 
+### 4b. The pool, still open
+
+Three follow-ups came out of the pool fix. Two are settled and in; one waits on a
+measurement that needs an in-region instance.
+
+**Idle workers no longer poll — done.** Raising the ceiling to 64 meant up to 54 threads
+sitting above the target in a 25ms sleep-loop. Measured on this machine, 64 threads idling
+for 2s: **94.6ms of CPU** for the poll loop against **11.4ms** for a condvar with a 250ms
+backstop, so ~47ms/s became ~6ms/s. Growth notifies the condvar; the timeout is only a
+guard against a missed wakeup. Thread spawning was never the cost -- 64 threads cost
+1.96ms per transfer against 0.59ms for 16.
+
+**Throttling behaves, and the pool is not the main line of defence.** The fake server can
+now answer `503 SlowDown` over a request window (`FAKE_S3_SLOWDOWN=from:until`), which is
+the only way to exercise this without provoking real S3. An 8-request burst mid-transfer
+is absorbed entirely by the retry policy: the transfer completes, the round trip is
+byte-identical, and the pool never sees a throttle event at all -- `note_throttle` fires
+only once retries are *exhausted*. A 40-request burst does fail the transfer, which is
+correct: `max_attempts` is 3 by default and no bounded retry survives 40 consecutive
+failures. So the pool's throttle branch is the response to *sustained* throttling only.
+
+**The back-off shape is measured but not yet chosen.** `AWSC_POOL_TRACE=1` reports every
+control decision, and `decide` is split out from the clock so it can be replayed against
+the measured throughput curve rather than argued about. Results: with no noise, and at
++/-5%, a fixed `-1` step and a proportional `-25%` are *indistinguishable* -- the
+controller stops growing at the knee and never overshoots into the region where back-off
+is even used. At +/-15% sampling noise they diverge: `Step` ratchets to the ceiling and
+parks there (mean 63.7 workers, 1082 MB/s) while `Proportional` holds mean 57.7 workers
+for 1085 MB/s. Note also that the throttle branch halves unconditionally and never calls
+`shrunk`, so this choice only ever affects noise-induced degradation.
+
+Proportional therefore holds ~9% fewer connections for equal throughput -- but that is
+only worth having if connections provoke throttling, which is the open measurement:
+
+- **Does a 64-worker ceiling draw `SlowDown` from real S3?** Needs request rate, so it
+  needs an in-region instance. `AWSC_POOL_TRACE=1` makes the answer visible.
+- **Does a single S3 IP cap throughput?** Pin the S3 hostname to one address in
+  `/etc/hosts` (SNI and SigV4 still see the hostname, only the peer changes) and compare
+  against normal DNS. This closes the last open question from the spreading item: macOS
+  puts every socket on one address, and if one address sustains what eight do, that is
+  harmless at any link speed rather than merely at this one.
+
+Flip `BACKOFF` in `pool.rs` once the first lands.
+
 ### 5. ~~Smaller~~ — done
 
 - **Body-less failures.** Every HEAD operation answers a failure with a status and no
