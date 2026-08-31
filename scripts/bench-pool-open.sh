@@ -21,7 +21,8 @@
 # a confident wrong answer here before.
 #
 # Usage: bench-pool-open.sh <bucket> <awsc-binary> [GiB] [repeats]
-set -euo pipefail
+# -E so the ERR trap below fires inside functions too, where both failures were.
+set -Eeuo pipefail
 
 bucket=${1:?usage: bench-pool-open.sh <bucket> <awsc> [GiB] [repeats]}
 awsc=${2:?usage: bench-pool-open.sh <bucket> <awsc> [GiB] [repeats]}
@@ -33,10 +34,21 @@ repeats=${4:-3}
 # and would measure the disk rather than the client.
 work=$(mktemp -d "${BENCH_TMPDIR:-/var/tmp}/pool-open.XXXXXX")
 trap 'rm -rf "$work"' EXIT
+# `set -e` exits mute, which cost two 15-minute instance runs: the caller saw only that
+# the script had stopped, once mid-table and once before the first row. Say which command
+# failed, and where.
+trap 'rc=$?; echo "bench-pool-open: FAILED at line $LINENO, exit $rc, command: $BASH_COMMAND" >&2' ERR
 payload="$work/payload.bin"
 logs=./pool-open-logs
 mkdir -p "$logs"
 results=./pool-open-results.tsv
+# Overridable only so the script can be exercised end to end without root; on the
+# instance it is /etc/hosts. Every failure so far reached EC2 because a path could not
+# be rehearsed locally.
+hosts_file=${BENCH_HOSTS:-/etc/hosts}
+# Downloads land in RAM on purpose: gp3 EBS tops out near 280 MB/s and would measure the
+# disk instead of the client. Overridable for the same reason as hosts_file.
+shm=${BENCH_SHM:-/dev/shm}
 bytes=$((gib * 1024 * 1024 * 1024))
 
 echo "generating ${gib} GiB payload"
@@ -52,7 +64,10 @@ host=$("$awsc" s3 ls "s3://$bucket" --debug 2>&1 \
 [ -n "$host" ] || { echo "could not determine the S3 host"; exit 1; }
 echo "S3 host: $host"
 
-addresses=$(getent ahostsv4 "$host" | awk '{print $1}' | sort -u)
+# getent on glibc, dig elsewhere: the script has to be reproducible off the instance,
+# and two runs were spent on failures that a laptop could have shown.
+addresses=$( { getent ahostsv4 "$host" 2>/dev/null || dig +short "$host" A 2>/dev/null; } \
+  | awk '{print $1}' | grep -E '^[0-9.]+$' | sort -u)
 echo "resolves to:"; echo "$addresses" | sed 's/^/  /'
 one_ip=$(echo "$addresses" | head -1)
 
@@ -72,8 +87,12 @@ run() {
   # `-a` is load-bearing: lsof ORs its selection criteria, so `-p PID -i` without it
   # reports every connection on the machine rather than this process's.
   while kill -0 "$pid" 2>/dev/null; do
-    lsof -a -p "$pid" -i -n -P 2>/dev/null \
-      | awk '/ESTABLISHED/ {split($9,a,"->"); split(a[2],b,":"); if (b[2]=="443") print b[1]}' >> "$peers"
+    # `|| true` is load-bearing: the transfer can exit between the `kill -0` above and
+    # this line, and lsof then returns non-zero, which `pipefail` propagates and `set -e`
+    # turns into a mute exit. That race ended two in-region runs part-way through.
+    { lsof -a -p "$pid" -i -n -P 2>/dev/null \
+      | awk '/ESTABLISHED/ {split($9,a,"->"); split(a[2],b,":"); if (b[2]=="443") print b[1]}' \
+      >> "$peers"; } || true
     sleep 0.2
   done
   if ! wait "$pid"; then
@@ -88,7 +107,8 @@ run() {
     "$(grep -c 'code SlowDown' "$log" || true)" \
     "$(grep -c 'THROTTLED' "$log" || true)" \
     "$(sort -u "$peers" | grep -c . || true)" \
-    "$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)" | tee -a "$results"
+    "$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo -)" \
+    | tee -a "$results"
 }
 
 # ---------------------------------------------------------------- 1. throttling vs load
@@ -101,11 +121,11 @@ for i in $(seq 1 "$repeats"); do
     conc_flag=(--concurrency "$conc")
     [ "$conc" != adaptive ] || conc_flag=()
     run throttle "conc-$conc" "$i" up \
-      "$awsc" s3 cp "$payload" "s3://$bucket/pool-$conc.bin" "${conc_flag[@]}" --no-progress
+      "$awsc" s3 cp "$payload" "s3://$bucket/pool-$conc.bin" ${conc_flag[@]+"${conc_flag[@]}"} --no-progress
     run throttle "conc-$conc" "$i" down \
-      "$awsc" s3 cp "s3://$bucket/pool-$conc.bin" /dev/shm/back.bin "${conc_flag[@]}" --no-progress
-    cmp -s "$payload" /dev/shm/back.bin || { echo "ROUND TRIP CORRUPTED at conc=$conc"; exit 1; }
-    rm -f /dev/shm/back.bin
+      "$awsc" s3 cp "s3://$bucket/pool-$conc.bin" "$shm/back.bin" ${conc_flag[@]+"${conc_flag[@]}"} --no-progress
+    cmp -s "$payload" "$shm/back.bin" || { echo "ROUND TRIP CORRUPTED at conc=$conc"; exit 1; }
+    rm -f "$shm/back.bin"
     sync
   done
 done
@@ -116,16 +136,16 @@ done
 for i in $(seq 1 "$repeats"); do
   for variant in many-ip one-ip; do
     if [ "$variant" = one-ip ]; then
-      printf '%s %s\n' "$one_ip" "$host" >> /etc/hosts
+      printf '%s %s\n' "$one_ip" "$host" >> "$hosts_file"
     fi
     run spread "$variant" "$i" up \
       "$awsc" s3 cp "$payload" "s3://$bucket/spread.bin" --no-progress
     run spread "$variant" "$i" down \
-      "$awsc" s3 cp "s3://$bucket/spread.bin" /dev/shm/back.bin --no-progress
-    cmp -s "$payload" /dev/shm/back.bin || { echo "ROUND TRIP CORRUPTED at $variant"; exit 1; }
-    rm -f /dev/shm/back.bin
+      "$awsc" s3 cp "s3://$bucket/spread.bin" "$shm/back.bin" --no-progress
+    cmp -s "$payload" "$shm/back.bin" || { echo "ROUND TRIP CORRUPTED at $variant"; exit 1; }
+    rm -f "$shm/back.bin"
     if [ "$variant" = one-ip ]; then
-      sed -i "\|^$one_ip $host\$|d" /etc/hosts
+      sed -i.bak "\|^$one_ip $host\$|d" "$hosts_file" && rm -f "$hosts_file.bak"
     fi
   done
 done
@@ -140,5 +160,5 @@ echo "=== pool control decisions (adaptive arms) ==="
 for f in "$logs"/*adaptive*.log "$logs"/spread-*.log; do
   [ -f "$f" ] || continue
   echo "--- $(basename "$f")"
-  grep '^pool:' "$f" | head -40
+  grep '^pool:' "$f" | head -40 || true   # an arm with no decisions is not an error
 done
