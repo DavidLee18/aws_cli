@@ -30,6 +30,10 @@ work=$(mktemp -d "${BENCH_TMPDIR:-/var/tmp}/ramp.XXXXXX")
 trap 'rm -rf "$work"; teardown_wan 2>/dev/null || true' EXIT
 trap 'rc=$?; echo "bench-ramp: FAILED at line $LINENO, exit $rc, command: $BASH_COMMAND" >&2' ERR
 
+# Which arms to run. The fast arm's answer is already in; a re-run that only needs the
+# wan arm should not pay for 72 more transfers to get it.
+arms=${BENCH_ARMS:-"fast wan"}
+
 results=./ramp-results.tsv
 logs=./ramp-logs
 mkdir -p "$logs"
@@ -47,9 +51,13 @@ iface=${iface:-eth0}
 # uses the defaults. Rehearsing off the instance is what stops a mute shell bug costing a
 # 15-minute run, which it has done twice.
 read -r -a FAST_SIZES <<< "${BENCH_FAST_SIZES:-512 2048}"
-# At 40 Mbit a 32 MiB upload is about 7s, long enough for the ramp to complete and for
-# over-opening to show up if it is going to.
-wan_size=${BENCH_WAN_SIZE:-32}
+# The wan arm uploads *many small objects*, not one large one, and that is not a detail.
+# The pool caps itself at `max.min(jobs.len())`, so a 32 MiB single-file upload is four
+# 8 MiB parts and therefore four workers -- every ramp shape then behaves identically and
+# the arm measures nothing. A directory of small objects is both the honest fixture for
+# this question and the realistic thin-link workload.
+wan_objects=${BENCH_WAN_OBJECTS:-400}
+wan_object_kib=${BENCH_WAN_OBJECT_KIB:-128}
 
 # name:AWSC_POOL_START:AWSC_POOL_GROWTH:AWSC_POOL_PATIENCE, or `pinned` for the reference.
 declare -a SHAPES=(
@@ -91,6 +99,39 @@ run() {
     "$(grep -c 'code SlowDown' "$log" || true)" | tee -a "$results"
 }
 
+# The many-object payload for the wan arm.
+make_tree() {
+  local dir=$1 count=$2 kib=$3
+  [ -d "$dir" ] && return 0
+  mkdir -p "$dir"
+  local i
+  for ((i = 0; i < count; i++)); do
+    dd if=/dev/urandom of="$dir/obj-$i.bin" bs=1K count="$kib" status=none
+  done
+}
+
+# One shape, one directory of objects, uploaded. Uploads only: tc shapes egress, so the
+# rate limit does not apply to the download direction.
+exercise_tree() {
+  local link=$1 shape=$2 spec=$3 run=$4
+  local tree="$work/tree"
+  make_tree "$tree" "$wan_objects" "$wan_object_kib"
+  local mib=$((wan_objects * wan_object_kib / 1024))
+
+  local env_flags=() conc_flag=()
+  if [ "$shape" = pinned64 ]; then
+    conc_flag=(--concurrency 64)
+  else
+    IFS=: read -r _ start growth patience <<< "$spec"
+    env_flags=("AWSC_POOL_START=$start" "AWSC_POOL_GROWTH=$growth" "AWSC_POOL_PATIENCE=$patience")
+  fi
+
+  run "$link" "$shape" "$mib" "$run" up-many \
+    env ${env_flags[@]+"${env_flags[@]}"} \
+    "$awsc" s3 cp "$tree" "s3://$bucket/ramp-tree-$shape/" --recursive \
+    ${conc_flag[@]+"${conc_flag[@]}"} --no-progress
+}
+
 # One shape, one payload, one direction pair, verified.
 exercise() {
   local link=$1 shape=$2 spec=$3 mib=$4 run=$5 uploads_only=$6
@@ -122,6 +163,7 @@ exercise() {
 
 # Interleaved by repeat rather than run in blocks, so link drift cannot be mistaken for an
 # effect of the shape.
+if [[ " $arms " == *" fast "* ]]; then
 echo "=== fast link ==="
 for i in $(seq 1 "$repeats"); do
   for mib in "${FAST_SIZES[@]}"; do
@@ -130,15 +172,18 @@ for i in $(seq 1 "$repeats"); do
     done
   done
 done
+fi
 
+if [[ " $arms " == *" wan "* ]]; then
 echo "=== wan (40mbit, +100ms) ==="
 setup_wan
 for i in $(seq 1 "$repeats"); do
   for spec in "${SHAPES[@]}"; do
-    exercise wan "${spec%%:*}" "$spec" "$wan_size" "$i" yes
+    exercise_tree wan "${spec%%:*}" "$spec" "$i"
   done
 done
 teardown_wan
+fi
 
 echo
 column -t "$results"
