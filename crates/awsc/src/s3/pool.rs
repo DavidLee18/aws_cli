@@ -39,6 +39,10 @@ fn grown(current: usize, ceiling: usize, growth_percent: usize) -> usize {
 #[derive(Clone, Copy, Debug)]
 struct Tuning {
     /// Workers at the start of a transfer.
+    ///
+    /// Not the same thing as the floor, which stays at `DEFAULT_WORKERS`: this is where
+    /// the ramp begins, and the pool may still shrink below it when throughput says so.
+    /// Never wasteful, because `run` caps the pool at the number of jobs.
     start: usize,
     /// Percent of the current count to grow to, e.g. 150 for x1.5. Always at least +2.
     growth_percent: usize,
@@ -48,9 +52,24 @@ struct Tuning {
     patience: usize,
 }
 
+/// Where the ramp begins.
+///
+/// Measured in-region on a c7g.xlarge against S3, three repeats per shape. Starting at 32
+/// rather than 10 is worth 8-15% on transfers short enough for the ramp to matter -- on
+/// 512 MiB uploads the three runs at 32 (521, 521, 588 MB/s) do not overlap the three at
+/// 10 (455, 442, 516) -- and it costs nothing on a thin link: under netem at 40 Mbit and
+/// 100ms, uploading 400 small objects, every start from 10 to 64 lands at 3.9-4.0 MB/s,
+/// because a transfer that long has ample time to ramp either way.
+///
+/// Growing faster from 10 was measured too and does almost nothing (943 against 939 MB/s):
+/// the cost is the low start, not the growth rate. Waiting for a second degrading sample
+/// before backing off was worse than either, since it also holds a bad level twice as long
+/// when the degradation is real.
+const RAMP_START: usize = 32;
+
 impl Default for Tuning {
     fn default() -> Tuning {
-        Tuning { start: DEFAULT_WORKERS, growth_percent: 150, patience: 1 }
+        Tuning { start: RAMP_START, growth_percent: 150, patience: 1 }
     }
 }
 
@@ -498,7 +517,9 @@ mod tests {
             samples += 1;
             assert!(samples <= 6, "still at {workers} workers after {samples} samples");
         }
-        assert!(samples <= 4, "took {samples} samples to reach {workers}");
+        // One 150ms sample. A 512 MiB upload on a fast link is only a handful of samples
+        // long, and arriving on the second is what the 8-15% is made of.
+        assert!(samples <= 1, "took {samples} samples to reach {workers}");
     }
 
     /// How long each ramp shape takes to arrive, replayed against the measured curve with
@@ -534,6 +555,20 @@ mod tests {
             );
             assert!(arrived.is_some(), "{name} never reached 95% of peak");
         }
+    }
+
+    /// The ramp's start is not the pool's floor. Raising the start to 32 must not stop
+    /// the controller from settling below it on a link that cannot feed 32 workers --
+    /// which is what would happen if the two constants were shared.
+    #[test]
+    fn the_ramp_starts_above_the_floor_it_may_still_fall_to() {
+        let tuning = Tuning::default();
+        assert!(tuning.start > DEFAULT_WORKERS, "start {} is not above the floor", tuning.start);
+        let state =
+            Control { target: tuning.start, best_rate: 100.0, floor: DEFAULT_WORKERS, degrading: 0 };
+        // A rate well under the best seen: the pool must give capacity back.
+        let next = decide(state, 10.0, MAX_WORKERS, false, tuning);
+        assert!(next.target < tuning.start, "held {} workers on a collapsing rate", next.target);
     }
 
     /// The ceiling is a property of the service and the link, not of the machine. Scaling

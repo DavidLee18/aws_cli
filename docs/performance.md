@@ -294,27 +294,44 @@ Within noise, and the pinned arm is *faster* on upload. This closes the spreadin
 good: macOS putting every socket on one address is not a handicap worth engineering around
 at any link speed.
 
-**What the run turned up instead: the ramp costs more than the back-off ever could.** The
-adaptive arm runs 18% below a pinned 64 on upload (791 against 970) and 10% below on
-download. The control trace says why -- the pool starts at 10 workers and takes five to
-seven 150ms samples to reach the ceiling:
+**What the run turned up instead: the ramp, which cost more than the back-off ever could
+-- now fixed.** The adaptive arm ran 18% below a pinned 64 on upload, because the pool
+started at 10 workers and took five to seven 150ms samples to reach the ceiling -- roughly
+0.9s of a 2.5s transfer spent below the level the link supports.
 
-```
-pool: workers 10 -> 15 rate 80.0/s
-pool: workers 15 -> 22 rate 106.6/s
-pool: workers 22 -> 21 rate 93.1/s
-pool: workers 21 -> 31 rate 153.2/s
-pool: workers 31 -> 30 rate 126.4/s
-pool: workers 30 -> 45 rate 153.2/s
-pool: workers 45 -> 44 rate 113.3/s
-pool: workers 44 -> 64 rate 253.2/s
-```
+Three candidate fixes were made settable (`AWSC_POOL_START`, `AWSC_POOL_GROWTH`,
+`AWSC_POOL_PATIENCE`) and swept in-region, three repeats each, means in MB/s:
 
-That is roughly 0.9s of a 2.5s transfer spent below the level the link supports, and the
-dips (22 -> 21, 31 -> 30) are the degradation branch firing on sampling noise on the way
-up. On a long transfer the ramp amortises to nothing; on a short one it is the whole
-difference. Not yet acted on -- a faster ramp trades against overshooting on a slow link,
-which is the measurement that would have to come first.
+| shape | 512 MiB up | 512 MiB down | 2 GiB up | 2 GiB down | 400 objects over a 40 Mbit/100ms link |
+|---|---|---|---|---|---|
+| start 10, x1.5, patience 1 (was shipped) | 471 | 724 | 939 | 1042 | 3.90 |
+| **start 32** (now shipped) | **544** | **783** | **991** | **1186** | **4.00** |
+| start 32 + patience 2 | 589 | 776 | 972 | 1159 | 4.00 |
+| growth x2 | 461 | 714 | 943 | 1092 | 3.97 |
+| patience 2 | 416 | 721 | 856 | 1150 | 3.93 |
+| pinned 64 (reference) | 547 | 827 | 1056 | 1267 | 4.00 |
+
+`RAMP_START` is now 32. The clean signal is the 512 MiB upload, where the three runs at 32
+(521, 521, 588) do not overlap the three at 10 (455, 442, 516). Growing faster from 10
+does almost nothing -- the cost is the low start, not the growth rate -- and waiting for a
+second degrading sample before backing off was worse than either, because it also holds a
+bad level twice as long when the degradation is real.
+
+The start is deliberately not the floor, which stays at 10: the pool may still settle
+below 32 where throughput says so, and it never opens more workers than there are jobs.
+
+**Two things this measurement got wrong first, both worth remembering.** The replay against
+the measured curve predicted only a 6% ramp cost where the real transfer lost 18%: it
+assumes throughput follows the worker count within one sample, when a new worker must
+first open a TLS connection. Simulation is a lower bound here, not an answer.
+
+And the first thin-link arm uploaded a single 32 MiB file -- four 8 MiB parts. The pool
+caps itself at `max.min(jobs.len())`, so all six shapes ran with four workers and the arm
+compared six identical configurations; the 3.13-3.50 MB/s spread across them was noise
+that looked exactly like a 6.6% penalty for starting higher. Re-run against 400 small
+objects, where the job count exceeds the worker count and the link is latency-bound, every
+shape saturates the link equally. A fixture has to be able to exercise the thing under
+test before its numbers mean anything.
 
 ### 5. ~~Smaller~~ — done
 
