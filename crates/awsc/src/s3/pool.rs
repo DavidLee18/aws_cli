@@ -33,32 +33,18 @@ fn grown(current: usize, ceiling: usize) -> usize {
 
 /// How the controller gives capacity back when throughput degrades.
 ///
-/// Growth is multiplicative, so a matching back-off keeps the two on the same timescale;
-/// a fixed step does not. Which one is right is decided by replaying both against the
-/// measured throughput curve -- see the simulation tests -- not by taste.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Backoff {
-    /// One worker per sample.
-    Step,
-    /// A quarter of the current count, at least one.
-    ///
-    /// Not yet in production use: the noisy replay favours it (9% fewer workers held for
-    /// equal throughput at +/-15% noise), but "fewer connections" only pays if
-    /// connections provoke throttling, and that measurement is still outstanding. Flip
-    /// `BACKOFF` once it lands.
-    #[allow(dead_code)]
-    Proportional,
-}
-
-/// The back-off the pool actually uses.
-const BACKOFF: Backoff = Backoff::Step;
-
-fn shrunk(current: usize, floor: usize, how: Backoff) -> usize {
-    let step = match how {
-        Backoff::Step => 1,
-        Backoff::Proportional => (current / 4).max(1),
-    };
-    current.saturating_sub(step).max(floor)
+/// Back off by one worker per sample.
+///
+/// A proportional back-off (a quarter of the current count) was carried alongside this
+/// one and replayed against the measured curve: it holds 9% fewer workers for equal
+/// throughput once the samples are noisy, which is worth having only if connections
+/// provoke throttling. Measured in-region against real S3 -- 30 transfers of 2 GiB at up
+/// to 64 connections -- they do not: zero SlowDown responses, counting the ones retry
+/// absorbs. The throttle branch below halves unconditionally and never consults this
+/// function, so the proportional variant could not have changed the throttled path
+/// either. It was removed rather than left switched off.
+fn shrunk(current: usize, floor: usize) -> usize {
+    current.saturating_sub(1).max(floor)
 }
 
 /// What the controller carries between samples.
@@ -72,7 +58,7 @@ struct Control {
 /// One control decision, split out from the timing and the atomics so it can be replayed
 /// against a measured throughput curve instead of argued about. `supervise` is this
 /// function plus a clock.
-fn decide(state: Control, rate: f64, ceiling: usize, throttled: bool, backoff: Backoff) -> Control {
+fn decide(state: Control, rate: f64, ceiling: usize, throttled: bool) -> Control {
     // Throttling is a direct instruction; obey it before looking at throughput.
     if throttled {
         // Throttling overrides the floor: the service is the authority here.
@@ -86,7 +72,7 @@ fn decide(state: Control, rate: f64, ceiling: usize, throttled: bool, backoff: B
     if rate < state.best_rate * DEGRADATION && state.target > state.floor {
         // Slower than our best despite more workers: we have overshot. Let the new, lower
         // level set the benchmark rather than chasing a peak we can no longer reach.
-        return Control { target: shrunk(state.target, state.floor, backoff), best_rate: rate, ..state };
+        return Control { target: shrunk(state.target, state.floor), best_rate: rate, ..state };
     }
     state
 }
@@ -256,7 +242,7 @@ impl Pool {
                 floor,
             };
             let throttled = self.throttled.swap(false, Ordering::Relaxed);
-            let next = decide(state, rate, ceiling, throttled, BACKOFF);
+            let next = decide(state, rate, ceiling, throttled);
             self.target.store(next.target, Ordering::Relaxed);
             if next.target > state.target {
                 self.wake_idle();
@@ -327,7 +313,7 @@ mod tests {
     }
 
     /// Replay the controller against that curve and report the worker trajectory.
-    fn replay(backoff: Backoff, samples: usize, throttle_at: Option<usize>) -> Vec<usize> {
+    fn replay(samples: usize, throttle_at: Option<usize>) -> Vec<usize> {
         let ceiling = MAX_WORKERS;
         let mut state =
             Control { target: DEFAULT_WORKERS, best_rate: 0.0, floor: DEFAULT_WORKERS };
@@ -336,18 +322,17 @@ mod tests {
             let throttled = throttle_at == Some(i);
             // The rate the plant returns for the worker count currently in force.
             let rate = measured_rate(state.target);
-            state = decide(state, rate, ceiling, throttled, backoff);
+            state = decide(state, rate, ceiling, throttled);
             trace.push(state.target);
         }
         trace
     }
 
-    /// The same replay with jitter on each sample, which is what decides the back-off
-    /// question: a noiseless curve never overshoots the knee, so the two back-offs are
-    /// indistinguishable on it. Sampling noise is what pushes `best_rate` above what the
-    /// plant can repeat, and the degradation branch -- the only place the back-off shape
-    /// is used -- fires only then.
-    fn replay_noisy(backoff: Backoff, samples: usize, percent: u64) -> Vec<usize> {
+    /// The same replay with jitter on each sample. A noiseless curve never overshoots the
+    /// knee, so the degradation branch never fires on one; sampling noise is what pushes
+    /// `best_rate` above what the plant can repeat, and only then does the pool back off
+    /// at all. This is the replay that chose the back-off shape.
+    fn replay_noisy(samples: usize, percent: u64) -> Vec<usize> {
         let ceiling = MAX_WORKERS;
         let mut state =
             Control { target: DEFAULT_WORKERS, best_rate: 0.0, floor: DEFAULT_WORKERS };
@@ -358,31 +343,28 @@ mod tests {
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             let swing = (seed >> 33) % (2 * percent + 1);
             let factor = 1.0 + (swing as f64 - percent as f64) / 100.0;
-            state = decide(state, measured_rate(state.target) * factor, ceiling, false, backoff);
+            state = decide(state, measured_rate(state.target) * factor, ceiling, false);
             trace.push(state.target);
         }
         trace
     }
 
-    /// With noisy samples, does either back-off oscillate badly, and does the choice
-    /// change the throughput the pool actually sustains?
+    /// With noisy samples, does the pool oscillate badly, and what does it sustain?
     #[test]
-    fn the_back_off_shape_is_chosen_on_the_noisy_replay() {
+    fn the_pool_holds_its_level_on_noisy_samples() {
         for percent in [5u64, 15] {
-            for backoff in [Backoff::Step, Backoff::Proportional] {
-                let trace = replay_noisy(backoff, 200, percent);
-                let tail = &trace[100..];
-                let lo = *tail.iter().min().expect("non-empty");
-                let hi = *tail.iter().max().expect("non-empty");
-                let mean_rate: f64 =
-                    tail.iter().map(|w| measured_rate(*w)).sum::<f64>() / tail.len() as f64;
-                let mean_workers: f64 =
-                    tail.iter().map(|w| *w as f64).sum::<f64>() / tail.len() as f64;
-                println!(
-                    "noise +/-{percent}% {backoff:?}: workers {lo}-{hi} (mean {mean_workers:.1}), sustained {mean_rate:.0} MB/s"
-                );
-                assert!(lo >= DEFAULT_WORKERS, "{backoff:?} fell to {lo}, under the floor");
-            }
+            let trace = replay_noisy(200, percent);
+            let tail = &trace[100..];
+            let lo = *tail.iter().min().expect("non-empty");
+            let hi = *tail.iter().max().expect("non-empty");
+            let mean_rate: f64 =
+                tail.iter().map(|w| measured_rate(*w)).sum::<f64>() / tail.len() as f64;
+            let mean_workers: f64 =
+                tail.iter().map(|w| *w as f64).sum::<f64>() / tail.len() as f64;
+            println!(
+                "noise +/-{percent}%: workers {lo}-{hi} (mean {mean_workers:.1}), sustained {mean_rate:.0} MB/s"
+            );
+            assert!(lo >= DEFAULT_WORKERS, "fell to {lo}, under the floor");
         }
     }
 
@@ -391,15 +373,10 @@ mod tests {
     /// than the link rewards, and anything far below is leaving throughput unused.
     #[test]
     fn the_controller_settles_near_the_measured_optimum() {
-        for backoff in [Backoff::Step, Backoff::Proportional] {
-            let trace = replay(backoff, 40, None);
-            let settled = *trace.last().expect("non-empty");
-            assert!(
-                (20..=MAX_WORKERS).contains(&settled),
-                "{backoff:?} settled at {settled}: {trace:?}"
-            );
-            println!("{backoff:?} settled at {settled} workers ({:.0} MB/s)", measured_rate(settled));
-        }
+        let trace = replay(40, None);
+        let settled = *trace.last().expect("non-empty");
+        assert!((20..=MAX_WORKERS).contains(&settled), "settled at {settled}: {trace:?}");
+        println!("settled at {settled} workers ({:.0} MB/s)", measured_rate(settled));
     }
 
     /// After the service throttles, how long before throughput is back?
@@ -415,23 +392,15 @@ mod tests {
     #[test]
     fn recovery_after_a_throttle_is_measured_not_assumed() {
         let peak = measured_rate(40);
-        let mut report = Vec::new();
-        for backoff in [Backoff::Step, Backoff::Proportional] {
-            let trace = replay(backoff, 60, Some(12));
-            let recovered = trace[13..]
-                .iter()
-                .position(|w| measured_rate(*w) >= peak * 0.95)
-                .map(|i| i + 1);
-            let settled = *trace.last().expect("non-empty");
-            println!(
-                "{backoff:?}: pre-throttle {}, cut to {}, {:?} samples to 95% of peak, settled {settled}",
-                trace[12], trace[13], recovered
-            );
-            report.push((backoff, recovered));
-        }
-        for (backoff, recovered) in report {
-            assert!(recovered.is_some(), "{backoff:?} never regained 95% of peak");
-        }
+        let trace = replay(60, Some(12));
+        let recovered =
+            trace[13..].iter().position(|w| measured_rate(*w) >= peak * 0.95).map(|i| i + 1);
+        let settled = *trace.last().expect("non-empty");
+        println!(
+            "pre-throttle {}, cut to {}, {:?} samples to 95% of peak, settled {settled}",
+            trace[12], trace[13], recovered
+        );
+        assert!(recovered.is_some(), "never regained 95% of peak");
     }
 
     /// The ramp has to arrive before the transfer ends. A fast 2 GiB transfer is about
