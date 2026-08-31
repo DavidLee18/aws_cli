@@ -421,6 +421,41 @@ Recording these so they are not proposed again.
 It paginates at 1000 keys like real S3. It is not a signing oracle — it never checks a
 signature, so signing changes still need real AWS.
 
-For connection behaviour against real S3, sample `lsof -p <pid> -i | grep -c ESTABLISHED`
-in a loop. That is what located the SSO stall: one socket to a us-east-1 address held for a
-second before any S3 connection opened.
+For connection behaviour against real S3, sample `lsof -a -p <pid> -i -n -P` in a loop.
+The `-a` is load-bearing -- lsof **ORs** its selection criteria, so without it the output
+is every connection on the machine, which once produced a confident count of "17 distinct
+S3 peers" that included Google and Anthropic addresses.
+
+### Getting a fat pipe
+
+The dev link saturates at ~4.5 MB/s, so anything whose payoff is "same bytes, faster"
+measures as noise here. A temporary in-region instance gives ~200 MB/s single-stream and
+over 1.2 GB/s concurrent. `scripts/bench-fat-pipe.sh`, `bench-pool-open.sh` and
+`bench-ramp.sh` are written to run there, driven from EC2 user-data that uploads its log
+to S3 at every stage and terminates the instance at the end -- no SSH, and nothing left
+running if a step fails.
+
+**The default VPC in this account cannot reach the internet outbound.** Its shared network
+ACL allows inbound only on 22/80/443, and ACLs are stateless, so ephemeral-port return
+traffic for an outgoing connection is dropped: an instance there reaches neither SSM nor
+S3 nor dnf, and goes dark with no logs. Two instances were lost to this before the cause
+was found. Do not edit the shared ACL -- other subnets use it. Build a subnet of your own
+(about a minute, and the reason the last one was kept around far longer than it was used):
+
+```
+aws ec2 create-subnet --vpc-id <default-vpc> --cidr-block 172.31.128.0/24 \
+  --availability-zone us-east-1c
+aws ec2 modify-subnet-attribute --subnet-id <subnet> --map-public-ip-on-launch
+aws ec2 create-network-acl --vpc-id <default-vpc>
+aws ec2 create-network-acl-entry --network-acl-id <acl> --rule-number 100 --protocol -1 \
+  --rule-action allow --cidr-block 0.0.0.0/0 --ingress
+aws ec2 create-network-acl-entry --network-acl-id <acl> --rule-number 100 --protocol -1 \
+  --rule-action allow --cidr-block 0.0.0.0/0 --egress
+aws ec2 replace-network-acl-association --association-id <the subnet's current one> \
+  --network-acl-id <acl>
+```
+
+The instance also needs an instance profile granting the bench bucket, and `/tmp` is a
+RAM-backed tmpfs on Amazon Linux 2023 -- put payloads in `/var/tmp` and download targets
+in `/dev/shm`, since a download onto gp3 EBS measures the disk (~280 MB/s flat) rather
+than the client (1183 MB/s into `/dev/shm`).
