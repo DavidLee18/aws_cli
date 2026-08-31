@@ -40,7 +40,9 @@ sample_peers() {
   local pid=$1 out=$2
   : > "$out"
   while kill -0 "$pid" 2>/dev/null; do
-    lsof -p "$pid" -i -n -P 2>/dev/null \
+    # `-a` is load-bearing: lsof ORs its selection criteria, so `-p PID -i` without it
+    # reports every connection on the machine, not the process's.
+    lsof -a -p "$pid" -i -n -P 2>/dev/null \
       | awk '/ESTABLISHED/ {split($9,a,"->"); split(a[2],b,":"); if (b[2]=="443") print b[1]}' >> "$out"
     sleep 0.2
   done
