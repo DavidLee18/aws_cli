@@ -27,8 +27,45 @@ const DEGRADATION: f64 = 0.90;
 /// The reference's fixed worker count, used as our floor rather than our ceiling.
 const DEFAULT_WORKERS: usize = 10;
 /// The next worker count while throughput is still improving.
-fn grown(current: usize, ceiling: usize) -> usize {
-    (current + (current / 2).max(2)).min(ceiling)
+fn grown(current: usize, ceiling: usize, growth_percent: usize) -> usize {
+    let step = (current * growth_percent.saturating_sub(100) / 100).max(2);
+    (current + step).min(ceiling)
+}
+
+/// How the ramp is shaped. The defaults are the shipped behaviour; the environment
+/// variables exist so the shape can be swept in-region rather than argued about, because
+/// the ramp is measurably the pool's remaining cost -- an adaptive transfer runs 18% below
+/// a pinned 64 on a 2.5s upload, purely because it is still climbing when the work ends.
+#[derive(Clone, Copy, Debug)]
+struct Tuning {
+    /// Workers at the start of a transfer.
+    start: usize,
+    /// Percent of the current count to grow to, e.g. 150 for x1.5. Always at least +2.
+    growth_percent: usize,
+    /// Consecutive degrading samples required before giving capacity back. At 1 -- the
+    /// shipped value -- a single noisy sample undoes a step of the climb, which the
+    /// in-region traces show happening twice on the way up.
+    patience: usize,
+}
+
+impl Default for Tuning {
+    fn default() -> Tuning {
+        Tuning { start: DEFAULT_WORKERS, growth_percent: 150, patience: 1 }
+    }
+}
+
+impl Tuning {
+    fn from_environment() -> Tuning {
+        let read = |name: &str, fallback: usize| {
+            std::env::var(name).ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(fallback)
+        };
+        let d = Tuning::default();
+        Tuning {
+            start: read("AWSC_POOL_START", d.start),
+            growth_percent: read("AWSC_POOL_GROWTH", d.growth_percent),
+            patience: read("AWSC_POOL_PATIENCE", d.patience),
+        }
+    }
 }
 
 /// How the controller gives capacity back when throughput degrades.
@@ -53,28 +90,50 @@ struct Control {
     target: usize,
     best_rate: f64,
     floor: usize,
+    /// Consecutive samples that came in below `DEGRADATION`, for `Tuning::patience`.
+    degrading: usize,
 }
 
 /// One control decision, split out from the timing and the atomics so it can be replayed
 /// against a measured throughput curve instead of argued about. `supervise` is this
 /// function plus a clock.
-fn decide(state: Control, rate: f64, ceiling: usize, throttled: bool) -> Control {
+fn decide(state: Control, rate: f64, ceiling: usize, throttled: bool, tuning: Tuning) -> Control {
     // Throttling is a direct instruction; obey it before looking at throughput.
     if throttled {
         // Throttling overrides the floor: the service is the authority here.
-        return Control { target: (state.target / 2).max(1), best_rate: 0.0, floor: 1 };
+        return Control { target: (state.target / 2).max(1), best_rate: 0.0, floor: 1, degrading: 0 };
     }
     if rate > state.best_rate * IMPROVEMENT {
-        let target =
-            if state.target < ceiling { grown(state.target, ceiling) } else { state.target };
-        return Control { target, best_rate: rate.max(state.best_rate), ..state };
+        let target = if state.target < ceiling {
+            grown(state.target, ceiling, tuning.growth_percent)
+        } else {
+            state.target
+        };
+        return Control {
+            target,
+            best_rate: rate.max(state.best_rate),
+            degrading: 0,
+            ..state
+        };
     }
     if rate < state.best_rate * DEGRADATION && state.target > state.floor {
-        // Slower than our best despite more workers: we have overshot. Let the new, lower
-        // level set the benchmark rather than chasing a peak we can no longer reach.
-        return Control { target: shrunk(state.target, state.floor), best_rate: rate, ..state };
+        // Slower than our best despite more workers: we may have overshot. Wait for
+        // `patience` consecutive such samples before believing it, so that one noisy
+        // sample cannot undo a step of the climb.
+        let degrading = state.degrading + 1;
+        if degrading < tuning.patience {
+            return Control { degrading, ..state };
+        }
+        // Let the new, lower level set the benchmark rather than chasing a peak we can no
+        // longer reach.
+        return Control {
+            target: shrunk(state.target, state.floor),
+            best_rate: rate,
+            degrading: 0,
+            ..state
+        };
     }
-    state
+    Control { degrading: 0, ..state }
 }
 
 /// The hard ceiling when the caller does not pin one.
@@ -117,6 +176,8 @@ pub struct Pool {
     /// The counter exists to give the condvar a mutex to pair with; only the signal
     /// matters.
     wake: (Mutex<u64>, Condvar),
+    /// The ramp's shape, from the environment.
+    tuning: Tuning,
 }
 
 impl Pool {
@@ -126,7 +187,8 @@ impl Pool {
         // Start at the reference's fixed default rather than below it: adapting must
         // never make a short transfer slower than not adapting at all. The ramp tunes
         // upward from here, and throttling tunes it back down.
-        let start = explicit.unwrap_or_else(|| DEFAULT_WORKERS.min(max));
+        let tuning = Tuning::from_environment();
+        let start = explicit.unwrap_or_else(|| tuning.start.min(max));
         Pool {
             target: AtomicUsize::new(start),
             max,
@@ -136,6 +198,7 @@ impl Pool {
             done: AtomicBool::new(false),
             trace: std::env::var_os("AWSC_POOL_TRACE").is_some(),
             wake: (Mutex::new(0), Condvar::new()),
+            tuning,
         }
     }
 
@@ -222,6 +285,7 @@ impl Pool {
         // asked us to slow down. Adapting must not make anything slower than not
         // adapting; the ramp is there to go faster, not to second-guess the baseline.
         let mut floor = DEFAULT_WORKERS.min(ceiling);
+        let mut degrading = 0usize;
 
         while !self.done.load(Ordering::Relaxed) {
             std::thread::sleep(SAMPLE_INTERVAL);
@@ -240,9 +304,10 @@ impl Pool {
                 target: self.target.load(Ordering::Relaxed),
                 best_rate,
                 floor,
+                degrading,
             };
             let throttled = self.throttled.swap(false, Ordering::Relaxed);
-            let next = decide(state, rate, ceiling, throttled);
+            let next = decide(state, rate, ceiling, throttled, self.tuning);
             self.target.store(next.target, Ordering::Relaxed);
             if next.target > state.target {
                 self.wake_idle();
@@ -257,6 +322,7 @@ impl Pool {
             }
             best_rate = next.best_rate;
             floor = next.floor;
+            degrading = next.degrading;
         }
     }
 }
@@ -314,15 +380,23 @@ mod tests {
 
     /// Replay the controller against that curve and report the worker trajectory.
     fn replay(samples: usize, throttle_at: Option<usize>) -> Vec<usize> {
+        replay_tuned(Tuning::default(), samples, throttle_at)
+    }
+
+    fn replay_tuned(tuning: Tuning, samples: usize, throttle_at: Option<usize>) -> Vec<usize> {
         let ceiling = MAX_WORKERS;
-        let mut state =
-            Control { target: DEFAULT_WORKERS, best_rate: 0.0, floor: DEFAULT_WORKERS };
+        let mut state = Control {
+            target: tuning.start,
+            best_rate: 0.0,
+            floor: DEFAULT_WORKERS,
+            degrading: 0,
+        };
         let mut trace = vec![state.target];
         for i in 0..samples {
             let throttled = throttle_at == Some(i);
             // The rate the plant returns for the worker count currently in force.
             let rate = measured_rate(state.target);
-            state = decide(state, rate, ceiling, throttled);
+            state = decide(state, rate, ceiling, throttled, tuning);
             trace.push(state.target);
         }
         trace
@@ -333,9 +407,17 @@ mod tests {
     /// `best_rate` above what the plant can repeat, and only then does the pool back off
     /// at all. This is the replay that chose the back-off shape.
     fn replay_noisy(samples: usize, percent: u64) -> Vec<usize> {
+        replay_noisy_tuned(Tuning::default(), samples, percent)
+    }
+
+    fn replay_noisy_tuned(tuning: Tuning, samples: usize, percent: u64) -> Vec<usize> {
         let ceiling = MAX_WORKERS;
-        let mut state =
-            Control { target: DEFAULT_WORKERS, best_rate: 0.0, floor: DEFAULT_WORKERS };
+        let mut state = Control {
+            target: tuning.start,
+            best_rate: 0.0,
+            floor: DEFAULT_WORKERS,
+            degrading: 0,
+        };
         let mut trace = vec![state.target];
         // A fixed LCG, so the comparison between back-offs sees identical noise.
         let mut seed = 0x2545_F491_4F6C_DD1Du64;
@@ -343,7 +425,7 @@ mod tests {
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             let swing = (seed >> 33) % (2 * percent + 1);
             let factor = 1.0 + (swing as f64 - percent as f64) / 100.0;
-            state = decide(state, measured_rate(state.target) * factor, ceiling, false);
+            state = decide(state, measured_rate(state.target) * factor, ceiling, false, tuning);
             trace.push(state.target);
         }
         trace
@@ -408,14 +490,50 @@ mod tests {
     /// very end -- measured as adapting being 45% slower than pinning 40 workers.
     #[test]
     fn the_ramp_reaches_the_measured_optimum_within_a_few_samples() {
-        let mut workers = DEFAULT_WORKERS;
+        let tuning = Tuning::default();
+        let mut workers = tuning.start;
         let mut samples = 0;
         while workers < 40 {
-            workers = grown(workers, MAX_WORKERS);
+            workers = grown(workers, MAX_WORKERS, tuning.growth_percent);
             samples += 1;
             assert!(samples <= 6, "still at {workers} workers after {samples} samples");
         }
         assert!(samples <= 4, "took {samples} samples to reach {workers}");
+    }
+
+    /// How long each ramp shape takes to arrive, replayed against the measured curve with
+    /// noisy samples. This is the cheap half of the ramp question: it says which shapes
+    /// are worth spending in-region link time on, and it cannot answer what a fast ramp
+    /// costs on a slow link, because the curve it replays is a fast one.
+    #[test]
+    fn ramp_shapes_reach_the_optimum_in_different_numbers_of_samples() {
+        let peak = measured_rate(40);
+        let shapes = [
+            ("shipped 10/150%/1", Tuning::default()),
+            ("start 32", Tuning { start: 32, ..Tuning::default() }),
+            ("growth 200%", Tuning { growth_percent: 200, ..Tuning::default() }),
+            ("patience 2", Tuning { patience: 2, ..Tuning::default() }),
+            ("start 32 + patience 2", Tuning { start: 32, patience: 2, ..Tuning::default() }),
+        ];
+        // A 2.5s transfer is about sixteen 150ms samples. What it is paid is the *mean*
+        // rate over its whole life, not the rate it eventually reaches -- the in-region
+        // run measured adapting at 18% below a pinned 64 while the target itself arrived
+        // in well under a second.
+        const SHORT: usize = 16;
+        for (name, tuning) in shapes {
+            let trace = replay_noisy_tuned(tuning, 40, 15);
+            let arrived = trace.iter().position(|w| measured_rate(*w) >= peak * 0.95);
+            let short: f64 =
+                trace[..SHORT].iter().map(|w| measured_rate(*w)).sum::<f64>() / SHORT as f64;
+            println!(
+                "{name}: {:?} samples to 95% of peak, {short:.0} MB/s over a {}-sample transfer ({:.0}% of pinned peak), trace {:?}",
+                arrived,
+                SHORT,
+                100.0 * short / peak,
+                &trace[..6.min(trace.len())]
+            );
+            assert!(arrived.is_some(), "{name} never reached 95% of peak");
+        }
     }
 
     /// The ceiling is a property of the service and the link, not of the machine. Scaling
