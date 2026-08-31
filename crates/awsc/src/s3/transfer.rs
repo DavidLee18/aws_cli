@@ -69,6 +69,10 @@ pub struct Options {
     pub delete: bool,
     /// How entries present on both sides are compared, sync only.
     pub strategy: super::sync::Strategy,
+    /// `--multipart-threshold`: at or above this size an object is transferred in parts.
+    pub multipart_threshold: u64,
+    /// `--multipart-chunksize`: the part size, before the `MAX_PARTS` clamp.
+    pub multipart_chunksize: u64,
 }
 
 impl Options {
@@ -100,6 +104,8 @@ impl Options {
             excludes: Vec::new(),
             delete: false,
             strategy: super::sync::Strategy::SizeAndTime,
+            multipart_threshold: MULTIPART_THRESHOLD,
+            multipart_chunksize: MULTIPART_CHUNKSIZE,
         };
         let tokens = &parsed.extras;
         let mut i = 0;
@@ -135,6 +141,20 @@ impl Options {
                             .filter(|n| *n > 0)
                             .unwrap_or(MAX_CONCURRENT_REQUESTS),
                     )
+                }
+                // Part sizing. The defaults suit a link of a few MB/s, where an 8 MiB
+                // part is a couple of seconds of transfer; a fat pipe wants larger parts,
+                // because the per-part round trip stops being negligible. Unreadable or
+                // zero values keep the default rather than failing the transfer.
+                "--multipart-threshold" => {
+                    if let Some(n) = take(&mut i).as_deref().and_then(parse_size) {
+                        options.multipart_threshold = n;
+                    }
+                }
+                "--multipart-chunksize" => {
+                    if let Some(n) = take(&mut i).as_deref().and_then(parse_size) {
+                        options.multipart_chunksize = n;
+                    }
                 }
                 "--storage-class" => options.storage_class = take(&mut i),
                 "--acl" => options.acl = take(&mut i),
@@ -348,8 +368,28 @@ pub struct Item {
 }
 
 /// The chunk size for an object, doubled until it fits within S3's 10,000-part limit.
-fn chunk_size_for(total: u64) -> u64 {
-    let mut chunk = MULTIPART_CHUNKSIZE;
+/// A byte count, plain or suffixed: `8388608`, `8MB`, `8MiB`, `1GB`.
+///
+/// `MB` and `MiB` both mean 2^20 — S3 part sizes are powers of two everywhere in the
+/// service's own documentation, and a decimal reading would silently produce parts that
+/// are not, which is the opposite of what anyone tuning this wants. Anything
+/// unparseable, or zero, yields `None`, and the caller keeps its default.
+fn parse_size(text: &str) -> Option<u64> {
+    let text = text.trim();
+    let digits = text.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+    let suffix = text[digits.len()..].to_ascii_uppercase();
+    let scale = match suffix.as_str() {
+        "" | "B" => 1u64,
+        "K" | "KB" | "KIB" => 1024,
+        "M" | "MB" | "MIB" => 1024 * 1024,
+        "G" | "GB" | "GIB" => 1024 * 1024 * 1024,
+        _ => return None,
+    };
+    digits.trim().parse::<u64>().ok().filter(|n| *n > 0)?.checked_mul(scale)
+}
+
+fn chunk_size_for(total: u64, base: u64) -> u64 {
+    let mut chunk = base.max(MIN_CHUNKSIZE);
     while total.div_ceil(chunk) > MAX_PARTS {
         chunk *= 2;
     }
@@ -1013,7 +1053,7 @@ fn multipart_copy(
         .get("UploadId")
         .to_string();
 
-    let chunk = chunk_size_for(item.size);
+    let chunk = chunk_size_for(item.size, options.multipart_chunksize);
     let parts: Vec<u64> = (1..=item.size.div_ceil(chunk)).collect();
     let etags: Mutex<Vec<(u64, String)>> = Mutex::new(Vec::new());
     let failure: Mutex<Option<Failure>> = Mutex::new(None);
@@ -1337,7 +1377,7 @@ pub fn execute_uploads(
     // Open a multipart upload for each large object, then queue every part alongside the
     // small objects so one pool serves them all.
     let large: Vec<usize> = (0..items.len())
-        .filter(|i| items[*i].size >= MULTIPART_THRESHOLD)
+        .filter(|i| items[*i].size >= options.multipart_threshold)
         .collect();
     let uploads: Vec<Upload> = large
         .iter()
@@ -1345,7 +1385,7 @@ pub fn execute_uploads(
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut jobs: Vec<Job> = (0..items.len())
-        .filter(|i| items[*i].size < MULTIPART_THRESHOLD)
+        .filter(|i| items[*i].size < options.multipart_threshold)
         .map(|item| Job::Whole { item })
         .collect();
     for (upload_index, upload) in uploads.iter().enumerate() {
@@ -1457,7 +1497,7 @@ fn begin_upload(
         .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?
         .get("UploadId")
         .to_string();
-    Ok(Upload { item: index, id, chunk: chunk_size_for(item.size), path })
+    Ok(Upload { item: index, id, chunk: chunk_size_for(item.size, options.multipart_chunksize), path })
 }
 
 fn upload_part(
@@ -1667,7 +1707,7 @@ fn download(
     let mut jobs: Vec<Job> = Vec::new();
     let mut handles: Vec<Option<std::fs::File>> = Vec::with_capacity(items.len());
     for (index, item) in items.iter().enumerate() {
-        if item.size < MULTIPART_THRESHOLD {
+        if item.size < options.multipart_threshold {
             handles.push(None);
             jobs.push(Job::Whole { item: index });
             continue;
@@ -1677,7 +1717,7 @@ fn download(
             std::fs::File::create(&item.dest).map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
         file.set_len(item.size).map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
         handles.push(Some(file));
-        let chunk = chunk_size_for(item.size);
+        let chunk = chunk_size_for(item.size, options.multipart_chunksize);
         for range in 0..item.size.div_ceil(chunk) {
             jobs.push(Job::Range { item: index, index: range });
         }
@@ -1703,7 +1743,7 @@ fn download(
             if failures.lock().expect("mutex").iter().any(|(i, _)| i == item) {
                 return;
             }
-            let chunk = chunk_size_for(items[*item].size);
+            let chunk = chunk_size_for(items[*item].size, options.multipart_chunksize);
             let start = index * chunk;
             let end = (start + chunk).min(items[*item].size) - 1;
             let file = handles[*item].as_ref().expect("large items have a handle");
@@ -1736,7 +1776,7 @@ fn download(
     // Report each large file once every one of its ranges has been attempted.
     let failed = failures.into_inner().expect("mutex");
     for (index, item) in items.iter().enumerate() {
-        if item.size < MULTIPART_THRESHOLD {
+        if item.size < options.multipart_threshold {
             continue;
         }
         let result = match failed.iter().find(|(i, _)| *i == index) {
@@ -1853,7 +1893,7 @@ fn copy(
     // one worker for the whole transfer. Anything at or above the multipart threshold is
     // copied part by part with `UploadPartCopy`, with the parts sharing the pool.
     let (large, small): (Vec<&Item>, Vec<&Item>) =
-        items.iter().partition(|i| i.size >= MULTIPART_THRESHOLD);
+        items.iter().partition(|i| i.size >= options.multipart_threshold);
 
     let pool = Pool::new(options.concurrency);
     // For a move, the sources of the copies that succeeded, deleted together once the
@@ -2022,12 +2062,38 @@ mod tests {
     #[test]
     fn chooses_a_legal_chunk_size() {
         // A small object keeps the default chunk size; the adjuster only ever grows it.
-        assert_eq!(chunk_size_for(1024), MULTIPART_CHUNKSIZE);
-        assert_eq!(chunk_size_for(100 * 1024 * 1024), MULTIPART_CHUNKSIZE);
+        assert_eq!(chunk_size_for(1024, MULTIPART_CHUNKSIZE), MULTIPART_CHUNKSIZE);
+        assert_eq!(chunk_size_for(100 * 1024 * 1024, MULTIPART_CHUNKSIZE), MULTIPART_CHUNKSIZE);
         let huge = 5 * 1024_u64.pow(4); // 5 TiB, S3's per-object maximum
-        let chunk = chunk_size_for(huge);
+        let chunk = chunk_size_for(huge, MULTIPART_CHUNKSIZE);
         assert!(huge.div_ceil(chunk) <= MAX_PARTS, "{chunk} leaves too many parts");
         assert!(chunk >= MIN_CHUNKSIZE);
+    }
+
+    #[test]
+    fn reads_sizes_with_and_without_suffixes() {
+        assert_eq!(parse_size("8388608"), Some(8 * 1024 * 1024));
+        assert_eq!(parse_size("8MB"), Some(8 * 1024 * 1024));
+        assert_eq!(parse_size("8MiB"), Some(8 * 1024 * 1024));
+        assert_eq!(parse_size("8mb"), Some(8 * 1024 * 1024));
+        assert_eq!(parse_size("1GB"), Some(1024 * 1024 * 1024));
+        assert_eq!(parse_size("512KB"), Some(512 * 1024));
+        // Rejected, so the caller keeps its default rather than transferring in
+        // zero-sized or nonsensical parts.
+        assert_eq!(parse_size("0"), None);
+        assert_eq!(parse_size(""), None);
+        assert_eq!(parse_size("8TB"), None);
+        assert_eq!(parse_size("lots"), None);
+        // A space between the number and its unit is accepted; it is unambiguous.
+        assert_eq!(parse_size("8 MB"), Some(8 * 1024 * 1024));
+    }
+
+    /// A chunk size below S3's 5 MiB minimum is raised, not obeyed: parts smaller than
+    /// that are rejected for every part but the last.
+    #[test]
+    fn a_requested_chunk_size_is_clamped_to_the_service_minimum() {
+        assert_eq!(chunk_size_for(100 * 1024 * 1024, 1024), MIN_CHUNKSIZE);
+        assert_eq!(chunk_size_for(100 * 1024 * 1024, 64 * 1024 * 1024), 64 * 1024 * 1024);
     }
 
     #[test]

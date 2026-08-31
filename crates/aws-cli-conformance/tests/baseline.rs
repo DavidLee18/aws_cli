@@ -109,8 +109,10 @@ fn conformance_does_not_regress() {
         "exact-arg ratio regressed to {:.3} ({exact}/{compared}); baseline is {MIN_EXACT_ARG_RATIO}",
         ratio
     );
-    assert!(
-        diverging <= MAX_DIVERGING_OPERATIONS,
+    // Equality, not `<=`: the baseline is zero, so there is nothing below it to allow.
+    // Raising it is what the constant's documentation forbids.
+    assert_eq!(
+        diverging, MAX_DIVERGING_OPERATIONS,
         "diverging operations rose to {diverging}; baseline is {MAX_DIVERGING_OPERATIONS}"
     );
 }

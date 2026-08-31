@@ -20,6 +20,7 @@ LOCK = threading.Lock()
 COUNTER = [0]
 INFLIGHT = [0]
 PEAK = [0]
+PART_SIZES = []       # every UploadPart body length, in arrival order
 
 def iso(bucket, key):
     t = MTIMES.get((bucket, key), 0)
@@ -104,6 +105,7 @@ class Handler(BaseHTTPRequestHandler):
             if 'partNumber' in q:
                 uid = q['uploadId'][0]
                 UPLOADS.setdefault(uid, {})[int(q['partNumber'][0])] = data
+                PART_SIZES.append(len(data))
                 etag = '"%s"' % hashlib.md5(data).hexdigest()
                 return self._send(200, b'', {'ETag': etag})
             if not key:
@@ -212,6 +214,12 @@ class Handler(BaseHTTPRequestHandler):
             body = ('connections=%d requests=%d server_closed=%d methods=%s'
                     % (CONNECTIONS[0] - 1, REQUESTS[0], CLOSED_BY_SERVER[0],
                        sorted((str(k), v) for k, v in METHODS.items()))).encode()
+            return self._send(200, body)
+        if self.path.startswith('/__parts'):
+            # Part sizes seen since the last read, which is how a `--multipart-chunksize`
+            # is confirmed to have reached the wire rather than merely been parsed.
+            body = ('count=%d sizes=%s' % (len(PART_SIZES), PART_SIZES)).encode()
+            del PART_SIZES[:]
             return self._send(200, body)
         if self.path.startswith('/__peak'):
             body = str(PEAK[0]).encode()

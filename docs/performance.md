@@ -162,15 +162,38 @@ none of them are visible against a local endpoint override — it bypasses rules
 resolution entirely. Endpoint resolution has to be checked against real AWS, and the whole
 sweep re-run after each step rather than just the case being chased.
 
-### 4. Deferred until a fat pipe is available
+### 4. The fat-pipe items
 
-These are real but unmeasurable on the current link. Do not implement them blind:
+The development machine's uplink saturates at ~4.5 MB/s (~36 Mbps), so none of these
+could be *validated* here. Two of the three turned out to be answerable anyway, because
+the question was not really about bandwidth.
 
-- spreading connections across the several IP addresses S3 resolves to
-- part sizing adapted from measured bandwidth rather than a fixed 8 MiB
-- CRC32C (hardware) checksums in place of SHA-256 where the protocol allows
+**CRC32C in place of SHA-256 — retired, there is nothing to replace.** The premise was
+that a fat pipe would outrun the payload hash. It would: `sha2` measures **202 MB/s**
+here (1.6 Gbps, the pure-Rust path — Apple's SHA extensions are not being used), which a
+10 Gbps link beats several times over. But the bulk path does not hash payload bytes at
+all. A file-backed body signs `UNSIGNED-PAYLOAD` (`http::payload_hash`), and multipart
+parts are `Body::FileRange`, so the only payload SHA-256 left is over small in-memory
+request bodies, where it is noise. Adding CRC32C would *add* a pass over the data, not
+remove one. If payload hashing ever becomes necessary, 202 MB/s is the number that makes
+hardware SHA-256 worth wiring up first — that, not CRC32C, is the fix.
 
-Validate on EC2 in-region, or any link well above 36 Mbps.
+**Connection spreading — the premise is real, the need is not yet established.**
+`s3.ap-northeast-2.amazonaws.com` answers with **seven A records, rotated per query**,
+and hyper's connector resolves per connection, so a transfer may already be spread across
+all seven without any code. That is measurable with `lsof` and needs concurrency, not
+bandwidth. Measure before implementing: the fix for a problem that does not exist is a
+regression with extra steps.
+
+**Part sizing — the knob now exists; the policy still needs a fat pipe.** Part size was
+a hard-coded 8 MiB, so it could not be swept without a rebuild. `--multipart-chunksize`
+and `--multipart-threshold` now set it (`8MB`, `8MiB` and `8388608` all mean 2^23; an
+unreadable value keeps the default rather than failing the transfer), clamped to S3's
+5 MiB minimum and doubled as needed to stay under 10,000 parts. Whether the *default*
+should adapt is still an open question: at 4.5 MB/s an 8 MiB part is ~1.9s of transfer
+and the round trip is invisible, while at 1.2 GB/s it is ~7ms and the round trip is the
+whole cost. `scripts/bench-fat-pipe.sh` sweeps size against concurrency and records
+distinct peer IPs per run; run it in-region on EC2, not here.
 
 ### 5. ~~Smaller~~ — done
 
