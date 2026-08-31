@@ -164,9 +164,10 @@ sweep re-run after each step rather than just the case being chased.
 
 ### 4. The fat-pipe items
 
-The development machine's uplink saturates at ~4.5 MB/s (~36 Mbps), so none of these
-could be *validated* here. Two of the three turned out to be answerable anyway, because
-the question was not really about bandwidth.
+All three are now settled, measured on a temporary c7g.xlarge in us-east-1 -- the
+development machine's uplink saturates at ~4.5 MB/s (~36 Mbps), which is why they sat
+here so long. Two of the three needed no fat pipe in the end, and the one real fix turned
+out to be in a fourth place none of them named.
 
 **CRC32C in place of SHA-256 — retired, there is nothing to replace.** The premise was
 that a fat pipe would outrun the payload hash. It would: `sha2` measures **202 MB/s**
@@ -178,22 +179,65 @@ request bodies, where it is noise. Adding CRC32C would *add* a pass over the dat
 remove one. If payload hashing ever becomes necessary, 202 MB/s is the number that makes
 hardware SHA-256 worth wiring up first — that, not CRC32C, is the fix.
 
-**Connection spreading — the premise is real, the need is not yet established.**
-`s3.ap-northeast-2.amazonaws.com` answers with **seven A records, rotated per query**,
-and hyper's connector resolves per connection, so a transfer may already be spread across
-all seven without any code. That is measurable with `lsof` and needs concurrency, not
-bandwidth. Measure before implementing: the fix for a problem that does not exist is a
-regression with extra steps.
+**Connection spreading — real on the laptop, absent in production, so not worth code.**
+S3 answers with seven or eight A records, rotated per query, and hyper resolves per
+connection. Measured with `lsof` (which needs `-a`, or it ORs its filters and reports the
+whole machine): on macOS a ten-worker multipart upload put all ten sockets on **one**
+address, because the OS resolver caches and hands back a stable order. On EC2 the same
+binary spread across **all eight**. So the platform that pins to a single address is the
+one whose link is far too slow to care, and the platform that could saturate an address
+already spreads. An untested gap remains -- macOS on a genuinely fast non-AWS link -- but
+implementing a resolver shim for it, unmeasured, is how a fix becomes a regression.
 
-**Part sizing — the knob now exists; the policy still needs a fat pipe.** Part size was
-a hard-coded 8 MiB, so it could not be swept without a rebuild. `--multipart-chunksize`
-and `--multipart-threshold` now set it (`8MB`, `8MiB` and `8388608` all mean 2^23; an
-unreadable value keeps the default rather than failing the transfer), clamped to S3's
-5 MiB minimum and doubled as needed to stay under 10,000 parts. Whether the *default*
-should adapt is still an open question: at 4.5 MB/s an 8 MiB part is ~1.9s of transfer
-and the round trip is invisible, while at 1.2 GB/s it is ~7ms and the round trip is the
-whole cost. `scripts/bench-fat-pipe.sh` sweeps size against concurrency and records
-distinct peer IPs per run; run it in-region on EC2, not here.
+**Measured, finally.** A c7g.xlarge in us-east-1 gives ~200 MB/s single-stream to S3 and
+over 1.2 GB/s with concurrency -- 45x the development link, which is what the section was
+waiting for. Two cautions the numbers only gave up under pressure. Downloads flat-lined at
+~280 MB/s in every configuration, which looked like a client ceiling and was the gp3 root
+volume: repeating each download into `/dev/shm` instead put the same client at 1183 MB/s.
+And uploads read from page cache while downloads write to disk, so the two directions are
+not comparable unless the disk is taken out of both.
+
+**Part sizing — the knob is worth having; the default was never the problem.** Uploading
+2 GiB, MB/s, chunk size against worker count:
+
+| chunk | adaptive | 20 | 40 |
+|-------|---------:|---:|---:|
+| 8 MB  | 603 | 716 | 1093 |
+| 16 MB | 774 | 945 | 1130 |
+| 32 MB | 871 | 972 | 1084 |
+| 64 MB | 778 | 971 | 1122 |
+| 128 MB| 734 | 1090 | 974 |
+
+At 40 workers every size lands within noise of each other; the +44% that 32 MB buys over
+8 MB at adaptive concurrency is really just more bytes in flight compensating for too few
+workers. Part size is a knob for unusual links, not a default to adapt. It stays at 8 MiB.
+
+**Concurrency was the lever.** Sweeping workers at a fixed 16 MB chunk, 2 GiB per run,
+downloads into `/dev/shm` so the disk is out of the path:
+
+| workers | up | down |
+|---------|---:|-----:|
+| 10  | 607 | 744 |
+| 20  | 1049 | 1152 |
+| 40  | 1096 | 1165 |
+| 80  | 1072 | 1183 |
+| 160 | 1049 | 1078 |
+
+The pool was reaching none of that. Its ceiling was `(cores * 4).clamp(8, 64)` -- 16 on a
+4-vCPU instance, under the measured optimum -- and cores are the wrong unit for work that
+spends its life waiting on a socket. Its ramp then added two workers per 150ms sample, so
+a two-second transfer, thirteen samples, reached 36 only as it ended. A flat ceiling of 64
+and a ramp that grows by half again took adapting from 603 to 921 MB/s up (+53%) and 744
+to 1157 down (+55%), against 1030/1281 for a hand-pinned 40. The remaining ~10% is the
+~600ms the ramp costs, which is 30% of a two-second transfer and 3% of a twenty-second
+one, so it amortises with size.
+
+The knob itself stays, because sweeping it is how the above was established:
+`--multipart-chunksize` and `--multipart-threshold` set part sizing (`8MB`, `8MiB` and
+`8388608` all mean 2^23; an unreadable value keeps the default rather than failing the
+transfer), clamped to S3's 5 MiB minimum and doubled as needed to stay under 10,000 parts.
+`scripts/bench-fat-pipe.sh` runs the sweep; it must run in-region, and its downloads must
+land somewhere other than an EBS volume or they measure the disk.
 
 ### 5. ~~Smaller~~ — done
 
