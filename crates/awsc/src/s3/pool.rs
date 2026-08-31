@@ -19,6 +19,21 @@ const IMPROVEMENT: f64 = 1.05;
 const DEGRADATION: f64 = 0.90;
 /// The reference's fixed worker count, used as our floor rather than our ceiling.
 const DEFAULT_WORKERS: usize = 10;
+/// The next worker count while throughput is still improving.
+fn grown(current: usize, ceiling: usize) -> usize {
+    (current + (current / 2).max(2)).min(ceiling)
+}
+
+/// The hard ceiling when the caller does not pin one.
+///
+/// Not derived from the core count. Transfers are IO-bound -- a worker spends its life
+/// waiting on a socket -- so cores are the wrong unit, and scaling by them capped a
+/// 4-vCPU instance at 16 workers. Measured in-region on a c7g.xlarge against S3, 2 GiB
+/// per run: 10 workers gave 607 MB/s up and 744 MB/s down, 20 gave 1049/1152, 40 gave
+/// 1096/1165, 80 gave 1072/1183, and 160 fell back to 1049/1078. The gain is gone by 40
+/// and turns negative past 80, so 64 is the ceiling with room for the ramp to overshoot
+/// slightly and settle.
+const MAX_WORKERS: usize = 64;
 
 pub struct Pool {
     /// How many workers may run right now.
@@ -44,10 +59,7 @@ pub struct Pool {
 impl Pool {
     /// `explicit` pins the worker count; otherwise the pool adapts.
     pub fn new(explicit: Option<usize>) -> Pool {
-        let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-        // Transfers are IO-bound, so more threads than cores is useful — but past a few
-        // dozen the added concurrency buys nothing and provokes throttling.
-        let max = explicit.unwrap_or_else(|| (cpus * 4).clamp(8, 64));
+        let max = explicit.unwrap_or(MAX_WORKERS);
         // Start at the reference's fixed default rather than below it: adapting must
         // never make a short transfer slower than not adapting at all. The ramp tunes
         // upward from here, and throttling tunes it back down.
@@ -157,10 +169,14 @@ impl Pool {
             }
 
             if rate > best_rate * IMPROVEMENT {
-                // Still getting faster — add capacity.
+                // Still getting faster — add capacity, by half again rather than by a
+                // fixed step. A 2 GiB upload on a fast link is over in two seconds, or
+                // roughly thirteen samples; stepping by two from ten never reached the
+                // optimum before the transfer ended, which is why adapting measured
+                // slower than pinning 40. Growing multiplicatively gets there in four.
                 best_rate = rate.max(best_rate);
                 if current < ceiling {
-                    self.target.store((current + 2).min(ceiling), Ordering::Relaxed);
+                    self.target.store(grown(current, ceiling), Ordering::Relaxed);
                 }
             } else if rate < best_rate * DEGRADATION && current > floor {
                 // Slower than our best despite more workers: we have overshot.
@@ -198,6 +214,30 @@ mod tests {
         let pool = Pool::new(None);
         let jobs: Vec<u32> = Vec::new();
         pool.run(&jobs, true, |_| panic!("should not run"));
+    }
+
+    /// The ramp has to arrive before the transfer ends. A fast 2 GiB transfer is about
+    /// thirteen 150ms samples long, and the old fixed step of two reached 36 only at the
+    /// very end -- measured as adapting being 45% slower than pinning 40 workers.
+    #[test]
+    fn the_ramp_reaches_the_measured_optimum_within_a_few_samples() {
+        let mut workers = DEFAULT_WORKERS;
+        let mut samples = 0;
+        while workers < 40 {
+            workers = grown(workers, MAX_WORKERS);
+            samples += 1;
+            assert!(samples <= 6, "still at {workers} workers after {samples} samples");
+        }
+        assert!(samples <= 4, "took {samples} samples to reach {workers}");
+    }
+
+    /// The ceiling is a property of the service and the link, not of the machine. Scaling
+    /// it by core count capped a 4-vCPU instance at 16 workers, well under the measured
+    /// optimum of 20-40.
+    #[test]
+    fn the_default_ceiling_does_not_depend_on_the_core_count() {
+        let pool = Pool::new(None);
+        assert_eq!(pool.max, MAX_WORKERS);
     }
 
     /// An explicit count pins the pool and disables the ramp.
