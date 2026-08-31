@@ -9,12 +9,27 @@ use crate::exit;
 use crate::Failure;
 use aws_cli_runtime::{credentials::Credentials, endpoint::Endpoint, http, retry, sigv4};
 
+/// The service error code of a response that is about to be retried, for the trace.
+fn retried_error_code(response: &http::Response) -> Option<String> {
+    if response.status >= 400 {
+        aws_cli_protocol::xml::parse_error(&response.text()).map(|e| e.code)
+    } else {
+        None
+    }
+}
+
 pub struct Conn {
     pub endpoint: Endpoint,
     pub credentials: Credentials,
     pub transport: http::Transport,
     pub debug: bool,
     pub no_sign_request: bool,
+    /// Report every *retried* response on stderr, from `AWSC_RETRY_TRACE`.
+    ///
+    /// The pool only learns about throttling once the retry budget is exhausted, so a
+    /// `SlowDown` that retry absorbs is otherwise invisible. Measuring whether a given
+    /// concurrency draws throttling at all needs to see the absorbed ones too.
+    pub retry_trace: bool,
 }
 
 impl Conn {
@@ -30,6 +45,7 @@ impl Conn {
             },
             debug: globals.debug,
             no_sign_request: globals.no_sign_request,
+            retry_trace: std::env::var_os("AWSC_RETRY_TRACE").is_some(),
         }
     }
 
@@ -101,6 +117,17 @@ impl Conn {
 
             match delay {
                 Some(delay) => {
+                    if self.retry_trace {
+                        let (status, code) = match &sent {
+                            Ok(r) => (r.status, retried_error_code(r)),
+                            Err(_) => (0, Some("transport".to_string())),
+                        };
+                        eprintln!(
+                            "retry: {method} {path} attempt {attempt}/{max_attempts} status {status} code {} after {:?}",
+                            code.as_deref().unwrap_or("-"),
+                            delay
+                        );
+                    }
                     std::thread::sleep(delay);
                     attempt += 1;
                 }
