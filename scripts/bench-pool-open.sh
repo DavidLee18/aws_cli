@@ -34,6 +34,8 @@ repeats=${4:-3}
 work=$(mktemp -d "${BENCH_TMPDIR:-/var/tmp}/pool-open.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 payload="$work/payload.bin"
+logs=./pool-open-logs
+mkdir -p "$logs"
 results=./pool-open-results.tsv
 bytes=$((gib * 1024 * 1024 * 1024))
 
@@ -58,7 +60,10 @@ one_ip=$(echo "$addresses" | head -1)
 # and how many distinct peers the sockets landed on.
 run() {
   local test=$1 variant=$2 run=$3 direction=$4; shift 4
-  local log="$work/run.log" peers="$work/peers.txt" start end secs mbps
+  # Per-run, not one reused file: the control decisions are the whole story when an arm
+  # is unexpectedly slow, and a shared log keeps only the last one.
+  local log="$logs/$test-$variant-$run-$direction.log"
+  local peers="$work/peers.txt" start end secs mbps
   : > "$peers"
 
   start=$(date +%s.%N)
@@ -127,3 +132,13 @@ done
 
 echo
 column -t "$results"
+
+# The ramp itself, for the arms that adapt. A slow adaptive arm is a question about these
+# lines, and nothing else in the table can answer it.
+echo
+echo "=== pool control decisions (adaptive arms) ==="
+for f in "$logs"/*adaptive*.log "$logs"/spread-*.log; do
+  [ -f "$f" ] || continue
+  echo "--- $(basename "$f")"
+  grep '^pool:' "$f" | head -40
+done
