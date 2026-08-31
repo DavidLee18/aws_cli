@@ -22,7 +22,13 @@ bucket=${1:?usage: bench-fat-pipe.sh <bucket> <awsc> [GiB]}
 awsc=${2:?usage: bench-fat-pipe.sh <bucket> <awsc> [GiB]}
 gib=${3:-2}
 
-work=$(mktemp -d)
+# NOT /tmp: it is a RAM-backed tmpfs on Amazon Linux 2023 (and most systemd distros),
+# so a payload plus its round trip is two copies competing with the page cache for the
+# instance's memory. `no space left on device` at 4 GiB on a 30 GiB disk is that trap.
+work=$(mktemp -d "${BENCH_TMPDIR:-/var/tmp}/fat-pipe.XXXXXX")
+free_kb=$(df -Pk "$work" | awk 'NR==2 {print $4}')
+needed_kb=$(( (gib * 2 + 1) * 1024 * 1024 ))
+[ "$free_kb" -ge "$needed_kb" ] || { echo "$work has ${free_kb}KB free, needs ${needed_kb}KB (payload + round trip)"; exit 1; }
 trap 'rm -rf "$work"' EXIT
 payload="$work/payload.bin"
 results=./fat-pipe-results.tsv
