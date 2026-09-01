@@ -120,6 +120,33 @@ worklist.
 
 Still to come: driving identical argv through both binaries and diffing stdout/stderr.
 
+## Install
+
+Download the archive for your platform from the
+[releases page](https://github.com/DavidLee18/aws_cli/releases) and extract it:
+
+```sh
+tar xzf awsc-0.2.0-aarch64-apple-darwin.tar.gz
+cd awsc-0.2.0-aarch64-apple-darwin
+./awsc s3 ls
+```
+
+The archive holds two files that belong together: `awsc` and `models.bin`, the compiled
+catalogue of 432 service models the CLI reads to know what any operation takes. The
+binary looks for it beside itself, then in `../share/awsc`, and finally at
+`$AWSC_MODELS_DIR`. So to put `awsc` on your `PATH`, either move both files into the same
+directory, or keep the models elsewhere and point at them:
+
+```sh
+sudo cp awsc /usr/local/bin/ && sudo mkdir -p /usr/local/share/awsc \
+  && sudo cp models.bin /usr/local/share/awsc/
+# or
+export AWSC_MODELS_DIR=/path/to/models
+```
+
+Building from source needs the models fetched separately, since they are not in the
+repository — see Development below.
+
 ## Development
 
 ```sh

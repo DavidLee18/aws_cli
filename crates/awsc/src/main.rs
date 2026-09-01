@@ -613,9 +613,58 @@ fn write_index(dir: &std::path::Path, index: &std::collections::BTreeMap<String,
     }
 }
 
+/// Where the service models live.
+///
+/// A released binary is copied away from the tree it was built in, so the build-time
+/// source path cannot be the only answer -- on an installed copy it names a directory
+/// that does not exist, and every command fails with "cannot read models directory".
+/// The installed layouts are tried first, and the source tree remains the fallback so a
+/// `cargo run` from a checkout keeps working with no configuration.
 fn models_dir() -> std::path::PathBuf {
     if let Ok(dir) = std::env::var("AWSC_MODELS_DIR") {
         return dir.into();
     }
+    for candidate in installed_model_dirs() {
+        if candidate.join("models.bin").exists() {
+            return candidate;
+        }
+    }
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models")
+}
+
+/// The places a packaged `awsc` may keep its models, in order: beside the executable, as
+/// the release tarball lays it out, then the `share` directory of a Unix-style prefix for
+/// a binary installed into `<prefix>/bin`.
+fn installed_model_dirs() -> Vec<std::path::PathBuf> {
+    let Ok(exe) = std::env::current_exe() else {
+        return Vec::new();
+    };
+    // Resolve symlinks: a binary linked into a bin directory must find the models next to
+    // its real location, not next to the link.
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let Some(dir) = exe.parent() else {
+        return Vec::new();
+    };
+    vec![dir.to_path_buf(), dir.join("../share/awsc"), dir.join("../lib/awsc")]
+}
+
+#[cfg(test)]
+mod model_location_tests {
+    /// A released binary is copied away from the tree it was built in. The build-time
+    /// source path must therefore not be the first place we look, or every command on an
+    /// installed copy fails with "cannot read models directory".
+    #[test]
+    fn an_installed_binary_looks_for_models_beside_itself() {
+        let candidates = super::installed_model_dirs();
+        assert!(!candidates.is_empty(), "no installed layout is considered at all");
+
+        let exe = std::fs::canonicalize(std::env::current_exe().expect("current exe"))
+            .expect("canonical exe");
+        let dir = exe.parent().expect("exe has a parent");
+        assert_eq!(candidates[0], dir, "the executable's own directory is not tried first");
+        assert!(
+            candidates.iter().any(|c| c.ends_with("../share/awsc")),
+            "a <prefix>/bin install has no <prefix>/share/awsc to fall back on: {candidates:?}"
+        );
+    }
 }

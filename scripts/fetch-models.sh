@@ -52,6 +52,15 @@ fetch_one() {
   [ -n "$quiet" ] || printf '  ok    %-10s %s\n' "$svc" "$(du -h "${DEST}/${svc}.json" | cut -f1)"
 }
 
+# Compile the catalogue into the mapped container the CLI actually reads. Without this
+# the binary falls back to parsing a whole JSON model per invocation, which still works
+# but costs 20-140ms of startup instead of 2-6ms -- and a release tarball ships the
+# container alone, so skipping this step produces an artifact with no models at all.
+compile_container() {
+  echo "compiling ${DEST}/models.bin"
+  cargo run --release -q -p aws-cli-model --bin compile-models -- "${DEST}"
+}
+
 mkdir -p "$DEST"
 
 if [ "${1:-}" = "--all" ]; then
@@ -68,6 +77,7 @@ if [ "${1:-}" = "--all" ]; then
     count=$((count + 1))
   done
   echo "fetched ${count} new model(s); $(ls "$DEST"/*.json | wc -l | tr -d ' ') total in ${DEST}"
+  compile_container
   exit 0
 fi
 
@@ -82,8 +92,4 @@ for svc in "${services[@]}"; do
 done
 echo "models written to ${DEST}"
 
-# Compile the catalogue into the mapped container the CLI actually reads. Without this
-# the binary silently falls back to parsing a whole JSON model per invocation, which
-# still works but costs 20-140ms of startup instead of 2-6ms.
-echo "compiling ${DEST}/models.bin"
-cargo run --release -q -p aws-cli-model --bin compile-models -- "${DEST}"
+compile_container

@@ -1,0 +1,173 @@
+name: release
+
+# Tag-driven: pushing v* builds every target and publishes one release. Nothing here runs
+# on ordinary pushes, so a tag is the only thing that can cut a release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (for a dry run without publishing)"
+        required: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # Which aws-sdk-rust revision the service models come from. `main` means a re-run of
+  # the same tag can pick up newer models than the first run did; set this to a tag such
+  # as `release-2026-08-01` when a release needs to be reproducible byte for byte.
+  AWS_SDK_RUST_REF: main
+
+jobs:
+  # The 432 service models are identical on every platform and take a few minutes to
+  # fetch, so they are built once and handed to the per-target jobs. The CLI reads
+  # models.bin alone; the JSON the container is compiled from is not shipped.
+  models:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Fetch and compile the full catalogue
+        run: scripts/fetch-models.sh --all
+      - name: Check the container was produced
+        # `--all` once returned before compiling, which would have shipped tarballs with
+        # no models in them and a binary that fails on every command.
+        run: |
+          test -s models/models.bin || { echo "models.bin missing or empty"; exit 1; }
+          ls -la models/models.bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: models
+          path: models/models.bin
+          retention-days: 1
+
+  build:
+    needs: models
+    strategy:
+      # One target failing should not cancel the rest: Windows is unverified, and a
+      # partial matrix still tells us which platforms are good.
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # rustls's default backend is aws-lc-sys, which builds C and needs cmake
+      # everywhere and NASM on Windows.
+      - name: Install cmake (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake
+      - name: Install cmake (macOS)
+        if: runner.os == 'macOS'
+        run: brew list cmake >/dev/null 2>&1 || brew install cmake
+      - name: Install NASM (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin awsc
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: models
+          path: models
+
+      # Proof the artifact works before it is published: run the binary from a directory
+      # unrelated to the source tree, which is the layout a user extracts. The command
+      # must fail on the *network*, not on model loading -- reaching the network means
+      # the model was found and parsed. A build-time source path would fail here.
+      - name: Smoke test the packaged layout
+        shell: bash
+        run: |
+          stage=$(mktemp -d)
+          cp models/models.bin "$stage/"
+          exe=awsc
+          [ "${{ runner.os }}" != "Windows" ] || exe=awsc.exe
+          cp "target/${{ matrix.target }}/release/$exe" "$stage/"
+          cd "$stage"
+          out=$(AWS_ACCESS_KEY_ID=x AWS_SECRET_ACCESS_KEY=y AWS_DEFAULT_REGION=us-east-1 \
+            "./$exe" s3api list-buckets --endpoint-url http://127.0.0.1:1 2>&1 || true)
+          echo "$out"
+          case "$out" in
+            *"cannot read models directory"*|*"invalid choice"*)
+              echo "the packaged binary cannot find its models"; exit 1;;
+          esac
+          case "$out" in
+            *"network error"*|*"Connect"*|*"refused"*) echo "models load from the packaged layout";;
+            *) echo "unexpected output; not obviously a network failure"; exit 1;;
+          esac
+
+      - name: Package
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          [ -n "$version" ] || version="${{ inputs.tag }}"
+          name="awsc-${version}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          exe=awsc
+          [ "${{ runner.os }}" != "Windows" ] || exe=awsc.exe
+          cp "target/${{ matrix.target }}/release/$exe" "dist/$name/"
+          cp models/models.bin "dist/$name/"
+          cp README.md LICENSE NOTICE "dist/$name/"
+          cd dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "${name}.zip" "$name" >/dev/null
+          else
+            tar czf "${name}.tar.gz" "$name"
+          fi
+          ls -la
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+
+  publish:
+    needs: build
+    # Only a real tag publishes; workflow_dispatch is a dry run that leaves artifacts on
+    # the run and creates nothing.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+      - name: Checksums
+        run: |
+          cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            Each archive contains `awsc` and `models.bin`. Keep them together — the
+            binary looks for `models.bin` beside itself (or in `../share/awsc`, or at
+            `$AWSC_MODELS_DIR`), so extract the archive and run `awsc` from it, or copy
+            both into the same directory on your `PATH`.
