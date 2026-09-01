@@ -121,8 +121,13 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
     if service.starts_with('-') {
         return Err(format!("expected a service name, got `{service}`"));
     }
-    let Some(operation) = argv.get(1).cloned() else {
-        return Err(format!("`{service}`: expected a subcommand"));
+    let operation = match argv.get(1).cloned() {
+        Some(operation) => operation,
+        // Bare `aws configure` is a command in its own right -- the interactive prompt --
+        // so it reaches the dispatcher with an empty operation and gets told what is
+        // actually missing, rather than "expected a subcommand".
+        None if service == "configure" => String::new(),
+        None => return Err(format!("`{service}`: expected a subcommand")),
     };
     if operation == "help" || operation == "--help" {
         return Ok(Outcome::Help);
