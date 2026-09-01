@@ -48,34 +48,28 @@ jobs:
   build:
     needs: models
     strategy:
-      # One target failing should not cancel the rest: Windows is unverified, and a
-      # partial matrix still tells us which platforms are good.
+      # One target failing should not cancel the rest: a partial matrix still tells us
+      # which platforms are good.
       fail-fast: false
       matrix:
         include:
-          # `native` says the runner can execute what it builds, so the packaged binary
-          # can be smoke-tested before publishing. Set on every row on purpose: an absent
-          # key is null, and null compares equal to false in a GitHub expression, so a
-          # `!= false` test silently skipped the smoke test on every target at once.
+          # Every target here runs on a runner of its own architecture, so the packaged
+          # binary is executed before it is published. Intel macOS was dropped for exactly
+          # that reason: the macos-13 runner is retired, and cross-compiling it from Apple
+          # silicon produced an artifact nothing could run before release.
+          #
+          # If a cross-compiled target is ever added back, gate the smoke test with a key
+          # set on EVERY row rather than only the new one -- an absent key is null, and
+          # null compares equal to false in a GitHub expression, so a `!= false` test
+          # skipped the smoke test on all five targets at once and still went green.
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            native: true
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
-            native: true
           - target: aarch64-apple-darwin
             os: macos-14
-            native: true
-          # Cross-compiled from Apple silicon: the macos-13 Intel runner has been retired,
-          # and a job asking for that label is never picked up -- it simply queues until it
-          # times out. Xcode carries both slices, so the build is fine; `native: false`
-          # marks that the smoke test cannot execute this one on an arm64 host.
-          - target: x86_64-apple-darwin
-            os: macos-14
-            native: false
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            native: true
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -101,10 +95,6 @@ jobs:
         uses: ilammy/setup-nasm@v1
 
       - name: Build
-        # aws-lc-sys compiles C through cmake, which needs telling which slice to emit
-        # when the host and target architectures differ.
-        env:
-          CMAKE_OSX_ARCHITECTURES: ${{ matrix.target == 'x86_64-apple-darwin' && 'x86_64' || '' }}
         run: cargo build --release --locked --target ${{ matrix.target }} --bin awsc
 
       - uses: actions/download-artifact@v4
@@ -117,8 +107,6 @@ jobs:
       # must fail on the *network*, not on model loading -- reaching the network means
       # the model was found and parsed. A build-time source path would fail here.
       - name: Smoke test the packaged layout
-        # Skipped only where the runner cannot execute the target it just built.
-        if: matrix.native
         shell: bash
         run: |
           stage=$(mktemp -d)
