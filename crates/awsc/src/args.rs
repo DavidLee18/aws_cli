@@ -12,7 +12,31 @@ use std::collections::BTreeMap;
 pub enum Outcome {
     Run(Box<Parsed>),
     Help,
+    Version,
     Usage,
+}
+
+/// How the text of a blob argument is interpreted.
+///
+/// v2 defaults to `base64`: the value on the command line is *already* base64 and is
+/// decoded before it goes on the wire. v1 took the value literally, which
+/// `raw-in-base64-out` preserves. `fileb://` is bytes either way and is never subject to
+/// this (`customizations/binaryformat.py`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BinaryFormat {
+    #[default]
+    Base64,
+    RawInBase64Out,
+}
+
+impl BinaryFormat {
+    pub fn parse(s: &str) -> Option<BinaryFormat> {
+        Some(match s {
+            "base64" => BinaryFormat::Base64,
+            "raw-in-base64-out" => BinaryFormat::RawInBase64Out,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -43,6 +67,10 @@ pub struct Parsed {
     pub generate_skeleton: Option<String>,
     /// `--color on|off|auto`. Only `logs tail` reads it; nothing else colours output.
     pub color: Option<String>,
+    /// `--cli-binary-format`, deciding how a blob argument's text is read.
+    pub binary_format: BinaryFormat,
+    /// `--cli-error-format`, deciding how an error is rendered on stderr.
+    pub error_format: Option<String>,
     /// Positional tokens after the operation name. Only custom commands use these
     /// (`codecommit credential-helper get`); the modeled path rejects them.
     pub positionals: Vec<String>,
@@ -83,9 +111,10 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
     if argv[0] == "help" || argv[0] == "--help" || argv[0] == "-h" {
         return Ok(Outcome::Help);
     }
+    // The version line stands alone: the reference prints it and nothing else, where
+    // `help` prints the usage block. Sharing `Outcome::Help` printed both.
     if argv[0] == "--version" {
-        println!("aws-cli-rs/{}", env!("CARGO_PKG_VERSION"));
-        return Ok(Outcome::Help);
+        return Ok(Outcome::Version);
     }
 
     let service = argv[0].clone();
@@ -121,10 +150,17 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
         cli_input: None,
         generate_skeleton: None,
         color: None,
+        binary_format: BinaryFormat::default(),
+        error_format: None,
         positionals: Vec::new(),
         flag_extras: BTreeMap::new(),
         extras: Vec::new(),
     };
+
+    // Whether `--cli-binary-format` was given, so the profile is consulted only when it
+    // was not. Unlike `cli_error_format` there is no environment variable in the chain
+    // (`clidriver.py:_construct_cli_binary_format_chain`).
+    let mut binary_format_given = false;
 
     // In the `s3` tree `--page-size` is a per-command argument, not the injected
     // pagination control, and it is validated differently — so it has to reach the
@@ -205,6 +241,33 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
             // honouring these would be a no-op anyway. Rejecting them would break
             // scripts that pass them habitually.
             "--color" => parsed.color = Some(take_value()?),
+            "--cli-binary-format" => {
+                let v = take_value()?;
+                binary_format_given = true;
+                parsed.binary_format = BinaryFormat::parse(&v).ok_or(
+                    "argument --cli-binary-format: Invalid choice, valid choices are:\n\n\
+                     base64 | raw-in-base64-out"
+                        .to_string(),
+                )?;
+            }
+            "--cli-error-format" => {
+                let v = take_value()?;
+                if !crate::errorformat::ERROR_FORMATS.contains(&v.as_str()) {
+                    return Err(format!(
+                        "argument --cli-error-format: Invalid choice, valid choices are:\n\n{}",
+                        crate::errorformat::ERROR_FORMATS.join(" | ")
+                    ));
+                }
+                parsed.error_format = Some(v);
+            }
+            // We never prompt, so declining to prompt is a genuine no-op. Asking to be
+            // prompted is not: answering as though the flag were absent would run a
+            // command the user expected to be able to edit first.
+            "--no-cli-auto-prompt" => {}
+            "--cli-auto-prompt" => {
+                return Err("--cli-auto-prompt is not implemented (there is no interactive prompter)"
+                    .to_string())
+            }
             "--no-cli-pager" => {}
             "--cli-input-json" | "--cli-input-yaml" => {
                 if parsed.cli_input.is_some() {
@@ -275,6 +338,19 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
         i += 1;
     }
 
+    // The profile is the only other source for this one, and only when the flag is absent.
+    if !binary_format_given {
+        if let Some(configured) =
+            aws_cli_runtime::credentials::profile_setting("cli_binary_format", parsed.profile.as_deref())
+        {
+            // An unrecognised value in config is ignored rather than fatal, as it is for
+            // every other config-sourced setting; only the flag rejects.
+            if let Some(format) = BinaryFormat::parse(&configured) {
+                parsed.binary_format = format;
+            }
+        }
+    }
+
     Ok(Outcome::Run(Box::new(parsed)))
 }
 
@@ -291,7 +367,8 @@ pub fn build_input_named(
     parameters: &BTreeMap<String, Option<String>>,
     service: &str,
     operation: &str,
-) -> Result<Option<Value>, String> {
+    binary_format: BinaryFormat,
+) -> Result<Option<Value>, InputError> {
     if parameters.is_empty() {
         return Ok(None);
     }
@@ -299,7 +376,8 @@ pub fn build_input_named(
         return Err(format!(
             "unknown options: {}",
             parameters.keys().cloned().collect::<Vec<_>>().join(", ")
-        ));
+        )
+        .into());
     };
 
     // CLI flag name -> model member name, after the reference's renames.
@@ -332,10 +410,13 @@ pub fn build_input_named(
     if !flags.is_empty() {
         values.reverse();
         flags.extend(values);
-        return Err(format!("Unknown options: {}", flags.join(", ")));
+        return Err(format!("Unknown options: {}", flags.join(", ")).into());
     }
 
     let mut out = Map::new();
+    // Members whose value arrived as raw bytes via `fileb://`, and so must not be run
+    // through the blob normalisation below a second time.
+    let mut already_bytes: std::collections::BTreeSet<String> = Default::default();
     for (flag, raw) in parameters {
         // `--no-foo` is the negative form of a boolean member.
         let (lookup, negated) = match flag.strip_prefix("--no-") {
@@ -352,6 +433,22 @@ pub fn build_input_named(
         }
         let raw_value = raw.as_deref().ok_or_else(|| format!("{flag} requires a value"))?;
 
+        // `fileb://` on a non-streaming blob is the one place a parameter is genuinely
+        // *bytes*. It is normalised straight to base64 here and recorded so the blob pass
+        // below leaves it alone -- the reference skips it for the same reason, because
+        // `fileb://` yields `bytes` and its visitor only touches `str`. Reading it as text
+        // first would put U+FFFD through any byte that is not valid UTF-8.
+        if is_plain_blob(model, &member.target) {
+            if let Some(bytes) = read_fileb(raw_value).map_err(|e| format!("{flag}: {e}"))? {
+                out.insert(
+                    (*member_name).clone(),
+                    Value::String(aws_cli_protocol::shapes::base64_encode(&bytes)),
+                );
+                already_bytes.insert((*member_name).clone());
+                continue;
+            }
+        }
+
         // `file://` and `fileb://` are expanded FIRST, before shorthand or JSON parsing —
         // that is why `--tags file://tags.json` works: the loaded text starts with `[`,
         // which then trips the JSON path below.
@@ -360,7 +457,130 @@ pub fn build_input_named(
         let value = bind_value(model, &member.target, &expanded, flag)?;
         out.insert((*member_name).clone(), value);
     }
-    Ok(Some(Value::Object(out)))
+
+    let mut built = Value::Object(out);
+    normalize_blobs(model, shape, &mut built, binary_format, &already_bytes)?;
+    Ok(Some(built))
+}
+
+/// An input-building failure, and whether it is one the reference reports as a *general*
+/// error rather than a parameter-validation one.
+///
+/// The distinction is only visible in the exit code, and only one case needs it:
+/// `InvalidBase64Error` is raised by a customization and matches no handler's exception
+/// list, so it falls through to the general handler and exits 255 -- where every other
+/// failure here is argparse's 252.
+#[derive(Debug)]
+pub struct InputError {
+    pub message: String,
+    pub general: bool,
+}
+
+impl std::fmt::Display for InputError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl From<String> for InputError {
+    fn from(message: String) -> Self {
+        InputError { message, general: false }
+    }
+}
+
+/// A blob that carries a value, as opposed to a streaming payload whose argument is a
+/// path to send from. Streaming members are never touched by any of this.
+fn is_plain_blob(model: &Model, target: &aws_cli_model::ShapeId) -> bool {
+    matches!(model.shape(target), Some(Shape::Blob(b)) if !b.traits.has("smithy.api#streaming"))
+}
+
+/// Read a `fileb://` reference, or `None` when the value is not one.
+fn read_fileb(value: &str) -> Result<Option<Vec<u8>>, String> {
+    let Some(rest) = value.strip_prefix("fileb://") else { return Ok(None) };
+    let path = shellexpand(rest);
+    std::fs::read(&path)
+        .map(Some)
+        .map_err(|e| format!("Unable to load paramfile {value}: {e}"))
+}
+
+/// Put every blob value into the base64 form the wire wants, which is what the rest of
+/// the pipeline now assumes.
+///
+/// This is `customizations/binaryformat.py`'s `Base64DecodeVisitor`, with one change of
+/// representation: the reference decodes the text to `bytes` and lets each protocol
+/// re-encode, while a `serde_json::Value` cannot hold bytes, so the canonical form here is
+/// the base64 *text* — identical on the wire for every protocol, since the only ones that
+/// want raw bytes (CBOR, and a blob payload) decode it back.
+///
+/// Members listed in `already_bytes` came from `fileb://` and are already correct.
+fn normalize_blobs(
+    model: &Model,
+    shape: &StructureShape,
+    value: &mut Value,
+    format: BinaryFormat,
+    already_bytes: &std::collections::BTreeSet<String>,
+) -> Result<(), InputError> {
+    let Value::Object(map) = value else { return Ok(()) };
+    for (name, member) in &shape.members {
+        if already_bytes.contains(name) {
+            continue;
+        }
+        let Some(slot) = map.get_mut(name) else { continue };
+        normalize_blob_value(model, &member.target, slot, format)?;
+    }
+    Ok(())
+}
+
+fn normalize_blob_value(
+    model: &Model,
+    target: &aws_cli_model::ShapeId,
+    value: &mut Value,
+    format: BinaryFormat,
+) -> Result<(), InputError> {
+    match model.shape(target) {
+        Some(Shape::Blob(b)) if !b.traits.has("smithy.api#streaming") => {
+            let Some(text) = value.as_str() else { return Ok(()) };
+            match format {
+                // The text is already base64; it only has to be *valid*, because the
+                // reference decodes it here and reports the failure with this wording.
+                BinaryFormat::Base64 => {
+                    if aws_cli_protocol::shapes::base64_decode(text).is_none() {
+                        return Err(InputError {
+                            message: format!("Invalid base64: \"{text}\""),
+                            general: true,
+                        });
+                    }
+                }
+                // v1 semantics: the text is the bytes.
+                BinaryFormat::RawInBase64Out => {
+                    *value =
+                        Value::String(aws_cli_protocol::shapes::base64_encode(text.as_bytes()));
+                }
+            }
+        }
+        Some(Shape::Structure(s) | Shape::Union(s)) => {
+            let Value::Object(map) = value else { return Ok(()) };
+            for (name, member) in &s.members {
+                if let Some(slot) = map.get_mut(name) {
+                    normalize_blob_value(model, &member.target, slot, format)?;
+                }
+            }
+        }
+        Some(Shape::List(l) | Shape::Set(l)) => {
+            let Value::Array(items) = value else { return Ok(()) };
+            for item in items {
+                normalize_blob_value(model, &l.member.target, item, format)?;
+            }
+        }
+        Some(Shape::Map(m)) => {
+            let Value::Object(map) = value else { return Ok(()) };
+            for (_, slot) in map.iter_mut() {
+                normalize_blob_value(model, &m.value.target, slot, format)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn arity(model: &Model, member: &aws_cli_model::shape::Member) -> Arity {
@@ -554,6 +774,14 @@ fn bind_value(
 ) -> Result<Value, String> {
     let shape = model.shape(target);
 
+    // A blob is always text, never a structure, so it never takes the JSON or shorthand
+    // paths. This matters for the `{`-leading case: `lambda invoke --payload '{"a":1}'`
+    // is not a JSON document to parse but a (bad) base64 string, and the reference says
+    // so -- `Invalid base64: "{"a":1}"`. Parsing it as JSON would send an empty body.
+    if matches!(shape, Some(Shape::Blob(_))) {
+        return Ok(Value::String(raw.to_string()));
+    }
+
     // A value that looks like JSON disables shorthand ENTIRELY for this argument — and
     // there is no fallback if the JSON then fails to parse.
     let looks_like_json = raw.trim_start().starts_with('[') || raw.trim_start().starts_with('{');
@@ -685,6 +913,95 @@ pub fn merge_cli_input(built: &mut Value, document: &Value) -> Result<(), String
 
 #[cfg(test)]
 mod tests {
+    /// Fixture with a blob member, a nested structure holding one, and a streaming blob.
+    fn blob_model() -> (aws_cli_model::Model, StructureShape) {
+        let model = aws_cli_model::Model::from_json(
+            br#"{"smithy":"2.0","shapes":{
+              "com.x#S":{"type":"service","version":"1","traits":{}},
+              "com.x#Str":{"type":"string"},
+              "com.x#Bin":{"type":"blob"},
+              "com.x#Stream":{"type":"blob","traits":{"smithy.api#streaming":{}}},
+              "com.x#Inner":{"type":"structure","members":{"Nested":{"target":"com.x#Bin"}}},
+              "com.x#In":{"type":"structure","members":{
+                "Data":{"target":"com.x#Bin"},
+                "Body":{"target":"com.x#Stream"},
+                "Name":{"target":"com.x#Str"},
+                "Wrap":{"target":"com.x#Inner"}}}}}"#,
+        )
+        .expect("fixture model");
+        let id = aws_cli_model::ShapeId::parse("com.x#In").expect("shape id");
+        let shape = match model.shape(&id).expect("shape present") {
+            Shape::Structure(s) => s.clone(),
+            other => panic!("expected a structure, got {other:?}"),
+        };
+        (model, shape)
+    }
+
+    fn build(
+        args: &[(&str, &str)],
+        format: BinaryFormat,
+    ) -> Result<Option<Value>, InputError> {
+        let (model, shape) = blob_model();
+        let parameters: BTreeMap<String, Option<String>> = args
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), Some((*v).to_string())))
+            .collect();
+        build_input_named(&model, Some(&shape), &parameters, "svc", "op", format)
+    }
+
+    /// The v2 default: the value on the command line is ALREADY base64 and reaches the
+    /// wire unchanged. Encoding it again would send the base64 of the base64.
+    #[test]
+    fn the_default_format_takes_a_blob_argument_as_base64() {
+        // "aGk=" is base64 for "hi".
+        let built = build(&[("--data", "aGk=")], BinaryFormat::Base64).expect("builds");
+        assert_eq!(built.unwrap()["Data"], Value::String("aGk=".into()));
+    }
+
+    /// v1 semantics, kept behind the flag: the text IS the bytes.
+    #[test]
+    fn raw_in_base64_out_encodes_the_literal_text() {
+        let built =
+            build(&[("--data", "hi")], BinaryFormat::RawInBase64Out).expect("builds");
+        assert_eq!(built.unwrap()["Data"], Value::String("aGk=".into()));
+    }
+
+    /// The default validates, and the wording is the reference's `InvalidBase64Error`.
+    /// It is a *general* error, not a parameter one -- no handler claims it.
+    #[test]
+    fn the_default_format_rejects_text_that_is_not_base64() {
+        let err = build(&[("--data", "{\"a\":1}")], BinaryFormat::Base64).expect_err("rejects");
+        assert_eq!(err.message, "Invalid base64: \"{\"a\":1}\"");
+        assert!(err.general, "the reference exits 255 for this, not 252");
+    }
+
+    /// A blob nested inside a structure is normalised too: the reference walks the whole
+    /// input shape rather than only its top level.
+    #[test]
+    fn a_nested_blob_is_normalised_as_well() {
+        let built =
+            build(&[("--wrap", "Nested=hi")], BinaryFormat::RawInBase64Out).expect("builds");
+        assert_eq!(built.unwrap()["Wrap"]["Nested"], Value::String("aGk=".into()));
+    }
+
+    /// A streaming member's argument is a PATH to send from, not a value to encode.
+    /// Touching it would turn `s3api put-object --body ./f` into a base64 puzzle.
+    #[test]
+    fn a_streaming_blob_argument_is_left_alone() {
+        let built = build(&[("--body", "./payload.bin")], BinaryFormat::Base64).expect("builds");
+        assert_eq!(built.unwrap()["Body"], Value::String("./payload.bin".into()));
+    }
+
+    /// A blob is text, never a document. Before this, a `{`-leading value took the JSON
+    /// short-circuit and was parsed into an object, which serialised to an empty body.
+    #[test]
+    fn a_blob_value_never_takes_the_json_short_circuit() {
+        let built =
+            build(&[("--data", "{\"a\":1}")], BinaryFormat::RawInBase64Out).expect("builds");
+        // base64 of `{"a":1}`.
+        assert_eq!(built.unwrap()["Data"], Value::String("eyJhIjoxfQ==".into()));
+    }
+
     /// A list member takes every value; a scalar takes one and hands the rest back as
     /// positionals. Getting this wrong is silent both ways: `--instance-ids i-1 i-2`
     /// queried only `i-1`, and greedily fixing that would have eaten `get-object`'s
@@ -727,7 +1044,14 @@ mod tests {
         assert_eq!(parsed.positionals, vec!["out.txt".to_string()]);
 
         // And the list really becomes two elements, not one string.
-        let bound = build_input_named(&model, Some(&shape), &parsed.parameters, "svc", "op")
+        let bound = build_input_named(
+            &model,
+            Some(&shape),
+            &parsed.parameters,
+            "svc",
+            "op",
+            BinaryFormat::RawInBase64Out,
+        )
             .expect("binds")
             .expect("some input");
         assert_eq!(bound["InstanceIds"], serde_json::json!(["i-1", "i-2"]));

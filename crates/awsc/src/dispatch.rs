@@ -238,6 +238,33 @@ fn serialize_rest(
         });
     }
 
+    // A non-streaming blob payload is the request body *as bytes*. The argument layer
+    // normalised it to base64, so it decodes here rather than being sent as its own
+    // encoding -- `lambda invoke --payload` puts the decoded JSON on the wire, not the
+    // base64 text of it. Done before the per-protocol encoders because it is the same
+    // answer for all of them.
+    if let Some(name) = bound.payload_member.as_deref() {
+        let is_blob = shape
+            .members
+            .get(name)
+            .and_then(|m| model.shape(&m.target))
+            .is_some_and(|t| matches!(t, aws_cli_model::Shape::Blob(_)));
+        if is_blob {
+            let decoded = body_value
+                .as_str()
+                .and_then(aws_cli_protocol::shapes::base64_decode)
+                .unwrap_or_default();
+            return Ok(WireRequest {
+                method: http.method,
+                path: bound.path,
+                query: encode_query(&bound.query),
+                content_type: None,
+                headers: bound.headers,
+                body: Body::from_vec(decoded),
+            });
+        }
+    }
+
     let (body, content_type) = match protocol {
         Protocol::RestJson1 => {
             let encoded = if bound.payload_member.is_some() {

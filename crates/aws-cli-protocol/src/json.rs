@@ -84,11 +84,10 @@ fn serialize_value(
             }
             Value::Object(out)
         }
-        // Blobs travel base64-encoded in JSON.
-        Shape::Blob(_) => match value.as_str() {
-            Some(s) => Value::String(shapes::base64_encode(s.as_bytes())),
-            None => value.clone(),
-        },
+        // Blobs travel base64-encoded in JSON, and the argument layer has already
+        // normalised every blob input to base64 text (see `args::normalize_blobs`), so
+        // the value is the wire form already. Encoding again would double-encode it.
+        Shape::Blob(_) => value.clone(),
         Shape::Timestamp(_) => match timestamp_value(value) {
             Some(unix) => match timestamp_format {
                 TimestampFormat::EpochSeconds => Value::from(unix),

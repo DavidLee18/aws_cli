@@ -444,6 +444,7 @@ impl<'a> Client<'a> {
                     ),
                 );
                 failure.service_error_code = Some(code);
+                failure.service_error_message = Some(message);
                 Err(failure)
             }
             Err(e) => Err(Failure::new(exit::GENERAL_ERROR, e)),
@@ -745,6 +746,7 @@ impl<'a> Client<'a> {
                     ),
                 );
                 failure.service_error_code = Some(code);
+                failure.service_error_message = Some(message);
                 failure
             }
             other => Failure::new(exit::GENERAL_ERROR, other),
@@ -795,6 +797,7 @@ impl<'a> Client<'a> {
                 ),
             );
             failure.service_error_code = Some(code);
+                failure.service_error_message = Some(message);
             return Err(failure);
         }
         Ok(response)
@@ -948,6 +951,7 @@ impl<'a> Client<'a> {
                 ),
             );
             failure.service_error_code = Some(code);
+                failure.service_error_message = Some(message);
             return Err(failure);
         }
 

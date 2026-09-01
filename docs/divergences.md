@@ -3,19 +3,38 @@
 Every divergence the conformance report prints, traced to its cause in the reference CLI.
 Regenerate with `cargo run -p aws-cli-conformance`.
 
-## Current state: ZERO surface divergence
+## Current state: ZERO surface divergence, and a deliberate superset
 
 | | |
 |---|---|
 | Operations compared | 19,452 |
 | Argument sets matching exactly | **19,452 (100.00%)** |
+| Operations the reference has and we lack | **0** |
 | Services fully conformant | **427 of 427 compared** |
+| Operations we expose that the reference hides, by design | 22 |
 | Excluded models (in aws-sdk-rust, not shipped by the CLI) | 4 |
 | Corpus services with no aws-sdk-rust model | 11 |
 
-The baseline gate is now zero-tolerance (`MAX_DIVERGING_OPERATIONS = 0`,
-`MIN_EXACT_ARG_RATIO = 1.0`). New divergence means a regression or upstream drift after
-refetching; fix or regenerate the data files rather than raising the gate.
+Nothing the reference offers is missing, and every argument set matches. The 22 extras are
+the event-stream operations botocore removes only because it cannot decode
+`vnd.amazon.eventstream` — `lambda invoke-with-response-stream`, `kinesis
+subscribe-to-shard`, `bedrock-runtime converse-stream` and the rest. We can decode it, so
+we keep them; they are listed in `customizations::EVENT_STREAM_OPERATIONS`.
+
+Three gates, and it is worth being clear about what each one does *not* cover:
+
+- `conformance_does_not_regress` counts diverging **argument sets** only
+  (`MAX_DIVERGING_OPERATIONS = 0`, `MIN_EXACT_ARG_RATIO = 1.0`).
+- `no_operations_are_missing_or_unexpected` covers whole operations, which the first gate
+  cannot see: it only compares operations present on both sides, so a command could vanish
+  entirely and leave it green. Extras are permitted only where they *equal* the
+  event-stream table — a real extra cannot hide inside the exemption, and a table entry
+  that stops being derived is caught too.
+- The report binary (`cargo run -p aws-cli-conformance`) prints the extras separately and
+  exits zero when nothing else diverges, so it is safe to gate CI on.
+
+New divergence means a regression or upstream drift after refetching; fix or regenerate
+the data files rather than raising a gate.
 
 Surface derivation pipeline (all inputs generated from the reference, none hand-edited):
 
@@ -238,11 +257,64 @@ the reference while building the STS vertical slice.
   `` `us-east-1` ``, which most published AWS CLI examples use. Literals whose contents
   are not valid JSON are quoted before compiling.
 
-- **Global arguments** — implemented: `--query`, `--no-sign-request`, `--cli-read-timeout`,
-  `--cli-connect-timeout`, plus `--color`/`--no-cli-pager` accepted as genuine no-ops (we
-  neither colour nor page). `--no-verify-ssl` and `--ca-bundle` are **refused rather than
-  ignored**, since silently verifying when asked not to would misrepresent the request.
-  Still missing: `--cli-binary-format`, `--cli-error-format`, `--debug` parity.
+- **Global arguments** ✅ — every one the reference declares is now accepted. `--query`,
+  `--no-sign-request`, `--cli-read-timeout`, `--cli-connect-timeout`, `--debug`,
+  `--version`, plus `--color`/`--no-cli-pager`/`--no-cli-auto-prompt` accepted as genuine
+  no-ops (we neither colour, page, nor prompt).
+
+  Refused rather than ignored, because obeying the flag is the whole point of it:
+  `--no-verify-ssl` and `--ca-bundle` (silently verifying when asked not to would
+  misrepresent the request), and `--cli-auto-prompt` (answering as though it were absent
+  would run a command the user expected to edit first).
+
+- **`--cli-binary-format`** ✅ — and this was a live *correctness* bug, not just an absent
+  flag. v2 defaults to `base64`: a blob argument is already base64 and is **decoded** on
+  the way in. We were implementing v1's `raw-in-base64-out` unconditionally, so
+  `kms encrypt --plaintext <base64>` and `lambda invoke --payload <base64>` both sent the
+  base64 of the base64.
+
+  Blob inputs are now normalised to base64 text at the argument layer — the reference's
+  `Base64DecodeVisitor`, with the one change that a `serde_json::Value` cannot hold bytes,
+  so the canonical form is the encoded text and the protocols that want raw bytes (CBOR,
+  and a blob payload) decode it back. Three things fell out of it:
+
+  - `fileb://` no longer corrupts binary. It was read through `String::from_utf8_lossy`,
+    which turns every non-UTF-8 byte into U+FFFD; it is base64-encoded from the raw bytes
+    now, and skipped by the normalisation exactly as the reference skips it (`fileb://`
+    yields `bytes`, and its visitor only touches `str`).
+  - A blob value no longer takes the JSON short-circuit. `--payload '{"a":1}'` is not a
+    document to parse but a bad base64 string, and the reference says so —
+    `Invalid base64: "{"a":1}"`, exit **255**, because that error matches no handler and
+    falls through to the general one.
+  - Streaming members are untouched: their argument is a path to send from, not a value.
+
+  Verified by capturing the reference's own request bytes: `kms encrypt` in both formats,
+  and `lambda invoke --payload` as `fileb://`, as literal base64, and as invalid base64,
+  all reproduce byte for byte.
+
+- **`--cli-error-format`** ✅ — all six styles (`legacy`, `json`, `yaml`, `text`, `table`,
+  `enhanced`), resolved from the flag, then `AWS_CLI_ERROR_FORMAT`, then the profile's
+  `cli_error_format`, then `enhanced`. All six verified byte-identical against the
+  reference.
+
+  Two things make it smaller than six styles suggests. The four data formats are the
+  ordinary output formatters pointed at stderr with the pseudo-operation name `error`. And
+  an error with no structured record — anything reaching the general handler — ignores the
+  setting entirely and prints the plain line, which is why `--cli-error-format json` cannot
+  swallow a general failure.
+
+  `legacy` is *not* `enhanced` without the extras block: it prints the record's own
+  message, where `enhanced` prints it behind the `An error occurred (Code): ` wrapper. The
+  two agree only for a service error, where `ClientErrorHandler` overrides the fallback.
+
+  Known shortfall: the reference also copies across fields the *error shape* models beyond
+  code and message (`RetryAfterSeconds` and the like), which our error parser does not
+  retain. Those fields are absent rather than wrong, and `enhanced`'s "Additional error
+  details" block is therefore only ever emitted for records that do carry them.
+
+  This also exposed a gap in the YAML formatter: it folded plain scalars at `best_width`
+  but not quoted ones, so a long quoted message ran past column 80. The emitter applies the
+  same rule to every quoting style, and it does now too.
 
 Historical note: the six-model sample reported 96.9% — misleadingly high, because its
 dominant divergence causes had already been fixed. Divergences cluster in services with

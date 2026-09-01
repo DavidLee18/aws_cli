@@ -143,15 +143,16 @@ fn emit_map_inline_after_dash(
     }
 }
 
-/// Emit a scalar mapping value, folding it if it is a long plain string.
+/// Emit a scalar mapping value, folding it if it is long enough to need it.
+///
+/// Quoted scalars fold on the same rule as plain ones. The emitter breaks at a space once
+/// the column passes `best_width` whichever quoting style it is using
+/// (`write_plain`/`write_single_quoted`/`write_double_quoted` share that logic), and the
+/// quotes stay at the outer ends. Verified against the reference for the double-quoted
+/// case, where a long error message folds identically byte for byte.
 fn emit_scalar_folded(value: &Value, start_column: usize, indent: usize, out: &mut String) {
     let rendered = scalar(value, false);
-    let is_plain = !rendered.starts_with('\'') && !rendered.starts_with('"');
-    if is_plain {
-        out.push_str(&fold_plain(&rendered, start_column, indent));
-    } else {
-        out.push_str(&rendered);
-    }
+    out.push_str(&fold_plain(&rendered, start_column, indent));
     out.push('\n');
 }
 
@@ -168,12 +169,11 @@ fn finish_inline(text: &str, out: &mut String, context: EmitContext) {
 /// ruamel's `best_width`.
 const FOLD_WIDTH: usize = 80;
 
-/// Fold a plain scalar the way the YAML emitter does.
+/// Fold a scalar the way the YAML emitter does.
 ///
 /// Words are emitted until the column passes `FOLD_WIDTH`; the next space then becomes a
-/// line break, with the continuation indented to `indent`. Only plain (unquoted) scalars
-/// fold — a quoted scalar keeps its own rules, and a scalar with no spaces cannot be
-/// broken at all, which is why ARNs and IDs stay on one line.
+/// line break, with the continuation indented to `indent`. A scalar with no spaces cannot
+/// be broken at all, which is why ARNs and IDs stay on one line however long they are.
 fn fold_plain(text: &str, start_column: usize, indent: usize) -> String {
     if text.len() + start_column <= FOLD_WIDTH || !text.contains(' ') {
         return text.to_string();
@@ -369,5 +369,41 @@ mod tests {
     #[test]
     fn stream_wraps_each_page_in_a_one_element_list() {
         assert_eq!(render_stream_page(&json!({"a": 1})).unwrap(), "- a: 1\n");
+    }
+}
+
+#[cfg(test)]
+mod fold_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A long double-quoted scalar folds exactly as a plain one does. Taken from the
+    /// reference's `--cli-error-format yaml` output, which is where the missing fold
+    /// first showed up as a byte difference.
+    #[test]
+    fn a_long_quoted_scalar_folds_at_the_same_width() {
+        let message = "the following arguments are required: --role-arn, --role-session-name\
+                       \n\nusage: aws [options] <command> <subcommand> [<subcommand> ...] \
+                       [parameters]\nTo see help text, you can run:\n\n  aws help\n  aws \
+                       <command> help\n  aws <command> <subcommand> help\n";
+        let out = render(&json!({"Code": "ParamValidation", "Message": message})).unwrap();
+
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines.len() > 2, "the message should have folded onto several lines: {out}");
+        assert!(lines[1].starts_with("Message: \""), "{out}");
+        assert!(lines[1].ends_with("usage:"), "the break lands past column 80: {out}");
+        for line in &lines[2..] {
+            assert!(line.starts_with("  ") && !line.starts_with("   "), "continuation indent: {line}");
+        }
+        assert!(out.trim_end().ends_with('"'), "the closing quote stays at the end: {out}");
+    }
+
+    /// A scalar with no spaces has nothing to break on, so it stays on one line however
+    /// far past the width it runs.
+    #[test]
+    fn an_unbreakable_scalar_is_never_folded() {
+        let arn = format!("arn:aws:iam::123456789012:role/{}", "x".repeat(120));
+        let out = render(&json!({"Arn": arn})).unwrap();
+        assert_eq!(out.lines().count(), 1, "{out}");
     }
 }

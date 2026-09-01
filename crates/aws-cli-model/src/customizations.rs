@@ -118,6 +118,13 @@ pub(crate) const EVENT_STREAM_OPERATIONS: &[(&str, &str)] = &[
     ("qbusiness", "chat"),
 ];
 
+/// The operations we deliberately keep despite botocore removing them, as
+/// `(service, operation)` pairs. Exposed so the conformance gate can assert that the
+/// extras it derives are exactly these, rather than trusting a second hand-kept list.
+pub fn event_stream_operations() -> &'static [(&'static str, &'static str)] {
+    EVENT_STREAM_OPERATIONS
+}
+
 /// Whether this removal is one we deliberately do not honour.
 pub fn is_event_stream_operation(service: &str, operation: &str) -> bool {
     EVENT_STREAM_OPERATIONS.contains(&(service, operation))

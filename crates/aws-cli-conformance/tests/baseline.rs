@@ -116,3 +116,50 @@ fn conformance_does_not_regress() {
         "diverging operations rose to {diverging}; baseline is {MAX_DIVERGING_OPERATIONS}"
     );
 }
+
+/// The argument-set gate above says nothing about whether an operation exists at all: a
+/// whole command could disappear and `conformance_does_not_regress` would stay green,
+/// because it only counts operations present on both sides. This closes that hole.
+///
+/// Extras are allowed only for the event-stream operations the reference drops because it
+/// cannot decode `vnd.amazon.eventstream`; we can, so we keep them. Asserting the set
+/// *equals* that table -- rather than merely being contained in it -- means a genuinely
+/// unexpected operation cannot hide inside the exemption, and a table entry that stops
+/// being derived is caught too.
+#[test]
+fn no_operations_are_missing_or_unexpected() {
+    let Some(f) = fixture() else { return };
+    let report = Report::compute(&f.corpus, &f.surface);
+
+    let missing: Vec<String> = report
+        .compared
+        .iter()
+        .flat_map(|s| s.operations_missing.iter().map(|op| format!("{} {op}", s.service)))
+        .collect();
+    assert!(missing.is_empty(), "operations the reference has and we do not: {missing:?}");
+
+    let unexpected: Vec<String> = report
+        .compared
+        .iter()
+        .flat_map(|s| s.operations_unexpected.iter().map(|op| format!("{} {op}", s.service)))
+        .collect();
+    assert!(unexpected.is_empty(), "operations we expose and the reference does not: {unexpected:?}");
+
+    let mut derived: Vec<String> = report
+        .compared
+        .iter()
+        .flat_map(|s| s.operations_extra_by_design.iter().map(|op| format!("{} {op}", s.service)))
+        .collect();
+    derived.sort();
+
+    let mut expected: Vec<String> = aws_cli_model::customizations::event_stream_operations()
+        .iter()
+        .map(|(service, op)| format!("{service} {op}"))
+        .collect();
+    expected.sort();
+
+    assert_eq!(
+        derived, expected,
+        "the deliberate event-stream extras no longer match the table they are exempted by"
+    );
+}

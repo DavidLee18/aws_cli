@@ -131,8 +131,9 @@ fn flatten(
             .unwrap_or_else(|| scalar_to_string(value));
             out.push((prefix.to_string(), text));
         }
+        // Already base64 by the time it reaches here; see `args::normalize_blobs`.
         Shape::Blob(_) => {
-            let text = value.as_str().map(|s| shapes::base64_encode(s.as_bytes()));
+            let text = value.as_str().map(str::to_string);
             out.push((prefix.to_string(), text.unwrap_or_else(|| scalar_to_string(value))));
         }
         _ => out.push((prefix.to_string(), scalar_to_string(value))),

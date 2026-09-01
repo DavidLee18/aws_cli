@@ -368,9 +368,19 @@ fn sso_config_for(config: &Config, section: &Section) -> Option<sso::SsoConfig> 
 
 /// The region configured for a profile, for the endpoint layer's last fallback.
 pub fn profile_region(explicit_profile: Option<&str>) -> Option<String> {
+    profile_setting("region", explicit_profile)
+}
+
+/// Any single setting from the resolved profile, for the config-variable chains that
+/// end at `~/.aws/config` — `cli_error_format` and `cli_binary_format` among them.
+///
+/// A missing or unreadable config file yields `None` rather than an error: every caller
+/// has a default to fall back to, and failing to *print an error* because the config file
+/// is unreadable would be a poor trade.
+pub fn profile_setting(key: &str, explicit_profile: Option<&str>) -> Option<String> {
     let config = Config::load().ok()?;
     let name = profile::profile_name(explicit_profile);
-    config.profile(&name)?.get("region").cloned()
+    config.profile(&name)?.get(key).cloned()
 }
 
 #[cfg(test)]

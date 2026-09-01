@@ -123,6 +123,7 @@ fn main() -> std::process::ExitCode {
 
         print_list("      missing ops", &svc.operations_missing);
         print_list("      extra ops", &svc.operations_unexpected);
+        print_list("      extra by design (event streams)", &svc.operations_extra_by_design);
 
         for ad in svc.arg_diffs.iter().take(MAX_LISTED) {
             println!("      {} :", ad.operation);
@@ -134,7 +135,15 @@ fn main() -> std::process::ExitCode {
         }
     }
 
-    println!("\n{} corpus services have no vendored model yet", report.not_vendored);
+    let by_design: usize = report.compared.iter().map(|s| s.operations_extra_by_design.len()).sum();
+    if by_design > 0 {
+        println!(
+            "\n{by_design} operations are exposed by design that the reference hides: it drops \
+             them only because it cannot read an event stream. A superset, not a divergence."
+        );
+    }
+
+    println!("{} corpus services have no vendored model yet", report.not_vendored);
 
     if report.is_clean() {
         println!("\nno divergences across vendored services");

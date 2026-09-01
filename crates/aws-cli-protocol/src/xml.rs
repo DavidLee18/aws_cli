@@ -483,9 +483,10 @@ fn write_element(
         }
         Shape::Blob(_) => {
             out.push_str(&format!("<{name}>"));
-            // Blobs travel base64-encoded, as they do in every other protocol.
+            // Blobs travel base64-encoded, as they do in every other protocol, and the
+            // argument layer has already put them in that form.
             if let Some(text) = value.as_str() {
-                out.push_str(&crate::shapes::base64_encode(text.as_bytes()));
+                out.push_str(text);
             }
             out.push_str(&format!("</{name}>"));
         }

@@ -12,6 +12,7 @@ use std::process::ExitCode;
 
 mod args;
 mod client;
+mod errorformat;
 mod custom;
 mod dispatch;
 mod logs_tail;
@@ -62,11 +63,21 @@ pub struct Failure {
     /// `configservice subscribe` treats a `404` from `HeadBucket` as "create it" and
     /// anything else as "it exists".
     pub service_error_code: Option<String>,
+    /// The service's message, unwrapped from the "An error occurred ... when calling"
+    /// line, for the structured error record `--cli-error-format` renders.
+    pub service_error_message: Option<String>,
 }
 
 impl Failure {
     pub fn new(code: u8, message: impl std::fmt::Display) -> Self {
-        Failure { message: message.to_string(), code, raw: false, preamble: None, service_error_code: None }
+        Failure {
+            message: message.to_string(),
+            code,
+            raw: false,
+            preamble: None,
+            service_error_code: None,
+            service_error_message: None,
+        }
     }
 
     /// The exit code this failure carries.
@@ -87,8 +98,60 @@ impl Failure {
     }
 
     pub fn bare(code: u8, message: impl std::fmt::Display) -> Self {
-        Failure { message: message.to_string(), code, raw: true, preamble: None, service_error_code: None }
+        Failure {
+            message: message.to_string(),
+            code,
+            raw: true,
+            preamble: None,
+            service_error_code: None,
+            service_error_message: None,
+        }
     }
+}
+
+/// The structured record for a failure, or `None` when the reference would have no
+/// handler for it.
+///
+/// The exit code is what identifies the handler: argparse and the parameter
+/// customizations report `ParamValidation` and exit 252, configuration failures report
+/// `Configuration` and exit 253, a service error carries the service's own code at 254,
+/// and anything left is the general handler -- which supplies no record at all, and so
+/// prints the same plain line whatever `--cli-error-format` says.
+///
+/// One known shortfall: the reference also copies across any field the *error shape*
+/// models beyond code and message (`RetryAfterSeconds` and the like), which our error
+/// parser does not retain. Those fields are absent here rather than wrong.
+fn error_record(f: &Failure) -> Option<serde_json::Map<String, serde_json::Value>> {
+    match f.code {
+        exit::PARAM_VALIDATION => {
+            Some(errorformat::info("ParamValidation", &structured_message(f, "ParamValidation")))
+        }
+        exit::CONFIGURATION => {
+            Some(errorformat::info("Configuration", &structured_message(f, "Configuration")))
+        }
+        exit::CLIENT_ERROR => {
+            let code = f.service_error_code.as_deref()?;
+            let message = f.service_error_message.as_deref().unwrap_or(&f.message);
+            Some(errorformat::info(code, message))
+        }
+        _ => None,
+    }
+}
+
+/// The message as the *record* carries it, which is not the message as the line prints
+/// it: the reference stores `str(exception)` and adds the "An error occurred (Code): "
+/// wrapper only when writing the plain line. We build the wrapped form up front, so it
+/// comes back off here.
+///
+/// The trailing newline is argparse's: a message that embeds the usage block ends with
+/// one, because that is how argparse writes usage, and it is visible in the rendered JSON.
+fn structured_message(f: &Failure, code: &str) -> String {
+    let prefix = format!("An error occurred ({code}): ");
+    let mut message = f.message.strip_prefix(&prefix).unwrap_or(&f.message).to_string();
+    if message.contains("\nusage: ") && !message.ends_with('\n') {
+        message.push('\n');
+    }
+    message
 }
 
 fn main() -> ExitCode {
@@ -104,10 +167,29 @@ fn main() -> ExitCode {
             if f.raw {
                 eprintln!("{}", f.message);
             } else {
-                eprintln!("\naws: [ERROR]: {}", f.message);
+                let format = ERROR_FORMAT.get().cloned().unwrap_or_else(|| "enhanced".to_string());
+                eprint!("{}", errorformat::render(&format, &f.message, error_record(&f).as_ref()));
             }
             exit::code(f.code)
         }
+    }
+}
+
+/// The resolved `--cli-error-format`, published as soon as the arguments are known.
+///
+/// `main` sees only the `Failure`, and resolving the setting there would mean parsing
+/// argv a second time; a failure raised before the arguments parse has no format to
+/// honour anyway, and falls back to `enhanced` exactly as the reference does.
+static ERROR_FORMAT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Argparse reports a parameter problem after its usage block and exits 252; the one
+/// general failure this layer can raise (`Invalid base64`) matches no handler in the
+/// reference and so exits 255 with a bare line.
+fn input_failure(e: args::InputError) -> Failure {
+    if e.general {
+        Failure::new(exit::GENERAL_ERROR, e.message)
+    } else {
+        Failure::after_usage(e.message)
     }
 }
 
@@ -122,12 +204,21 @@ fn run() -> Result<ExitCode, Failure> {
             print!("{USAGE}");
             return Ok(exit::code(exit::SUCCESS));
         }
+        Ok(args::Outcome::Version) => {
+            println!("aws-cli-rs/{}", env!("CARGO_PKG_VERSION"));
+            return Ok(exit::code(exit::SUCCESS));
+        }
         Ok(args::Outcome::Usage) => {
             eprint!("{USAGE}");
             return Ok(exit::code(exit::PARAM_VALIDATION));
         }
         Err(e) => return Err(Failure::new(exit::PARAM_VALIDATION, e)),
     };
+
+    let _ = ERROR_FORMAT.set(errorformat::resolve(
+        parsed.error_format.as_deref(),
+        parsed.profile.as_deref(),
+    ));
 
     // Custom commands are not modeled operations, so they are dispatched before the model
     // is consulted — `ecr get-login-password` has no `GetLoginPassword` shape to find.
@@ -202,8 +293,9 @@ fn run() -> Result<ExitCode, Failure> {
                 &parsed.parameters,
                 &cli_service,
                 &parsed.operation,
+                parsed.binary_format,
             )
-            .map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
+            .map_err(input_failure)?;
             let validation =
                 aws_cli_protocol::validate::validate(&model, input_shape, built.as_ref());
             if !validation.is_empty() {
@@ -293,8 +385,9 @@ fn run() -> Result<ExitCode, Failure> {
         &parsed.parameters,
         &cli_service,
         &parsed.operation,
+        parsed.binary_format,
     )
-    .map_err(Failure::after_usage)?;
+    .map_err(input_failure)?;
 
     // --cli-input-json/yaml fills in top-level keys the command line did not set. The
     // command line wins, and the fill is shallow: a key set by an argument discards the

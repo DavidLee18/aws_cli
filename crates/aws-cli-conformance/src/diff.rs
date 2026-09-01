@@ -6,6 +6,7 @@
 
 use crate::corpus::Corpus;
 use crate::surface::Surface;
+use aws_cli_model::customizations::is_event_stream_operation;
 use std::collections::BTreeSet;
 
 #[derive(Debug, Default)]
@@ -27,6 +28,13 @@ pub struct ServiceDiff {
     pub model_file: String,
     pub operations_missing: Vec<String>,
     pub operations_unexpected: Vec<String>,
+    /// Operations we expose that the reference does not, *by design*: the ones it drops
+    /// only because it cannot read an event stream. They are a superset, not a
+    /// divergence, so they are reported apart from `operations_unexpected` and do not
+    /// make a service unclean. The membership test is
+    /// [`aws_cli_model::customizations::is_event_stream_operation`], the same table the
+    /// surface derivation consults, so the two cannot drift apart.
+    pub operations_extra_by_design: Vec<String>,
     pub operations_matched: usize,
     pub arg_diffs: Vec<ArgDiff>,
     /// Operations whose argument sets matched exactly.
@@ -73,11 +81,19 @@ impl Report {
             let our_ops: BTreeSet<&String> = ours_svc.operations.keys().collect();
             let their_ops: BTreeSet<&String> = theirs_svc.operations.keys().collect();
 
+            // An operation we have and the reference does not is a divergence unless it is
+            // one of the event-stream operations we deliberately keep.
+            let (extra_by_design, unexpected): (Vec<String>, Vec<String>) = our_ops
+                .difference(&their_ops)
+                .map(|s| (*s).clone())
+                .partition(|op| is_event_stream_operation(name, op));
+
             let mut diff = ServiceDiff {
                 service: name.clone(),
                 model_file: ours_svc.model_file.clone(),
                 operations_missing: their_ops.difference(&our_ops).map(|s| (*s).clone()).collect(),
-                operations_unexpected: our_ops.difference(&their_ops).map(|s| (*s).clone()).collect(),
+                operations_unexpected: unexpected,
+                operations_extra_by_design: extra_by_design,
                 operations_matched: our_ops.intersection(&their_ops).count(),
                 arg_diffs: Vec::new(),
                 operations_args_exact: 0,

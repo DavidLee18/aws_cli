@@ -435,9 +435,10 @@ fn serialize_value(
                 serialize_value(model, &map_shape.value.target, v, out)?;
             }
         }
-        // A blob is raw bytes here, not the base64 text a JSON protocol would carry.
+        // A blob is raw bytes here, not the base64 text a JSON protocol would carry, so
+        // the base64 the argument layer normalised to has to come back off.
         Shape::Blob(_) => match value.as_str() {
-            Some(s) => write_bytes(out, s.as_bytes()),
+            Some(s) => write_bytes(out, &crate::shapes::base64_decode(s).unwrap_or_default()),
             None => write_json_value(value, out),
         },
         // Tag 1 over epoch seconds, regardless of any `timestampFormat` on the member.
@@ -704,13 +705,16 @@ mod tests {
         assert!(decoded.get("nameJson").is_none(), "jsonName must not be applied");
     }
 
-    /// A blob is raw bytes, not the base64 text a JSON protocol would send — and it
-    /// comes back base64 so the printed output matches the other protocols.
+    /// A blob is raw bytes on the wire, not the base64 text a JSON protocol would send.
+    /// The *input* value is base64 either way — that is the form the argument layer
+    /// normalises every blob to — so this protocol is the one that has to decode it, and
+    /// the response comes back base64 again so printed output matches the other protocols.
     #[test]
     fn blobs_travel_as_byte_strings() {
         let model = model();
+        // "aGk=" is base64 for "hi".
         let bytes =
-            serialize(&model, Some(&input_shape(&model)), Some(&json!({"Data": "hi"}))).unwrap();
+            serialize(&model, Some(&input_shape(&model)), Some(&json!({"Data": "aGk="}))).unwrap();
         assert_eq!(decode(&bytes).unwrap().get("Data"), Some(&Cbor::Bytes(b"hi".to_vec())));
 
         let parsed = parse_response(&model, Some(&input_shape(&model)), &bytes).unwrap();
