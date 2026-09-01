@@ -31,6 +31,11 @@ pub enum RuntimeError {
     /// Client-side parameter validation, reported the way the reference formats it.
     #[error("An error occurred (ParamValidation): {0}")]
     ParamValidation(String),
+    /// A configuration problem the CLI itself raises -- a missing SSO setting, an
+    /// sso-session that is not defined. Distinct from botocore's own `ProfileNotFound`,
+    /// which reaches the general handler and carries no such prefix.
+    #[error("An error occurred (Configuration): {0}")]
+    Configuration(String),
     /// A modelled service error, reported the way the reference formats it.
     #[error("An error occurred ({code}) when calling the {operation} operation: {message}")]
     Service { code: String, message: String, operation: String },

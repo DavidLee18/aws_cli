@@ -1237,3 +1237,62 @@ follow. Sorting looks tidier and is a visible difference.
   where the value was looked up — which is also why its LOCATION column is empty for
   credentials. There is no way to derive that after the fact, so the field is now carried
   through the chain.
+
+
+---
+
+## `aws sso login` and `aws sso logout`
+
+Custom commands on the modelled `sso` service, so neither is an operation on it and both
+are dispatched before the model is consulted. The provider could already *use* a cached
+token and refresh one about to lapse; what it could not do was obtain the first one.
+
+**`sso logout` is verified identical** — same stdout, same exit code, and the same files
+surviving in both `~/.aws/sso/cache` and `~/.aws/cli/cache`. It sweeps by content, not by
+name: a cache entry is a token if it has an `accessToken` and a credential if its
+`ProviderType` is `sso`, so a client registration, an assume-role credential and a file
+that is not JSON at all are all left alone. Each token is invalidated at the service with
+`sso:Logout` *before* the local copy is removed — deleting the file alone leaves the
+session alive until it expires on its own.
+
+**`sso login` implements the device authorization grant**: `RegisterClient`,
+`StartDeviceAuthorization`, then `CreateToken` polled until the user approves. Its three
+"not yet" answers are control signals rather than failures — `authorization_pending` means
+keep waiting, `slow_down` adds five seconds to the interval, and `expired_token` means the
+user took too long. One `CreateToken` is attempted *before* anything is printed, because a
+pre-authorized client needs no code shown.
+
+### Interoperability is the point, so the cache keys are exact
+
+A token this command writes lands in `~/.aws/sso/cache` in botocore's format under
+botocore's key, and is picked up by the reference CLI — and vice versa. Nobody should have
+to choose which CLI to authenticate with. Two keys have to be reproduced exactly:
+
+- The **token** key is `sha1` of the sso-session name, or of the start URL for the legacy
+  inline form.
+- The **registration** key is `sha1` over a JSON object with sorted keys and Python's
+  `", "` / `": "` separators, including its literal `"tool": "botocore"` entry. A
+  different key is not a failure — it is a second client registration for the same
+  session, visible in the IAM Identity Center console.
+
+The registration is also named `botocore-client-<session>` for the same reason: renaming
+it would show up in that console as an unfamiliar second client.
+
+### Known divergence: which grant is used
+
+The reference uses the **authorization-code grant with PKCE** for a modern `sso-session`,
+falling back to the device grant only for a legacy profile or when `--use-device-code` is
+given. We always use the device grant. The token that results is identical and cached
+identically, so nothing downstream can tell the difference — but the interaction is: the
+reference redirects a browser back to a local listener, while we show a code to type.
+`--use-device-code` is accepted and selects what we already do.
+
+### Not verified end to end
+
+Everything checkable without a live IAM Identity Center portal has been checked: both cache
+keys against pinned digests, the configuration errors byte-for-byte against the reference
+(a missing `sso_region`, an sso-session that does not exist, with the extra "run `aws
+configure sso`" sentence that only the legacy form gets), and the whole of `sso logout`.
+The device flow itself — register, authorize, poll, cache — has not been run against a real
+portal, because doing so registers a client in someone's account and needs a human to
+approve it in a browser.

@@ -14,6 +14,7 @@ pub mod imds;
 pub mod process;
 pub mod profile;
 pub mod sso;
+pub mod sso_login;
 
 use assume_role::AssumeRoleRequest;
 use profile::{Config, Section};

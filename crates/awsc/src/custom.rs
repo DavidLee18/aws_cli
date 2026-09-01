@@ -31,6 +31,10 @@ pub fn dispatch(parsed: &Parsed) -> Result<Option<ExitCode>, Failure> {
         ("eks", "get-token") => eks_get_token(parsed, &globals)?,
         ("configservice", "subscribe") => configservice_subscribe(parsed, &globals)?,
         ("logs", "tail") => crate::logs_tail::run(parsed, &globals)?,
+        // `sso login`/`logout` are custom commands on a modelled service: neither is an
+        // operation on it, so both are handled before the model lookup.
+        ("sso", "login") => crate::sso::login(parsed)?,
+        ("sso", "logout") => crate::sso::logout(parsed)?,
         // The whole s3 tree is custom: it has no model of its own.
         ("s3", _) => crate::s3::dispatch(parsed, &globals)?,
         // As is `configure`, which mostly edits the config files rather than calling AWS.

@@ -171,7 +171,9 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
     // pagination control, and it is validated differently — so it has to reach the
     // subcommand rather than being consumed here. `--no-paginate` and `--output` really
     // are accepted-and-ignored there, so those stay global.
-    let owns_its_arguments = parsed.service == "s3" || parsed.service == "configure";
+    let owns_its_arguments = parsed.service == "s3"
+        || parsed.service == "configure"
+        || (parsed.service == "sso" && matches!(parsed.operation.as_str(), "login" | "logout"));
 
     let mut i = 2;
     while i < argv.len() {
@@ -309,6 +311,8 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
                         crate::s3::flag_arity(other)
                     } else if parsed.service == "configure" {
                         crate::configure::flag_arity(other)
+                    } else if parsed.service == "sso" && matches!(parsed.operation.as_str(), "login" | "logout") {
+                        crate::sso::flag_arity(other)
                     } else {
                         Arity::Many
                     } {

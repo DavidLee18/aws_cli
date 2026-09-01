@@ -22,25 +22,25 @@ use std::path::PathBuf;
 /// `refreshToken` is present for sessions registered with the newer scopes, but using it
 /// requires the OIDC `CreateToken` call that only the login flow performs.
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
-struct CachedToken {
+pub(crate) struct CachedToken {
     #[serde(rename = "accessToken", skip_serializing_if = "Option::is_none")]
-    access_token: Option<String>,
+    pub(crate) access_token: Option<String>,
     #[serde(rename = "expiresAt", skip_serializing_if = "Option::is_none")]
-    expires_at: Option<String>,
+    pub(crate) expires_at: Option<String>,
     #[serde(rename = "startUrl", skip_serializing_if = "Option::is_none")]
-    start_url: Option<String>,
+    pub(crate) start_url: Option<String>,
     #[serde(rename = "region", skip_serializing_if = "Option::is_none")]
-    region: Option<String>,
+    pub(crate) region: Option<String>,
     // Refresh inputs. All four must be present, and the registration unexpired, for a
     // refresh to be attempted.
     #[serde(rename = "refreshToken", skip_serializing_if = "Option::is_none")]
-    refresh_token: Option<String>,
+    pub(crate) refresh_token: Option<String>,
     #[serde(rename = "clientId", skip_serializing_if = "Option::is_none")]
-    client_id: Option<String>,
+    pub(crate) client_id: Option<String>,
     #[serde(rename = "clientSecret", skip_serializing_if = "Option::is_none")]
-    client_secret: Option<String>,
+    pub(crate) client_secret: Option<String>,
     #[serde(rename = "registrationExpiresAt", skip_serializing_if = "Option::is_none")]
-    registration_expires_at: Option<String>,
+    pub(crate) registration_expires_at: Option<String>,
 }
 
 /// Refresh when under this much validity remains, matching botocore's window.
@@ -111,11 +111,15 @@ fn cache_key(config: &SsoConfig) -> String {
         Some(name) => name.clone(),
         None => config.start_url.clone(),
     };
-    let digest = Sha1::digest(input.as_bytes());
-    digest.iter().map(|b| format!("{b:02x}")).collect()
+    sha1_hex(input.as_bytes())
 }
 
-fn cache_dir() -> Option<PathBuf> {
+/// Lowercase hex of a SHA-1 digest, which is how every botocore cache key is spelled.
+pub(crate) fn sha1_hex(bytes: &[u8]) -> String {
+    Sha1::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+pub(crate) fn cache_dir() -> Option<PathBuf> {
     super::profile::home().map(|h| h.join(".aws/sso/cache"))
 }
 
@@ -214,7 +218,7 @@ fn refresh(token: &CachedToken, config: &SsoConfig) -> Option<CachedToken> {
         #[serde(rename = "expiresIn")]
         expires_in: i64,
         #[serde(rename = "refreshToken")]
-        refresh_token: Option<String>,
+        pub(crate) refresh_token: Option<String>,
     }
     let parsed: CreateTokenResponse = response.into_json().ok()?;
 
@@ -239,16 +243,16 @@ fn write_token(config: &SsoConfig, token: &CachedToken) {
 }
 
 #[cfg(unix)]
-fn restrict_permissions(path: &std::path::Path) {
+pub(crate) fn restrict_permissions(path: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
 }
 
 #[cfg(not(unix))]
-fn restrict_permissions(_path: &std::path::Path) {}
+pub(crate) fn restrict_permissions(_path: &std::path::Path) {}
 
 /// The `%Y-%m-%dT%H:%M:%SZ` form the cache uses.
-fn format_rfc3339(unix: i64) -> String {
+pub(crate) fn format_rfc3339(unix: i64) -> String {
     let compact = crate::sigv4::format_timestamp(unix); // YYYYMMDDTHHMMSSZ
     format!(
         "{}-{}-{}T{}:{}:{}Z",
@@ -355,14 +359,14 @@ fn parse_role_credentials(body: &str) -> Option<Credentials> {
 ///
 /// Unparseable values are treated as NOT expired: the portal is the authority, and
 /// wrongly discarding a good token would be worse than one rejected round trip.
-fn is_expired(timestamp: &str) -> bool {
+pub(crate) fn is_expired(timestamp: &str) -> bool {
     match parse_rfc3339(timestamp) {
         Some(unix) => unix <= now_unix(),
         None => false,
     }
 }
 
-fn now_unix() -> i64 {
+pub(crate) fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)

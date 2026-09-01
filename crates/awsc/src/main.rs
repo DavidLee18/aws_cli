@@ -19,6 +19,7 @@ mod dispatch;
 mod logs_tail;
 mod paginate;
 mod s3;
+mod sso;
 mod exit;
 
 const USAGE: &str = "\
