@@ -53,12 +53,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `native` says the runner can execute what it builds, so the packaged binary
+          # can be smoke-tested before publishing. Set on every row on purpose: an absent
+          # key is null, and null compares equal to false in a GitHub expression, so a
+          # `!= false` test silently skipped the smoke test on every target at once.
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+            native: true
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
+            native: true
           - target: aarch64-apple-darwin
             os: macos-14
+            native: true
           # Cross-compiled from Apple silicon: the macos-13 Intel runner has been retired,
           # and a job asking for that label is never picked up -- it simply queues until it
           # times out. Xcode carries both slices, so the build is fine; `native: false`
@@ -68,6 +75,7 @@ jobs:
             native: false
           - target: x86_64-pc-windows-msvc
             os: windows-latest
+            native: true
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -110,7 +118,7 @@ jobs:
       # the model was found and parsed. A build-time source path would fail here.
       - name: Smoke test the packaged layout
         # Skipped only where the runner cannot execute the target it just built.
-        if: matrix.native != false
+        if: matrix.native
         shell: bash
         run: |
           stage=$(mktemp -d)
