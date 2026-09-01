@@ -166,7 +166,7 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
     // pagination control, and it is validated differently — so it has to reach the
     // subcommand rather than being consumed here. `--no-paginate` and `--output` really
     // are accepted-and-ignored there, so those stay global.
-    let owns_its_arguments = parsed.service == "s3";
+    let owns_its_arguments = parsed.service == "s3" || parsed.service == "configure";
 
     let mut i = 2;
     while i < argv.len() {
@@ -300,8 +300,10 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
                     // Take the consecutive non-flag tokens this flag can hold. For the
                     // `s3` tree that is known now; for a modeled operation it is not, so
                     // everything is taken and `rebalance` hands back what did not belong.
-                    let limit = match if owns_its_arguments {
+                    let limit = match if parsed.service == "s3" {
                         crate::s3::flag_arity(other)
+                    } else if parsed.service == "configure" {
+                        crate::configure::flag_arity(other)
                     } else {
                         Arity::Many
                     } {

@@ -26,6 +26,13 @@ pub struct Config {
     pub sso_sessions: BTreeMap<String, Section>,
     /// `[services NAME]` sections, kept for completeness.
     pub services: BTreeMap<String, Section>,
+    /// Profile names in the order the files declare them -- config file first, then any
+    /// credentials-file profile not already seen.
+    ///
+    /// The maps above are sorted, which is right for lookup and wrong for `configure
+    /// list-profiles`: botocore lists `full_config['profiles']` in dict order, so the
+    /// output follows the file rather than the alphabet.
+    pub profile_order: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -47,19 +54,39 @@ impl Config {
         // The credentials file holds only profiles, named bare.
         if let Some(path) = credentials_file_path() {
             for (name, section) in parse_ini(&path)? {
+                config.remember_profile(&name);
                 config.credentials_profiles.insert(name, section);
             }
         }
         Ok(config)
     }
 
+    fn remember_profile(&mut self, name: &str) {
+        if !self.profile_order.iter().any(|n| n == name) {
+            self.profile_order.push(name.to_string());
+        }
+    }
+
     fn insert_config_section(&mut self, raw_name: &str, section: Section) {
-        let mut parts = raw_name.splitn(2, char::is_whitespace);
-        let head = parts.next().unwrap_or_default();
-        let tail = parts.next().map(str::trim);
+        // botocore splits the header with `shlex.split` and keeps it only when the result
+        // is EXACTLY two words (`configloader._parse_section`). Two consequences that a
+        // plain whitespace split gets wrong in opposite directions:
+        //
+        //   [profile 'my dev']  is the profile `my dev` -- the quotes are shell quoting,
+        //                       not part of the name, and `aws configure set` writes them
+        //   [profile my dev]    is not a profile at all; it splits into three words and is
+        //                       dropped, so treating it as `my dev` would invent a profile
+        //                       the reference cannot see
+        let words = shlex_split(raw_name);
+        let (head, tail) = match words.len() {
+            1 => (words[0].as_str(), None),
+            2 => (words[0].as_str(), Some(words[1].as_str())),
+            _ => return,
+        };
 
         match (head, tail) {
             ("profile", Some(name)) => {
+                self.remember_profile(name);
                 self.config_profiles.insert(name.to_string(), section);
             }
             ("sso-session", Some(name)) => {
@@ -71,6 +98,7 @@ impl Config {
             // A bare section in `config` is only a profile when it is `default`;
             // anything else unprefixed is ignored by botocore too.
             ("default", None) => {
+                self.remember_profile("default");
                 self.config_profiles.insert("default".to_string(), section);
             }
             _ => {}
@@ -146,6 +174,54 @@ pub fn home() -> Option<PathBuf> {
 /// can classify them. Indented continuation lines — used by nested settings such as
 /// `s3 =\n  addressing_style = path` — are flattened away rather than mis-parsed as
 /// top-level keys.
+/// Split a section header the way `shlex.split` does, which is all the quoting the config
+/// format has: single and double quotes group words, and a backslash escapes the next
+/// character outside single quotes.
+fn shlex_split(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut started = false;
+    let mut quote: Option<char> = None;
+    let mut chars = text.chars();
+
+    while let Some(c) = chars.next() {
+        match quote {
+            Some('\'') if c == '\'' => quote = None,
+            Some('"') if c == '"' => quote = None,
+            Some('"') if c == '\\' => {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
+            Some(_) => current.push(c),
+            None if c == '\'' || c == '"' => {
+                quote = Some(c);
+                started = true;
+            }
+            None if c == '\\' => {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                    started = true;
+                }
+            }
+            None if c.is_whitespace() => {
+                if started {
+                    words.push(std::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            None => {
+                current.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        words.push(current);
+    }
+    words
+}
+
 fn parse_ini(path: &PathBuf) -> Result<Vec<(String, Section)>, ConfigError> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
@@ -157,6 +233,8 @@ fn parse_ini(path: &PathBuf) -> Result<Vec<(String, Section)>, ConfigError> {
     let mut out: Vec<(String, Section)> = Vec::new();
     let mut current: Option<(String, Section)> = None;
     let mut in_nested = false;
+    // The key that opened the current nested block, so its children can be named after it.
+    let mut nested_parent: Option<String> = None;
 
     for raw_line in text.lines() {
         let is_indented = raw_line.starts_with([' ', '\t']);
@@ -171,18 +249,28 @@ fn parse_ini(path: &PathBuf) -> Result<Vec<(String, Section)>, ConfigError> {
             }
             current = Some((name.trim().to_string(), Section::new()));
             in_nested = false;
+            nested_parent = None;
             continue;
         }
 
         let Some((key, value)) = line.split_once('=') else { continue };
         let (key, value) = (key.trim().to_ascii_lowercase(), value.trim().to_string());
 
-        // `foo =` with nothing after it opens a nested block whose indented children we
-        // skip; a subsequent unindented key closes it.
-        if is_indented && in_nested {
+        // `foo =` with nothing after it opens a nested block. Its indented children are
+        // kept under a dotted name -- `s3.endpoint_url` -- rather than dropped, which is
+        // how `configure get s3.endpoint_url` reaches them. A flat key never contains a
+        // dot, so the two namespaces cannot collide. A subsequent unindented key closes
+        // the block.
+        if is_indented {
+            if let (true, Some(parent), Some((_, section))) =
+                (in_nested, nested_parent.as_ref(), current.as_mut())
+            {
+                section.insert(format!("{parent}.{key}"), value);
+            }
             continue;
         }
         in_nested = value.is_empty();
+        nested_parent = if in_nested { Some(key.clone()) } else { None };
 
         if let Some((_, section)) = current.as_mut() {
             section.insert(key, value);
@@ -196,6 +284,33 @@ fn parse_ini(path: &PathBuf) -> Result<Vec<(String, Section)>, ConfigError> {
 
 #[cfg(test)]
 mod tests {
+    /// A quoted header names the profile inside the quotes; an unquoted multi-word header
+    /// is not a profile at all. Both come straight from `shlex.split` + "exactly two
+    /// words", and getting either wrong is silent: the first makes a profile written by
+    /// `aws configure set --profile "my dev"` unreadable, the second invents one the
+    /// reference cannot see.
+    #[test]
+    fn a_section_header_is_split_the_way_shlex_does() {
+        assert_eq!(shlex_split("profile dev"), vec!["profile", "dev"]);
+        assert_eq!(shlex_split("profile 'my dev'"), vec!["profile", "my dev"]);
+        assert_eq!(shlex_split("profile \"my dev\""), vec!["profile", "my dev"]);
+        assert_eq!(shlex_split("profile my dev").len(), 3, "three words, so not a profile");
+        assert_eq!(shlex_split("sso-session 'a b'"), vec!["sso-session", "a b"]);
+    }
+
+    #[test]
+    fn a_quoted_profile_is_reachable_by_its_unquoted_name() {
+        let mut config = Config::default();
+        config.insert_config_section("profile 'my dev'", section(&[("region", "eu-north-1")]));
+        assert!(config.profile_exists("my dev"));
+        assert_eq!(config.profile("my dev").unwrap().get("region").unwrap(), "eu-north-1");
+
+        // Three words: dropped, as botocore drops it.
+        let mut config = Config::default();
+        config.insert_config_section("profile my dev", section(&[("region", "x")]));
+        assert!(!config.profile_exists("my dev"));
+    }
+
     use super::*;
     use std::io::Write;
 

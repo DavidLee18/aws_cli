@@ -63,7 +63,8 @@ pub fn resolve(config: &SsoConfig, profile: &str) -> Result<Credentials, Credent
     // region the command works in -- measured from Korea against a us-east-1 SSO endpoint,
     // that was about a second of dead time in front of every command.
     let key = role_cache_key(config);
-    if let Some(cached) = super::cache::read(&key) {
+    if let Some(mut cached) = super::cache::read(&key) {
+        cached.method = "sso";
         return Ok(cached);
     }
     let token = load_token(config, profile)?;
@@ -342,6 +343,7 @@ fn parse_role_credentials(body: &str) -> Option<Credentials> {
     let envelope: RoleCredentialsEnvelope = serde_json::from_str(body).ok()?;
     let c = envelope.role_credentials;
     Some(Credentials {
+        method: "sso",
         access_key_id: c.access_key_id,
         secret_access_key: c.secret_access_key,
         session_token: c.session_token,

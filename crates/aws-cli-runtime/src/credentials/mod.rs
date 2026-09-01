@@ -26,6 +26,14 @@ pub struct Credentials {
     pub session_token: Option<String>,
     /// RFC 3339 or the sigv4 compact form; informational only today.
     pub expires_at: Option<String>,
+    /// Which provider in the chain supplied these, using botocore's own names for them
+    /// (`env`, `shared-credentials-file`, `config-file`, `custom-process`, `sso`,
+    /// `assume-role`, `assume-role-with-web-identity`, `iam-role`, `container-role`).
+    ///
+    /// Only `configure list` reads it, and it has to: the TYPE column there is the
+    /// provider name, not where the value was looked up, so there is no way to derive it
+    /// after the fact from the credentials themselves.
+    pub method: &'static str,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -140,6 +148,7 @@ fn from_environment() -> Option<Credentials> {
         secret_access_key: secret,
         session_token: std::env::var("AWS_SESSION_TOKEN").ok().filter(|s| !s.is_empty()),
         expires_at: None,
+        method: "env",
     })
 }
 
@@ -189,7 +198,7 @@ fn from_profile(
     }
 
     // 4: static keys from the credentials file.
-    if let Some(creds) = static_keys(config.credentials_profiles.get(name)) {
+    if let Some(creds) = static_keys(config.credentials_profiles.get(name), "shared-credentials-file") {
         return Ok(creds);
     }
 
@@ -199,7 +208,7 @@ fn from_profile(
     }
 
     // 6: static keys from the config file.
-    if let Some(creds) = static_keys(config.config_profiles.get(name)) {
+    if let Some(creds) = static_keys(config.config_profiles.get(name), "config-file") {
         return Ok(creds);
     }
 
@@ -322,7 +331,7 @@ fn prompt_mfa(serial: &str) -> Result<String, CredentialError> {
 
 /// Static keys from one section. The access key alone triggers the provider; a missing
 /// secret is an error rather than a skip, matching botocore's `PartialCredentialsError`.
-fn static_keys(section: Option<&Section>) -> Option<Credentials> {
+fn static_keys(section: Option<&Section>, method: &'static str) -> Option<Credentials> {
     let section = section?;
     let id = section.get("aws_access_key_id")?;
     let secret = section.get("aws_secret_access_key")?;
@@ -335,6 +344,7 @@ fn static_keys(section: Option<&Section>) -> Option<Credentials> {
             .or_else(|| section.get("aws_session_token"))
             .cloned(),
         expires_at: None,
+        method,
     })
 }
 
@@ -528,7 +538,7 @@ mod tests {
             ("aws_security_token", "legacy"),
             ("aws_session_token", "modern"),
         ]);
-        assert_eq!(static_keys(Some(&s)).unwrap().session_token.as_deref(), Some("legacy"));
+        assert_eq!(static_keys(Some(&s), "config-file").unwrap().session_token.as_deref(), Some("legacy"));
     }
 
     #[test]

@@ -33,6 +33,8 @@ pub fn dispatch(parsed: &Parsed) -> Result<Option<ExitCode>, Failure> {
         ("logs", "tail") => crate::logs_tail::run(parsed, &globals)?,
         // The whole s3 tree is custom: it has no model of its own.
         ("s3", _) => crate::s3::dispatch(parsed, &globals)?,
+        // As is `configure`, which mostly edits the config files rather than calling AWS.
+        ("configure", _) => crate::configure::dispatch(parsed)?,
         _ => return Ok(None),
     };
     Ok(Some(outcome))
@@ -451,6 +453,7 @@ fn eks_get_token(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure
                 secret_access_key: string(creds, "SecretAccessKey").to_string(),
                 session_token: Some(string(creds, "SessionToken").to_string()),
                 expires_at: None,
+                method: "assume-role",
             }
         }
     };

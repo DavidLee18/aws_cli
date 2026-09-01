@@ -73,6 +73,7 @@ pub fn resolve(command: &str, profile: &str) -> Result<Credentials, CredentialEr
     }
 
     Ok(Credentials {
+        method: "custom-process",
         access_key_id: parsed.access_key_id,
         secret_access_key: parsed.secret_access_key,
         session_token: parsed.session_token,

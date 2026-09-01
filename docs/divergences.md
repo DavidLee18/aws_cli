@@ -50,7 +50,8 @@ Surface derivation pipeline (all inputs generated from the reference, none hand-
 Still unmeasured by this harness: the 8 model-less top-level commands (`s3`, `configure`,
 `ddb`, `history`, `login`, `logout`, `update`, `cli-dev`), argument *types*/shorthand
 behaviour (needs the `awsc` binary), and `_UNDOCUMENTED` marks (corpus captures names
-only).
+only). Of those eight, `s3` and `configure` are implemented and verified by direct
+comparison against the reference binary instead — see "The `aws configure` tree" below.
 
 ---
 
@@ -1154,3 +1155,85 @@ produced. Recursive copy and `mv` over the threshold both behave.
 - Object tags are not carried across a multipart copy. `--copy-props` in its `default` and
   `all` modes fetches them with `GetObjectTagging` and reapplies them; ours preserves
   metadata but not tags.
+
+
+---
+
+## The `aws configure` tree
+
+`list`, `get`, `set` and `list-profiles` are implemented. **35 invocations verified
+identical against the reference** — stdout, stderr, exit code, *and* the resulting
+`~/.aws/config` and `~/.aws/credentials` byte for byte.
+
+Not implemented, and refused by name rather than approximated: `sso`, `sso-session`,
+`mfa-login`, `wizard`, `import`, `add-model`, `export-credentials`, `agent-toolkit`, and
+the bare interactive `aws configure` prompt. Naming them individually matters — an
+"invalid choice" error would tell the user they had made a typo.
+
+### The writer is not an INI serialiser
+
+`configure set` edits the file as **lines of text**. Comments, blank lines, unusual spacing
+and the order of everything it was not asked to change all survive, because nothing is
+re-rendered from a parsed model. A round-tripping parser cannot promise that, and a config
+file is something people maintain by hand.
+
+Behaviours that had to be taken from the reference rather than guessed:
+
+- An updated key keeps its position and is rewritten as `key = value`; a *new* key lands
+  after the last option line of its section, not at the top and not in the next section.
+- A new section is appended with **no blank line** before it — one is added only when the
+  file does not already end in a newline.
+- Writing a credential variable goes to `~/.aws/credentials`, where the section is the
+  bare profile name; that file has no `[profile x]` spelling.
+- A newline in a key, value or section name is refused, because it would split one setting
+  into two lines and the second could be read back as a section header. The message names
+  the key but never echoes the value, which is usually a secret.
+- After writing the credentials file, a warning goes to stderr if any group or other
+  permission bit is set. This is the one place the CLI puts a long-lived secret on disk.
+
+### Section names are shell-quoted, and that cuts both ways
+
+`aws configure set --profile "my dev"` writes `[profile 'my dev']` — **single** quotes,
+from `shlex.quote`. Reading it back is `shlex.split` with a hard requirement of *exactly
+two words* (`configloader._parse_section`), which has two consequences a plain whitespace
+split gets wrong in opposite directions:
+
+- `[profile 'my dev']` is the profile `my dev`; the quotes are shell quoting, not part of
+  the name. We wrote this form correctly but could not read it back — so a profile created
+  by our own `configure set` was invisible to every other command.
+- `[profile my dev]` is **not a profile at all**. Three words, so botocore drops it, and
+  treating it as `my dev` invents a profile the reference cannot see.
+
+Verified in both directions: the reference reads back what we write, and we read back what
+it writes.
+
+### Three more things that are not what they look like
+
+- **`configure get` exits 1 with no output** when the value is absent — not an error line.
+  Scripts branch on that code.
+- **The unqualified path is the only one that validates the profile.** `configure get
+  region --profile nosuch` fails with exit 255, while `configure get profile.nosuch.region
+  --profile alsonosuch` exits 1: the first resolves through the *scoped* config, which
+  raises, and the second reads the whole config and simply finds nothing. An asymmetry in
+  the reference, kept because scripts branch on the code.
+- **Deep nesting is refused in a sub-section and silently truncated on the profile path.**
+  `configure set a.b.c v --services x` errors; `configure set a.b.c v` writes `a = v` and
+  drops the rest. Matching that matters more than improving on it — a script that has been
+  getting away with `a.b.c` would start failing against a stricter replacement.
+
+`list-profiles` prints in **file order**, not sorted: botocore lists its profile dict in
+insertion order, so the config file's order comes first and credentials-only profiles
+follow. Sorting looks tidier and is a visible difference.
+
+### Two pre-existing bugs this surfaced
+
+- **The INI parser silently discarded nested sub-keys.** An indented block under `s3 =`
+  was skipped entirely, so `configure get s3.endpoint_url --services custom` could never
+  have worked, and no profile-level nested setting was readable. They are now kept under a
+  dotted name (`s3.endpoint_url`); a flat key never contains a dot, so the two namespaces
+  cannot collide.
+- **`Credentials` did not record which provider produced it.** `configure list`'s TYPE
+  column is the provider name (`shared-credentials-file`, `sso`, `iam-role`, …), never
+  where the value was looked up — which is also why its LOCATION column is empty for
+  credentials. There is no way to derive that after the fact, so the field is now carried
+  through the chain.

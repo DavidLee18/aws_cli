@@ -229,6 +229,7 @@ mod tests {
     #[test]
     fn matches_published_derivation() {
         let creds = Credentials {
+            method: "test-fixture",
             access_key_id: "AKIDEXAMPLE".into(),
             secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".into(),
             session_token: None,

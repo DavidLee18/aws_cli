@@ -49,6 +49,9 @@ pub fn read(key: &str) -> Option<Credentials> {
         secret_access_key: c.get("SecretAccessKey")?.as_str()?.to_string(),
         session_token: c.get("SessionToken").and_then(|t| t.as_str()).map(str::to_string),
         expires_at: expiration,
+        // The cache does not record which provider filled it, and the caller is the only
+        // one that knows; it overwrites this.
+        method: "cache",
     })
 }
 

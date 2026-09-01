@@ -133,6 +133,7 @@ mod tests {
             secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".into(),
             session_token: token.map(str::to_string),
             expires_at: None,
+            method: "test-fixture",
         }
     }
 

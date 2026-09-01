@@ -20,6 +20,7 @@ fn reproduces_reference_signature_exactly() {
     let (creds, req, sig, expected) = (&f["credentials"], &f["request"], &f["signing"], &f["expected"]);
 
     let credentials = Credentials {
+        method: "test-fixture",
         access_key_id: creds["access_key_id"].as_str().unwrap().to_string(),
         secret_access_key: creds["secret_access_key"].as_str().unwrap().to_string(),
         session_token: None,

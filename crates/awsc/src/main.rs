@@ -12,6 +12,7 @@ use std::process::ExitCode;
 
 mod args;
 mod client;
+mod configure;
 mod errorformat;
 mod custom;
 mod dispatch;

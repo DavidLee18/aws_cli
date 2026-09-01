@@ -33,6 +33,9 @@ impl From<MetadataCredentials> for Credentials {
             secret_access_key: m.secret_access_key,
             session_token: m.token,
             expires_at: m.expiration,
+            // Overwritten by whichever of the two entry points produced it: the container
+            // and instance-metadata providers share this conversion but not their names.
+            method: "iam-role",
         }
     }
 }
@@ -79,7 +82,11 @@ pub fn from_container() -> Result<Option<Credentials>, CredentialError> {
                 message: e.to_string(),
             })?;
             match serde_json::from_str::<MetadataCredentials>(&body) {
-                Ok(c) => Ok(Some(c.into())),
+                Ok(c) => {
+                    let mut creds: Credentials = c.into();
+                    creds.method = "container-role";
+                    Ok(Some(creds))
+                }
                 Err(e) => Err(CredentialError::Process {
                     profile: "container".into(),
                     message: format!("container credential response was unreadable: {e}"),

@@ -68,7 +68,8 @@ pub fn assume_role(
     // The cache is shared with the reference CLI, so a role assumed by either tool is
     // reusable by the other until it expires.
     let cache_key = cache_key(&params, generated_session_name);
-    if let Some(cached) = super::cache::read(&cache_key) {
+    if let Some(mut cached) = super::cache::read(&cache_key) {
+        cached.method = "assume-role";
         return Ok(cached);
     }
 
@@ -107,7 +108,12 @@ pub fn assume_role_with_web_identity(
     );
 
     let xml = sts_call(&body, region, None, profile, "AssumeRoleWithWebIdentity")?;
-    parse_credentials(&xml).ok_or_else(|| service_error(&xml, "AssumeRoleWithWebIdentity"))
+    parse_credentials(&xml)
+        .map(|mut c| {
+            c.method = "assume-role-with-web-identity";
+            c
+        })
+        .ok_or_else(|| service_error(&xml, "AssumeRoleWithWebIdentity"))
 }
 
 /// Turn an STS error document into the service-shaped error the reference reports.
@@ -193,6 +199,7 @@ fn sts_call(
 fn parse_credentials(xml: &str) -> Option<Credentials> {
     let block = element_text(xml, "Credentials")?;
     Some(Credentials {
+        method: "assume-role",
         access_key_id: element_text(&block, "AccessKeyId")?,
         secret_access_key: element_text(&block, "SecretAccessKey")?,
         session_token: element_text(&block, "SessionToken"),
