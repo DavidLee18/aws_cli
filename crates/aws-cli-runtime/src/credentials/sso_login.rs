@@ -12,7 +12,7 @@
 //! CLI to authenticate with.
 
 use super::sso::{cache_dir, format_rfc3339, now_unix, sha1_hex, CachedToken};
-use super::CredentialError;
+use crate::RuntimeError;
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -58,15 +58,47 @@ fn oidc_url(region: &str, path: &str) -> String {
     format!("https://oidc.{region}.amazonaws.com{path}")
 }
 
-fn sso_error(message: impl Into<String>) -> CredentialError {
-    CredentialError::Sso { profile: "sso".to_string(), message: message.into() }
+fn sso_error(message: impl Into<String>) -> RuntimeError {
+    RuntimeError::Configuration(message.into())
+}
+
+/// Turn a failed OIDC or portal call into the reference's service-error line.
+///
+/// The exception name comes from `x-amzn-errortype`, which the service sends as
+/// `InvalidClientException:http://internal...` -- everything from the first colon is
+/// noise. The body carries the OAuth `error` / `error_description` pair, and the
+/// description is the human half. Without this the user sees a raw JSON body and an
+/// exit code that says "configuration" when the service rejected the request.
+fn service_error(error: ureq::Error, operation: &str) -> RuntimeError {
+    match error {
+        ureq::Error::Status(status, response) => {
+            let error_type = response.header("x-amzn-errortype").map(str::to_string);
+            let body = response.into_string().unwrap_or_default();
+            let parsed: serde_json::Value =
+                serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+
+            let code = error_type
+                .and_then(|raw| raw.split(':').next().map(str::to_string))
+                .or_else(|| parsed.get("error").and_then(|v| v.as_str()).map(str::to_string))
+                .unwrap_or_else(|| status.to_string());
+            let message = parsed
+                .get("error_description")
+                .and_then(|v| v.as_str())
+                .or_else(|| parsed.get("error").and_then(|v| v.as_str()))
+                .unwrap_or(&body)
+                .to_string();
+
+            RuntimeError::Service { code, message, operation: operation.to_string() }
+        }
+        other => RuntimeError::Http(other.to_string()),
+    }
 }
 
 /// Run the device-authorization flow and cache the resulting token.
 ///
 /// Returns the start URL that was logged into, so the caller can print the reference's
 /// success line.
-pub fn device_login(request: &LoginRequest) -> Result<(), CredentialError> {
+pub fn device_login(request: &LoginRequest) -> Result<(), RuntimeError> {
     let registration = register_client(request)?;
     let authorization = authorize_device(request, &registration)?;
 
@@ -90,7 +122,7 @@ pub fn device_login(request: &LoginRequest) -> Result<(), CredentialError> {
 }
 
 /// `sso-oidc:RegisterClient`, reusing a cached registration when one is still valid.
-fn register_client(request: &LoginRequest) -> Result<Registration, CredentialError> {
+fn register_client(request: &LoginRequest) -> Result<Registration, RuntimeError> {
     if let Some(cached) = read_registration(request) {
         return Ok(cached);
     }
@@ -118,7 +150,7 @@ fn register_client(request: &LoginRequest) -> Result<Registration, CredentialErr
         .set("content-type", "application/json")
         .set("user-agent", &crate::http::user_agent())
         .send_json(body)
-        .map_err(|e| sso_error(format!("registering the client failed: {}", describe(e))))?;
+        .map_err(|e| service_error(e, "RegisterClient"))?;
 
     let parsed: RegisterClientResponse = response
         .into_json()
@@ -158,7 +190,7 @@ struct Authorization {
 fn authorize_device(
     request: &LoginRequest,
     registration: &Registration,
-) -> Result<Authorization, CredentialError> {
+) -> Result<Authorization, RuntimeError> {
     #[derive(Deserialize)]
     struct StartDeviceAuthorizationResponse {
         #[serde(rename = "deviceCode")]
@@ -181,7 +213,7 @@ fn authorize_device(
             "clientSecret": registration.client_secret,
             "startUrl": request.start_url,
         }))
-        .map_err(|e| sso_error(format!("starting device authorization failed: {}", describe(e))))?;
+        .map_err(|e| service_error(e, "StartDeviceAuthorization"))?;
 
     let parsed: StartDeviceAuthorizationResponse = response
         .into_json()
@@ -213,7 +245,7 @@ fn create_token(
     registration: &Registration,
     device_code: &str,
     interval: &mut u64,
-) -> Result<Option<NewToken>, CredentialError> {
+) -> Result<Option<NewToken>, RuntimeError> {
     #[derive(Deserialize)]
     struct CreateTokenResponse {
         #[serde(rename = "accessToken")]
@@ -246,7 +278,8 @@ fn create_token(
                 expires_in: parsed.expires_in,
             }))
         }
-        Err(ureq::Error::Status(_, response)) => {
+        Err(ureq::Error::Status(status, response)) => {
+            let error_type = response.header("x-amzn-errortype").map(str::to_string);
             let body = response.into_string().unwrap_or_default();
             match oauth_error(&body).as_deref() {
                 Some("authorization_pending") => Ok(None),
@@ -257,10 +290,11 @@ fn create_token(
                 Some("expired_token") => Err(sso_error(
                     "The authorization request has expired. Please run `aws sso login` again.",
                 )),
-                _ => Err(sso_error(format!("fetching the token failed: {body}"))),
+                // Anything else is a real failure, reported as the service error it is.
+                _ => Err(rebuild_service_error(status, error_type, &body, "CreateToken")),
             }
         }
-        Err(e) => Err(sso_error(format!("fetching the token failed: {}", describe(e)))),
+        Err(e) => Err(service_error(e, "CreateToken")),
     }
 }
 
@@ -373,11 +407,34 @@ fn write_registration(request: &LoginRequest, registration: &Registration) {
     }
 }
 
+/// The body has already been consumed by the pending/slow-down check, so the service
+/// error is rebuilt from the parts rather than from the response.
+fn rebuild_service_error(
+    status: u16,
+    error_type: Option<String>,
+    body: &str,
+    operation: &str,
+) -> RuntimeError {
+    let parsed: serde_json::Value =
+        serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+    let code = error_type
+        .and_then(|raw| raw.split(':').next().map(str::to_string))
+        .or_else(|| parsed.get("error").and_then(|v| v.as_str()).map(str::to_string))
+        .unwrap_or_else(|| status.to_string());
+    let message = parsed
+        .get("error_description")
+        .and_then(|v| v.as_str())
+        .or_else(|| parsed.get("error").and_then(|v| v.as_str()))
+        .unwrap_or(body)
+        .to_string();
+    RuntimeError::Service { code, message, operation: operation.to_string() }
+}
+
 fn write_token(
     request: &LoginRequest,
     registration: &Registration,
     token: NewToken,
-) -> Result<(), CredentialError> {
+) -> Result<(), RuntimeError> {
     let document = CachedToken {
         access_token: Some(token.access_token),
         expires_at: Some(format_rfc3339(now_unix() + token.expires_in)),
@@ -456,16 +513,6 @@ fn invalidate(region: &str, token: &str) {
         .call();
 }
 
-fn describe(error: ureq::Error) -> String {
-    match error {
-        ureq::Error::Status(status, response) => {
-            let body = response.into_string().unwrap_or_default();
-            format!("HTTP {status}: {body}")
-        }
-        other => other.to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -528,4 +575,150 @@ mod tests {
         assert_eq!(oauth_error(r#"{"error":"slow_down"}"#).as_deref(), Some("slow_down"));
         assert_eq!(oauth_error("not json at all"), None);
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// The portal, for `aws configure sso`
+// ---------------------------------------------------------------------------
+
+/// One account the signed-in user can reach.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Account {
+    #[serde(rename = "accountId")]
+    pub account_id: String,
+    #[serde(rename = "accountName")]
+    pub account_name: Option<String>,
+    #[serde(rename = "emailAddress")]
+    pub email_address: Option<String>,
+}
+
+impl Account {
+    /// The reference's display string, which degrades as fields go missing -- both have
+    /// been seen absent in real responses, and formatting `None` into the line would be
+    /// worse than dropping it.
+    pub fn display(&self) -> String {
+        match (&self.account_name, &self.email_address) {
+            (None, None) => self.account_id.clone(),
+            (Some(name), None) => format!("{name} ({})", self.account_id),
+            (None, Some(email)) => format!("{email} ({})", self.account_id),
+            (Some(name), Some(email)) => format!("{name}, {email} ({})", self.account_id),
+        }
+    }
+
+    /// Accounts with neither a name nor an email sort last; the rest sort by whichever
+    /// field is present, case-insensitively.
+    pub fn sort_key(&self) -> (bool, String) {
+        let nameless = self.account_name.is_none() && self.email_address.is_none();
+        let value = self
+            .account_name
+            .as_ref()
+            .or(self.email_address.as_ref())
+            .unwrap_or(&self.account_id);
+        (nameless, value.to_lowercase())
+    }
+}
+
+/// The cached access token for a session, for a command that has just logged in.
+pub fn cached_access_token(session_name: &str) -> Option<String> {
+    let path = cache_dir()?.join(format!("{}.json", sha1_hex(session_name.as_bytes())));
+    let text = std::fs::read_to_string(path).ok()?;
+    let token: CachedToken = serde_json::from_str(&text).ok()?;
+    token.access_token
+}
+
+/// `sso:ListAccounts`, following every page.
+///
+/// Unsigned, like the rest of the portal: the bearer token in the header is the whole
+/// credential.
+pub fn list_accounts(region: &str, token: &str) -> Result<Vec<Account>, RuntimeError> {
+    #[derive(Deserialize)]
+    struct Page {
+        #[serde(rename = "accountList")]
+        account_list: Vec<Account>,
+        #[serde(rename = "nextToken")]
+        next_token: Option<String>,
+    }
+
+    let mut accounts = Vec::new();
+    let mut next: Option<String> = None;
+    loop {
+        let mut url = format!("https://portal.sso.{region}.amazonaws.com/assignment/accounts?max_result=100");
+        if let Some(token) = &next {
+            url.push_str(&format!("&next_token={}", urlencode(token)));
+        }
+        let page: Page = portal_get(&url, token)?;
+        accounts.extend(page.account_list);
+        match page.next_token {
+            Some(t) if !t.is_empty() => next = Some(t),
+            _ => return Ok(accounts),
+        }
+    }
+}
+
+/// `sso:ListAccountRoles`, following every page, returning just the role names.
+pub fn list_account_roles(
+    region: &str,
+    token: &str,
+    account_id: &str,
+) -> Result<Vec<String>, RuntimeError> {
+    #[derive(Deserialize)]
+    struct Role {
+        #[serde(rename = "roleName")]
+        role_name: String,
+    }
+    #[derive(Deserialize)]
+    struct Page {
+        #[serde(rename = "roleList")]
+        role_list: Vec<Role>,
+        #[serde(rename = "nextToken")]
+        next_token: Option<String>,
+    }
+
+    let mut roles = Vec::new();
+    let mut next: Option<String> = None;
+    loop {
+        let mut url = format!(
+            "https://portal.sso.{region}.amazonaws.com/assignment/roles?max_result=100&account_id={}",
+            urlencode(account_id)
+        );
+        if let Some(token) = &next {
+            url.push_str(&format!("&next_token={}", urlencode(token)));
+        }
+        let page: Page = portal_get(&url, token)?;
+        roles.extend(page.role_list.into_iter().map(|r| r.role_name));
+        match page.next_token {
+            Some(t) if !t.is_empty() => next = Some(t),
+            _ => return Ok(roles),
+        }
+    }
+}
+
+fn portal_get<T: serde::de::DeserializeOwned>(
+    url: &str,
+    token: &str,
+) -> Result<T, RuntimeError> {
+    let response = agent()
+        .get(url)
+        .set("x-amz-sso_bearer_token", token)
+        .set("user-agent", &crate::http::user_agent())
+        .call()
+        .map_err(|e| service_error(e, "ListAccounts"))?;
+    response
+        .into_json()
+        .map_err(|e| sso_error(format!("the SSO portal response was unreadable: {e}")))
+}
+
+/// Percent-encode a query value. The portal's tokens are opaque and may contain anything.
+fn urlencode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
 }

@@ -1296,3 +1296,64 @@ configure sso`" sentence that only the legacy form gets), and the whole of `sso 
 The device flow itself — register, authorize, poll, cache — has not been run against a real
 portal, because doing so registers a client in someone's account and needs a human to
 approve it in a browser.
+
+
+---
+
+## `aws configure sso` and `aws configure sso-session`
+
+**`configure sso-session` is verified identical** across six scenarios — a new session, a
+blank answer taking the default scope, an existing session with one value changed, custom
+scopes, a session name containing whitespace, and all-blank input. In each case the same
+`~/.aws/config` is written, the same closing message printed, and the same exit code
+returned (including **255** when the required session name is never supplied).
+
+Its prompts are verified too: `SSO session name: `, `SSO start URL [None]: `, `SSO region
+[None]: `, `SSO registration scopes [sso:account:access]: `, with the bracketed default
+filled from the existing session so re-running changes only what is retyped. `None` is
+spelled that way because the reference interpolates Python's `None` into the same slot.
+
+`configure sso` asks the same questions behind `SSO session name (Recommended): `, then
+logs in, lists accounts and roles, and writes both the session and the profile — the
+session **first**, so a failure choosing an account still leaves something usable behind.
+
+### The interaction differs; the configuration does not
+
+The reference prompts through `prompt_toolkit`: it redraws the terminal, completes against
+existing values as you type, and picks an account from a full-screen arrow-key menu. Ours
+is line-based, and offers a numbered list. Reproducing that drawing byte for byte is
+neither achievable nor useful — and a numbered list is the one form that also works when
+stdin is a pipe, which is how `configure sso-session` was verified at all.
+
+### Errors from the login are service errors, not configuration errors
+
+A rejection from `sso-oidc` is reported as
+`An error occurred (InvalidRequestException) when calling the StartDeviceAuthorization
+operation: ...` and exits **254**, matching the reference. The exception name comes from
+`x-amzn-errortype`, which the service sends as `InvalidClientException:http://internal...`
+— everything from the first colon is noise — and the human half from the body's
+`error_description`. Before this the user saw a raw JSON body, a leaked internal profile
+label, and exit 253, which says "your configuration is wrong" when the service had
+rejected the request.
+
+The operation named in that line may differ from the reference's for the same input, and
+that is the grant-type divergence showing through: the reference's PKCE registration fails
+at `RegisterClient` where our device registration succeeds and fails at
+`StartDeviceAuthorization` instead.
+
+### Not implemented
+
+- **The legacy format** — declining the session name configures SSO with the settings
+  written straight into the profile. Refused with a message pointing at `configure set`,
+  rather than approximated.
+- **Vanity start-URL resolution.** For a start URL on a domain AWS does not own, the
+  reference fetches it to discover the region and only prompts if that fails. We always
+  prompt, which is the path it takes when resolution fails.
+
+### Not verified end to end
+
+The account and role listing, the selection, and the profile that gets written from them
+are unexercised: they need a token, and getting one registers a client in a real account
+and needs a human at a browser. What is checked is the prompt sequence, the service-error
+shape and exit code, the legacy-format refusal, and — through `configure sso-session`,
+which needs no login — the whole session-writing path they share.

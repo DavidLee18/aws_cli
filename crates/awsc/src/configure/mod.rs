@@ -10,6 +10,7 @@
 //! `add-model`, `export-credentials`, `agent-toolkit`, and the bare interactive
 //! `aws configure` prompt.
 
+pub mod sso;
 pub mod writer;
 
 use crate::args::{Arity, Parsed};
@@ -40,6 +41,9 @@ const PREDEFINED_SECTIONS: &[&str] = &["plugins"];
 /// `--sso-session` swallow the positional after it.
 pub fn flag_arity(flag: &str) -> Arity {
     match flag {
+        // `--no-browser` and `--use-device-code` are switches and take no value; they
+        // fall to the arm below. Listing them here would make `configure sso --no-browser`
+        // swallow the next token.
         "--sso-session" | "--services" | "--format" | "--csv" | "--profile-prefix"
         | "--service-model" | "--service-name" | "--serial-number" | "--duration-seconds" => {
             Arity::One
@@ -54,10 +58,12 @@ pub fn dispatch(parsed: &Parsed) -> Result<ExitCode, Failure> {
         "get" => get(parsed),
         "set" => set(parsed),
         "list-profiles" => list_profiles(parsed),
+        "sso" => sso::sso(parsed),
+        "sso-session" => sso::sso_session(parsed),
         // Everything else the reference offers. Named individually so the error says the
         // command exists and we have not built it, rather than "invalid choice" -- which
         // would suggest a typo.
-        other @ ("sso" | "sso-session" | "mfa-login" | "wizard" | "import" | "add-model"
+        other @ ("mfa-login" | "wizard" | "import" | "add-model"
         | "export-credentials" | "agent-toolkit") => Err(Failure::new(
             exit::GENERAL_ERROR,
             format!("configure {other} is not implemented yet"),
@@ -416,7 +422,7 @@ fn write(update: &Update, path: &std::path::Path) -> Result<ExitCode, Failure> {
 /// `[profile 'my dev']` -- with SINGLE quotes, which is not the double-quoted spelling
 /// botocore's parser is usually shown with. Only whitespace triggers it, so an ordinary
 /// name is untouched.
-fn quote_section_name(name: &str) -> String {
+pub(crate) fn quote_section_name(name: &str) -> String {
     if !name.contains(' ') && !name.contains('\t') {
         return name.to_string();
     }
@@ -449,7 +455,7 @@ fn warn_if_permissive(path: &std::path::Path) {
     let _ = path;
 }
 
-fn config_path() -> std::path::PathBuf {
+pub(crate) fn config_path() -> std::path::PathBuf {
     aws_cli_runtime::credentials::profile::config_file_path()
         .unwrap_or_else(|| std::path::PathBuf::from("config"))
 }

@@ -29,11 +29,20 @@ pub fn login(parsed: &Parsed) -> Result<ExitCode, Failure> {
     let request = build_request(&config, &profile, explicit_session, parsed)?;
     let start_url = request.start_url.clone();
 
-    sso_login::device_login(&request)
-        .map_err(|e| Failure::new(exit::CONFIGURATION, RuntimeError::Configuration(e.to_string())))?;
+    sso_login::device_login(&request).map_err(login_failure)?;
 
     println!("Successfully logged into Start URL: {start_url}");
     Ok(exit::code(exit::SUCCESS))
+}
+
+/// A service rejection is a client error (254); anything else about the login is a
+/// configuration problem (253). The reference draws the same line, and scripts branch on
+/// it.
+pub fn login_failure(error: RuntimeError) -> Failure {
+    match error {
+        e @ RuntimeError::Service { .. } => Failure::new(exit::CLIENT_ERROR, e),
+        e => Failure::new(exit::CONFIGURATION, e),
+    }
 }
 
 pub fn logout(_parsed: &Parsed) -> Result<ExitCode, Failure> {
