@@ -1417,3 +1417,54 @@ unterminated class.
 `aws s3 sync` reports a failed bucket listing as exit **254** where the reference wraps it
 as a `fatal error:` line at **1**. Pre-existing — the released 0.3.1 does the same — and
 separate from the `cp` path fixed here.
+
+
+---
+
+## `request timed out` on a slow uplink: the read timeout was a deadline on the upload
+
+Reported after 0.3.2: uploading ten large `.mkv` files, **two succeeded and eight failed
+with `network error: request timed out`**. Retrying the same eight with `--concurrency 4`
+uploaded all of them, unchanged — which ruled out credentials, the endpoint and the files,
+and pointed at something concurrency-dependent.
+
+`send_async` wrapped the whole call in the read timeout:
+
+```rust
+tokio::time::timeout(transport.read_timeout(), client.request(request))
+```
+
+`client.request` does not resolve until the **request body has been written**, so this
+timed the upload rather than the peer's silence. Fifteen lines below, the response side
+already reasoned correctly — *"a read timeout means the peer went quiet, not the transfer
+must finish within 60 seconds"* — and the request side did the very thing that comment
+warns against.
+
+The arithmetic explains the report exactly. An 8 MiB part must average 140 KB/s to finish
+inside the default 60 s. A large file is split into 8 MiB parts which share one queue with
+every other job, and the pool ramps toward 64 workers; 64 parts sharing a home uplink get
+nowhere near 140 KB/s each, so the part times out with the transfer still progressing. All
+three retry attempts are starved identically, so retrying cannot help. `--concurrency 4`
+gives each part ~16x the share, and it completes. The faster the pool ramps, the more
+certain the failure.
+
+**Reproduced deterministically** against a server that reads the body in 32 KiB chunks with
+a 50 ms pause — steady progress, never silent for more than 50 ms. With an 8 MiB body and
+`--cli-read-timeout 5`, ours failed with `request timed out` where the reference succeeded.
+
+The timeout is now measured from the **last progress the request body made**, not from when
+the request started: the body stream touches a shared beacon as each chunk leaves, and a
+watchdog fires only when it has been silent for the whole read timeout. Both properties are
+tested — a request progressing for longer than the timeout is not killed, and a peer that
+accepts and then goes silent still is.
+
+The duplex path keeps a plain deadline, and correctly: there the response headers arrive
+long before the request body finishes, so the deadline is not timing an upload.
+
+### Not changed, deliberately
+
+The pool does not treat a timeout as a signal to back off. It backs off on measured
+throughput degradation, which is the right control input; with the deadline fixed, an
+over-subscribed uplink is a throughput question rather than a failure, and adding an
+unmeasured input to the control loop is how ramps get worse. Worth revisiting only with
+data from a real slow link.

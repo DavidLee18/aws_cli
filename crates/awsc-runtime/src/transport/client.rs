@@ -18,7 +18,7 @@ use hyper::body::Frame;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Idle connections kept per host. S3 transfers run dozens of requests at once and
 /// dropping a connection between parts would put the handshake straight back.
@@ -273,9 +273,41 @@ impl rustls::client::danger::ServerCertVerifier for NoVerification {
 /// `Content-Length`. S3 requires `Content-Length` on `PutObject` and `UploadPart`, so
 /// every streamed upload stored a zero-byte object while the transfer still reported
 /// success. Reporting the exact size keeps the framing correct.
+/// Records that the request body made progress, so the send can be timed out on
+/// *silence* rather than on total duration.
+///
+/// Milliseconds since a base instant, in an atomic rather than a mutex: it is written on
+/// every body chunk and read by the watchdog, and neither should ever block the other.
+#[derive(Clone)]
+pub(crate) struct Progress {
+    base: Instant,
+    last: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl Progress {
+    fn new() -> Progress {
+        Progress {
+            base: Instant::now(),
+            last: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+
+    fn touch(&self) {
+        let millis = self.base.elapsed().as_millis() as u64;
+        self.last.store(millis, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn idle_for(&self) -> Duration {
+        let last = self.last.load(std::sync::atomic::Ordering::Relaxed);
+        self.base.elapsed().saturating_sub(Duration::from_millis(last))
+    }
+}
+
 struct SizedStream {
     inner: std::pin::Pin<Box<dyn futures_core::Stream<Item = Result<Bytes, std::io::Error>> + Send + Sync>>,
     len: u64,
+    /// Touched as each chunk leaves, which is what makes the send timeout idle-based.
+    progress: Progress,
 }
 
 impl hyper::body::Body for SizedStream {
@@ -286,7 +318,12 @@ impl hyper::body::Body for SizedStream {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
-        self.inner.as_mut().poll_next(cx).map(|next| next.map(|chunk| chunk.map(Frame::data)))
+        let polled =
+            self.inner.as_mut().poll_next(cx).map(|next| next.map(|chunk| chunk.map(Frame::data)));
+        if matches!(polled, std::task::Poll::Ready(Some(Ok(_)))) {
+            self.progress.touch();
+        }
+        polled
     }
 
     fn size_hint(&self) -> hyper::body::SizeHint {
@@ -296,7 +333,10 @@ impl hyper::body::Body for SizedStream {
 
 /// Turn a [`Body`] into something hyper can send, streaming file-backed bodies rather
 /// than reading them into memory.
-async fn into_hyper_body(body: Body) -> Result<BoxBody<Bytes, std::io::Error>, RuntimeError> {
+async fn into_hyper_body(
+    body: Body,
+    progress: &Progress,
+) -> Result<BoxBody<Bytes, std::io::Error>, RuntimeError> {
     match body {
         Body::Empty => Ok(Full::new(Bytes::new())
             .map_err(|e: std::convert::Infallible| match e {})
@@ -318,7 +358,7 @@ async fn into_hyper_body(body: Body) -> Result<BoxBody<Bytes, std::io::Error>, R
                 .await
                 .map_err(|e| RuntimeError::Http(format!("{}: {e}", path.display())))?;
             let stream = tokio_util::io::ReaderStream::with_capacity(file.take(len), 64 * 1024);
-            Ok(SizedStream { inner: Box::pin(stream), len }.boxed())
+            Ok(SizedStream { inner: Box::pin(stream), len, progress: progress.clone() }.boxed())
         }
     }
 }
@@ -368,6 +408,41 @@ fn collect_headers(parts: &hyper::http::response::Parts) -> Vec<(String, String)
         .collect()
 }
 
+/// Await the response, failing only when the request has gone **silent** for the read
+/// timeout -- not when it has simply taken that long.
+///
+/// `client.request` does not resolve until the whole request body has been written, so
+/// timing it as a unit turns the read timeout into a deadline on the upload. That is
+/// invisible on a fast link and fatal on a slow one: an 8 MiB part needs 140 KB/s to
+/// finish inside 60 s, and 64 concurrent parts sharing a home uplink do not get it. The
+/// more the pool ramps, the more certain the failure -- which is why `--concurrency 4`
+/// made a failing upload succeed unchanged. The response side already reasoned this way
+/// per frame; the request side did not.
+async fn await_response<F, T, E>(
+    request: F,
+    transport: &Transport,
+    progress: &Progress,
+) -> Result<Result<T, E>, RuntimeError>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+{
+    // Long enough not to spin, short enough that the reported timeout is close to the
+    // configured one.
+    const CHECK_INTERVAL: Duration = Duration::from_millis(250);
+    let limit = transport.read_timeout();
+    tokio::pin!(request);
+    loop {
+        tokio::select! {
+            outcome = &mut request => return Ok(outcome),
+            _ = tokio::time::sleep(CHECK_INTERVAL) => {
+                if progress.idle_for() > limit {
+                    return Err(RuntimeError::Http("request timed out".to_string()));
+                }
+            }
+        }
+    }
+}
+
 /// Send a request and read the whole response body into memory.
 pub fn send(req: &Request, transport: &Transport) -> Result<Response, RuntimeError> {
     runtime().block_on(send_async(req, transport))
@@ -375,12 +450,12 @@ pub fn send(req: &Request, transport: &Transport) -> Result<Response, RuntimeErr
 
 pub async fn send_async(req: &Request, transport: &Transport) -> Result<Response, RuntimeError> {
     let client = client(transport)?;
-    let hyper_body = into_hyper_body(req.body.clone()).await?;
+    let progress = Progress::new();
+    let hyper_body = into_hyper_body(req.body.clone(), &progress).await?;
     let request = build_hyper_request(req, hyper_body)?;
 
-    let response = tokio::time::timeout(transport.read_timeout(), client.request(request))
-        .await
-        .map_err(|_| RuntimeError::Http("request timed out".to_string()))?
+    let response = await_response(client.request(request), transport, &progress)
+        .await?
         .map_err(|e| RuntimeError::Http(describe(&e)))?;
 
     let (parts, body) = response.into_parts();
@@ -494,7 +569,8 @@ pub fn send_duplex<W: std::io::Write>(
         let request = build_hyper_request(req, ChannelBody { receiver: rx }.boxed())?;
 
         // Resolves once the response *headers* arrive, which for a duplex stream is long
-        // before the request body is finished.
+        // before the request body is finished — so a plain deadline is right here, unlike
+        // the ordinary send where it would be timing the upload.
         let response = tokio::time::timeout(transport.read_timeout(), client.request(request))
             .await
             .map_err(|_| RuntimeError::Http("request timed out".to_string()))?
@@ -542,12 +618,12 @@ pub fn send_to_writer<W: std::io::Write>(
     runtime().block_on(async {
             let client = client(transport)?;
 
-        let hyper_body = into_hyper_body(req.body.clone()).await?;
+        let progress = Progress::new();
+        let hyper_body = into_hyper_body(req.body.clone(), &progress).await?;
         let request = build_hyper_request(req, hyper_body)?;
 
-        let response = tokio::time::timeout(transport.read_timeout(), client.request(request))
-            .await
-            .map_err(|_| RuntimeError::Http("request timed out".to_string()))?
+        let response = await_response(client.request(request), transport, &progress)
+            .await?
             .map_err(|e| RuntimeError::Http(describe(&e)))?;
 
         let (parts, mut body) = response.into_parts();
@@ -612,5 +688,71 @@ mod tests {
         let config =
             tls_config(&Transport { verify_ssl: false, ..Transport::default() });
         assert!(config.is_ok());
+    }
+}
+
+#[cfg(test)]
+mod idle_timeout_tests {
+    use super::*;
+
+    /// The distinction the bug turned on: how long the request has been *running* is not
+    /// how long it has been *silent*.
+    #[test]
+    fn idleness_is_measured_from_the_last_progress_not_from_the_start() {
+        let progress = Progress::new();
+        std::thread::sleep(Duration::from_millis(120));
+        // Still running, but it just made progress, so it is not idle.
+        progress.touch();
+        let idle = progress.idle_for();
+        assert!(idle < Duration::from_millis(60), "idle_for reported {idle:?} right after a touch");
+
+        std::thread::sleep(Duration::from_millis(120));
+        assert!(
+            progress.idle_for() >= Duration::from_millis(100),
+            "silence should accumulate once progress stops"
+        );
+    }
+
+    /// A body that keeps yielding must never trip the timeout, however long it takes in
+    /// total. This is the upload that used to fail: 8 MiB of steady progress against a
+    /// deadline shorter than the transfer.
+    #[test]
+    fn a_steadily_progressing_request_does_not_time_out() {
+        let transport = Transport { read_timeout: Some(1), ..Transport::default() };
+        let progress = Progress::new();
+        let ticker = progress.clone();
+
+        runtime().block_on(async move {
+            // Runs for ~1.5s -- longer than the 1s timeout -- touching every 100ms.
+            let request = async move {
+                for _ in 0..15 {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    ticker.touch();
+                }
+                Ok::<u8, u8>(7)
+            };
+            let outcome = await_response(request, &transport, &progress).await;
+            assert!(outcome.is_ok(), "a progressing request was timed out");
+            assert_eq!(outcome.unwrap(), Ok(7));
+        });
+    }
+
+    /// And silence must still be fatal, or the timeout would protect nothing.
+    #[test]
+    fn a_silent_request_still_times_out() {
+        let transport = Transport { read_timeout: Some(1), ..Transport::default() };
+        let progress = Progress::new();
+
+        runtime().block_on(async move {
+            let request = async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Ok::<u8, u8>(7)
+            };
+            let outcome = await_response(request, &transport, &progress).await;
+            match outcome {
+                Err(RuntimeError::Http(message)) => assert_eq!(message, "request timed out"),
+                other => panic!("a silent request should time out, got {other:?}"),
+            }
+        });
     }
 }
