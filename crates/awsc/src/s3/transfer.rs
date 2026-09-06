@@ -16,7 +16,7 @@ pub use super::conn::Conn;
 use awsc_runtime::http;
 use super::delete;
 use super::pool::Pool;
-use super::progress::Progress;
+use super::progress::{Counter, Progress};
 use super::{param_error, uri::Location, xml};
 use crate::args::Parsed;
 use crate::client::{Client, Globals};
@@ -545,7 +545,10 @@ fn run(parsed: &Parsed, globals: &Globals, verb: Verb) -> Result<ExitCode, Failu
         Err(failure) if failure.exit_code() == exit::PARAM_VALIDATION => Err(failure),
         Err(failure) => {
             if !options.quiet {
-                eprintln!("fatal error: {}", failure.message());
+                eprintln!(
+                    "{}",
+                    crate::color::error(&format!("fatal error: {}", failure.message()))
+                );
             }
             Ok(exit::code(1))
         }
@@ -707,8 +710,10 @@ fn report_failure(progress: &Progress, options: &Options, line: &str) {
     if options.quiet {
         return;
     }
-    progress.clear();
-    eprintln!("{line}");
+    // Through the bar rather than around it: `eprintln!` on its own would be written over
+    // the frame still on screen, and clearing the bar for good would mean one failed file
+    // among a thousand left the rest of the transfer with no display at all.
+    progress.eprintln(&crate::color::error(line));
 }
 
 pub fn verb_word(verb: Verb, uploading: bool) -> &'static str {
@@ -725,22 +730,31 @@ pub fn verb_word(verb: Verb, uploading: bool) -> &'static str {
 /// path. It is a *warning*, not an error: the walk continues and the command exits 2.
 fn warn_unreadable(path: &std::path::Path, quiet: bool) {
     if !quiet {
-        eprintln!(
+        warn(&format!(
             "warning: Skipping file {}. File/Directory is not readable.",
             abspath(&path.to_string_lossy())
-        );
+        ));
     }
 }
 
 /// Special files have no contents to upload, and the reference says so distinctly.
 fn warn_special(path: &std::path::Path, quiet: bool) {
     if !quiet {
-        eprintln!(
+        warn(&format!(
             "warning: Skipping file {}. File is character special device, block special \
              device, FIFO, or socket.",
             abspath(&path.to_string_lossy())
-        );
+        ));
     }
+}
+
+/// Print a warning in yellow, on stderr.
+///
+/// The leading erase matters: warnings come out of the scan, which is drawing its own
+/// counter on that row, and out of the transfer, which is drawing the bar there. Without
+/// it the warning lands on top of a line that is still on screen.
+fn warn(text: &str) {
+    eprintln!("\r\x1b[2K{}", crate::color::warning(text));
 }
 
 /// Can this file actually be opened?
@@ -765,8 +779,13 @@ pub fn scan_local(
     recursive: bool,
     follow_symlinks: bool,
     quiet: bool,
+    counting: bool,
 ) -> Result<(Vec<Item>, u64), Failure> {
     let path = std::path::Path::new(root);
+    // The walk happens before the first byte moves, and on a large tree it is a pause
+    // with nothing on screen. Reporting the running count is the difference between a
+    // slow start and an apparent hang.
+    let counter = Counter::new(counting, "files");
     let io = |e: std::io::Error| Failure::new(exit::GENERAL_ERROR, e);
     let mut warnings = 0u64;
     if !recursive {
@@ -840,9 +859,11 @@ pub fn scan_local(
                     size: meta.len(),
                     modified: mtime_seconds(&meta),
                 });
+                counter.add(1);
             }
         }
     }
+    counter.clear();
     // Byte order, so a listing matches S3's own collation.
     out.sort_by(|a, b| a.dest.cmp(&b.dest));
     Ok((out, warnings))
@@ -870,7 +891,7 @@ pub fn scan_local_if_present(root: &str) -> Result<Vec<Item>, Failure> {
     }
     // The destination side of a sync: warnings about it are not the user's concern here,
     // since nothing is being read from it.
-    Ok(scan_local(root, true, true, true)?.0)
+    Ok(scan_local(root, true, true, true, false)?.0)
 }
 
 /// Execute a sync plan whose transfers are uploads.
@@ -980,6 +1001,7 @@ pub fn sync_download(
             options,
             "download",
             result,
+            &item.source,
             &format!("s3://{bucket}/{}", item.source),
             &display_local(&item.dest),
         );
@@ -994,15 +1016,18 @@ pub fn sync_download(
                 if !options.quiet && !options.only_show_errors {
                     progress.println(&format!("delete: {}", display_local(&item.source)));
                 }
-                progress.finish_file();
+                progress.finish_file(&item.source);
             }
             Err(e) => {
                 outcome.failed.fetch_add(1, Ordering::Relaxed);
                 if !options.quiet {
-                    progress.clear();
-                    eprintln!("delete failed: {} {}", display_local(&item.source), e.message());
+                    progress.eprintln(&crate::color::error(&format!(
+                        "delete failed: {} {}",
+                        display_local(&item.source),
+                        e.message()
+                    )));
                 }
-                progress.finish_file();
+                progress.finish_file(&item.source);
             }
         }
     }
@@ -1053,9 +1078,12 @@ pub fn sync_copy(
 
     let pool = Pool::new(options.concurrency);
     pool.run(&copies, options.concurrency.is_none(), |item| {
+        progress.begin_file(&item.source, &item.source, item.size);
         let result = copy_object(conn, source_bucket, item, options).inspect(|_| {
             pool.record_bytes(item.size);
-            progress.add_bytes(item.size);
+            // The bytes move inside S3, so there is no stream to watch: one object, one
+            // step.
+            progress.add_file_bytes(&item.source, item.size);
         });
         finish(
             &progress,
@@ -1063,6 +1091,7 @@ pub fn sync_copy(
             options,
             "copy",
             result,
+            &item.source,
             &format!("s3://{source_bucket}/{}", item.source),
             &format!("s3://{}", display_key(conn, &item.dest)),
         );
@@ -1093,12 +1122,13 @@ fn execute_deletes(
             Err(message) => {
                 outcome.failed.fetch_add(1, Ordering::Relaxed);
                 if !options.quiet {
-                    progress.clear();
-                    eprintln!("delete failed: {target} {message}");
+                    progress.eprintln(&crate::color::error(&format!(
+                        "delete failed: {target} {message}"
+                    )));
                 }
             }
         }
-        progress.finish_file();
+        progress.finish_file(key);
     });
 }
 
@@ -1203,7 +1233,7 @@ fn multipart_copy(
                 .to_string();
             etags.lock().expect("mutex").push((*part, etag));
             pool.record_bytes(end - start + 1);
-            progress.add_bytes(end - start + 1);
+            progress.add_file_bytes(&item.source, end - start + 1);
             Ok(())
         })();
         if let Err(e) = result {
@@ -1320,9 +1350,11 @@ pub fn dir_prefix(key: &str) -> String {
 /// Fans out over sub-prefixes where the keyspace has them: the continuation chain of a
 /// single prefix is strictly sequential, so a deep listing is round-trip bound rather than
 /// bandwidth bound. See [`super::list`].
-pub fn scan_s3(conn: &Conn, prefix: &str) -> Result<Vec<Item>, Failure> {
+pub fn scan_s3(conn: &Conn, prefix: &str, counting: bool) -> Result<Vec<Item>, Failure> {
     let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) * 2;
-    let entries = super::list::deep(conn, prefix, workers)?;
+    let counter = Counter::new(counting, "objects");
+    let entries = super::list::deep(conn, prefix, workers, &counter)?;
+    counter.clear();
     Ok(entries
         .into_iter()
         .filter(|entry| {
@@ -1434,7 +1466,13 @@ fn upload(
     verb: Verb,
 ) -> Result<ExitCode, Failure> {
     let (mut items, scan_warnings) =
-        scan_local(local, options.recursive, options.follow_symlinks, options.quiet)?;
+        scan_local(
+            local,
+            options.recursive,
+            options.follow_symlinks,
+            options.quiet,
+            options.progress && !options.quiet,
+        )?;
     if !options.recursive {
         let base = std::path::Path::new(local)
             .file_name()
@@ -1526,11 +1564,12 @@ pub fn execute_uploads(
     pool.run(&jobs, options.concurrency.is_none(), |job| {
         match job {
             Job::Whole { item } => {
-                let result = put_object(conn, &items[*item], options);
+                let item_ref = &items[*item];
+                progress.begin_file(&item_ref.source, &display_local(&item_ref.source), item_ref.size);
+                let result = put_object(conn, item_ref, options, progress);
                 match result {
                     Ok(()) => {
                         pool.record_bytes(items[*item].size);
-                        progress.add_bytes(items[*item].size);
                         report_item(progress, outcome, options, word, Ok(()), &items[*item], conn);
                     }
                     Err(e) => report_item(
@@ -1545,11 +1584,17 @@ pub fn execute_uploads(
                 }
                 let offset = (part - 1) * upload.chunk;
                 let length = upload.chunk.min(items[*item].size - offset);
-                match upload_part(conn, &items[*item], upload, *part, offset, length) {
+                // Every part of one object reports into one row, whichever part gets
+                // here first.
+                progress.begin_file(
+                    &items[*item].source,
+                    &display_local(&items[*item].source),
+                    items[*item].size,
+                );
+                match upload_part(conn, &items[*item], upload, *part, offset, length, progress) {
                     Ok(etag) => {
                         etags.lock().expect("mutex").push((*item, *part, etag));
                         pool.record_bytes(length);
-                        progress.add_bytes(length);
                     }
                     Err(e) => {
                         if e.service_error_code.as_deref() == Some("SlowDown") {
@@ -1623,6 +1668,7 @@ fn begin_upload(
     Ok(Upload { item: index, id, chunk: chunk_size_for(item.size, options.multipart_chunksize), path })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn upload_part(
     conn: &Conn,
     item: &Item,
@@ -1630,18 +1676,20 @@ fn upload_part(
     part: u64,
     offset: u64,
     length: u64,
+    progress: &Progress,
 ) -> Result<String, Failure> {
     // Described, not read: the part is streamed off disk while the request is in flight,
     // so a worker costs a chunk buffer rather than a whole part. With ten workers and
     // 64 MiB parts that is the difference between a few hundred kilobytes and 640 MiB.
     let body = http::Body::FileRange { path: item.source.clone().into(), offset, len: length };
-    let response = conn.send_checked(
+    let response = conn.send_checked_watched(
         "UploadPart",
         "PUT",
         &upload.path,
         &format!("partNumber={part}&uploadId={}", super::encode_query(&upload.id)),
         &[],
         body,
+        Some(progress.watch(&item.source)),
     )?;
     Ok(response.header("etag").unwrap_or_default())
 }
@@ -1696,6 +1744,7 @@ fn report_item(
         options,
         word,
         result,
+        &item.source,
         &display_local(&item.source),
         &format!("s3://{}", display_key(conn, &item.dest)),
     );
@@ -1712,29 +1761,39 @@ pub fn display_key(conn: &Conn, key: &str) -> String {
     format!("{bucket}/{key}")
 }
 
+/// `key` identifies the file in the in-flight list, which is not the same string as the
+/// `from` shown to the user: uploads list a local path and report it relative, downloads
+/// list a key and report it as a URL.
+#[allow(clippy::too_many_arguments)]
 fn finish(
     progress: &Progress,
     outcome: &Outcome,
     options: &Options,
     word: &str,
     result: Result<(), Failure>,
+    key: &str,
     from: &str,
     to: &str,
 ) {
     match result {
         Ok(()) => {
             report(progress, options, &format!("{word}: {from} to {to}"));
-            progress.finish_file();
+            progress.finish_file(key);
         }
         Err(failure) => {
             outcome.failed.fetch_add(1, Ordering::Relaxed);
             report_failure(progress, options, &format!("{word} failed: {from} to {to} {}", failure.message()));
-            progress.finish_file();
+            progress.finish_file(key);
         }
     }
 }
 
-fn put_object(conn: &Conn, item: &Item, options: &Options) -> Result<(), Failure> {
+fn put_object(
+    conn: &Conn,
+    item: &Item,
+    options: &Options,
+    progress: &Progress,
+) -> Result<(), Failure> {
     // Streamed off disk rather than read up front, so a whole-file upload costs a chunk
     // buffer no matter how large the file is. `item.size` comes from the scan that
     // planned this transfer.
@@ -1744,7 +1803,17 @@ fn put_object(conn: &Conn, item: &Item, options: &Options) -> Result<(), Failure
         len: item.size,
     };
     let headers = object_headers(options, &item.dest);
-    conn.send_checked("PutObject", "PUT", &conn.object_path(&item.dest), "", &headers, body)?;
+    conn.send_checked_watched(
+        "PutObject",
+        "PUT",
+        &conn.object_path(&item.dest),
+        "",
+        &headers,
+        body,
+        // Watched, so the bar moves while a single large object is going up rather than
+        // once it has gone.
+        Some(progress.watch(&item.source)),
+    )?;
     Ok(())
 }
 
@@ -1774,7 +1843,7 @@ fn download(
 ) -> Result<ExitCode, Failure> {
     let mut items = if options.recursive {
         let root = format!("{bucket}/{}", key.trim_end_matches('/'));
-        let mut found = scan_s3(conn, &dir_prefix(key))?;
+        let mut found = scan_s3(conn, &dir_prefix(key), options.progress && !options.quiet)?;
         found.retain(|i| included(&format!("{bucket}/{}", i.source), &root, &options.excludes));
         found
     } else {
@@ -1858,6 +1927,7 @@ fn download(
                 options,
                 word,
                 result,
+                &items[*item].source,
                 &format!("s3://{bucket}/{}", items[*item].source),
                 &display_local(&items[*item].dest),
             );
@@ -1870,20 +1940,25 @@ fn download(
             let start = index * chunk;
             let end = (start + chunk).min(items[*item].size) - 1;
             let file = handles[*item].as_ref().expect("large items have a handle");
+            progress.begin_file(
+                &items[*item].source,
+                &items[*item].source,
+                items[*item].size,
+            );
             let result = (|| -> Result<(), Failure> {
                 let mut headers = sse_c_headers(options);
                 headers.push(("range".to_string(), format!("bytes={start}-{end}")));
-                let response = conn.send_checked(
+                let response = conn.send_checked_watched(
                     "GetObject",
                     "GET",
                     &conn.object_path(&items[*item].source),
                     "",
                     &headers,
                     http::Body::Empty,
+                    Some(progress.watch(&items[*item].source)),
                 )?;
                 write_all_at(file, response.bytes(), start)?;
                 pool.record_bytes(response.bytes().len() as u64);
-                progress.add_bytes(response.bytes().len() as u64);
                 Ok(())
             })();
             if let Err(e) = result {
@@ -1919,6 +1994,7 @@ fn download(
             options,
             word,
             result,
+            &item.source,
             &format!("s3://{bucket}/{}", item.source),
             &display_local(&item.dest),
         );
@@ -1944,19 +2020,21 @@ fn get_object(
     progress: &Progress,
     pool: &Pool,
 ) -> Result<(), Failure> {
-    let response = conn.send_checked(
+    progress.begin_file(&item.source, &item.source, item.size);
+    let response = conn.send_checked_watched(
         "GetObject",
         "GET",
         &conn.object_path(&item.source),
         "",
         &sse_c_headers(options),
         http::Body::Empty,
+        // The response body is what moves here, and the watcher counts it as it arrives.
+        Some(progress.watch(&item.source)),
     )?;
     create_parent(&item.dest)?;
     std::fs::write(&item.dest, response.bytes())
         .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
     pool.record_bytes(response.bytes().len() as u64);
-    progress.add_bytes(response.bytes().len() as u64);
     Ok(())
 }
 
@@ -1971,7 +2049,7 @@ fn copy(
 ) -> Result<ExitCode, Failure> {
     let mut items = if options.recursive {
         let root = format!("{source_bucket}/{}", source_key.trim_end_matches('/'));
-        let mut found = scan_s3(source_conn, &dir_prefix(source_key))?;
+        let mut found = scan_s3(source_conn, &dir_prefix(source_key), options.progress && !options.quiet)?;
         found.retain(|i| {
             included(&format!("{source_bucket}/{}", i.source), &root, &options.excludes)
         });
@@ -2026,6 +2104,7 @@ fn copy(
     let moved: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
     for item in large {
+        progress.begin_file(&item.source, &item.source, item.size);
         let result = multipart_copy(conn, source_conn, source_bucket, item, options, &pool, &progress);
         if verb == Verb::Move && result.is_ok() {
             moved.lock().expect("moved keys mutex").push(item.source.clone());
@@ -2036,6 +2115,7 @@ fn copy(
             options,
             word,
             result,
+            &item.source,
             &format!("s3://{source_bucket}/{}", item.source),
             &format!("s3://{}", display_key(conn, &item.dest)),
         );
@@ -2049,13 +2129,13 @@ fn copy(
                 format!("/{source_bucket}/{}", super::encode_key(&item.source)),
             ));
             conn.send_checked("CopyObject", "PUT", &conn.object_path(&item.dest), "", &headers, http::Body::Empty)?;
-            progress.add_bytes(item.size);
+            progress.add_file_bytes(&item.source, item.size);
             Ok(())
         })();
         if verb == Verb::Move && result.is_ok() {
             moved.lock().expect("moved keys mutex").push(item.source.clone());
         }
-        finish(&progress, &outcome, options, word, result,
+        finish(&progress, &outcome, options, word, result, &item.source,
             &format!("s3://{source_bucket}/{}", item.source),
             &format!("s3://{}", display_key(conn, &item.dest)));
     });
@@ -2081,7 +2161,7 @@ fn remove(conn: &Conn, key: &str, options: &Options) -> Result<ExitCode, Failure
     let items = if options.recursive {
         let bucket = display_key(conn, "");
         let root = format!("{}{}", bucket, key.trim_end_matches('/'));
-        let mut found = scan_s3(conn, &dir_prefix(key))?;
+        let mut found = scan_s3(conn, &dir_prefix(key), options.progress && !options.quiet)?;
         found.retain(|i| included(&format!("{bucket}{}", i.source), &root, &options.excludes));
         found
     } else {
@@ -2111,7 +2191,7 @@ fn remove(conn: &Conn, key: &str, options: &Options) -> Result<ExitCode, Failure
                 report_failure(&progress, options, &format!("delete failed: {target} {message}"));
             }
         }
-        progress.finish_file();
+        progress.finish_file(key);
     });
 
     progress.clear();
@@ -2300,7 +2380,7 @@ mod scan_regression_tests {
         std::fs::write(locked.join("inner.txt"), b"x").expect("write");
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("chmod");
 
-        let scanned = scan_local(&base.to_string_lossy(), true, true, true);
+        let scanned = scan_local(&base.to_string_lossy(), true, true, true, false);
 
         // Restore before asserting, so a failure cannot leave an unremovable directory.
         let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
@@ -2330,7 +2410,7 @@ mod scan_regression_tests {
         std::fs::write(&shut, b"x").expect("write");
         std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).expect("chmod");
 
-        let scanned = scan_local(&base.to_string_lossy(), true, true, true);
+        let scanned = scan_local(&base.to_string_lossy(), true, true, true, false);
         let _ = std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o644));
         let _ = std::fs::remove_dir_all(&base);
 

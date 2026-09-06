@@ -667,7 +667,7 @@ upload, download and s3→s3 copy all round-trip with identical SHA-256, includi
 object that exercises the multipart and ranged-download paths. Argument handling, filter
 semantics and error output match the reference across twenty cases.
 
-**Three deliberate UI departures**, requested and worth stating plainly:
+**Six deliberate UI departures**, requested and worth stating plainly:
 
 1. **The source is scanned in full before any transfer starts**, so progress totals are
    exact. The reference streams its listing into the transfer and shows `~`-prefixed
@@ -681,6 +681,48 @@ semantics and error output match the reference across twenty cases.
    returns to the start of only the last screen row, and the bar smears down the screen
    leaving duplicate rows. Measuring the width (via `ioctl`, then `COLUMNS`, then 80) and
    truncating means exactly one row is rewritten in place.
+4. **Up to five in-flight files are listed above the summary**, each with its own
+   percentage and ETA, and each dropped from the list the moment that file finishes. With
+   more than five going at once the list ends with `… and N more`. The reference shows
+   only the aggregate line.
+5. **Both the summary and each file row carry an ETA**, from the average rate rather than
+   an instantaneous one — on a link that fluctuates, the instantaneous rate produces an
+   estimate that jumps around too much to read. Before a rate exists the ETA is
+   `--:--:--` rather than a made-up number.
+6. **Warnings are yellow and failures are red** on stderr, under the existing global
+   `--color on|off|auto`. `auto` means a terminal on stderr, with `NO_COLOR` and
+   `TERM=dumb` both vetoing it. Result lines on stdout are never coloured: they are
+   routinely piped into another program, and escape sequences would change what that
+   program reads.
+
+**The display updates at 5 Hz, and moves within a single part.** Two things were wrong
+before, and they compounded: progress advanced only when a whole request finished, and the
+screen was only redrawn when progress advanced. On a home uplink an 8 MiB part takes
+several seconds, so the bar sat still and then jumped — and a stalled transfer looked
+exactly like a slow one.
+
+- Byte counts now come from the body stream itself. `Transport` carries an optional
+  `Watcher`, and `SizedStream::poll_frame` reports each 64 KiB chunk as it goes out; the
+  response side reports each chunk as it arrives, which covers downloads. An 8 MiB part
+  reports about 130 times instead of once.
+- A retry has to take those bytes *back*. The watcher is per request and remembers what
+  that attempt reported, so `Conn::send_watched` can rewind it before re-sending —
+  otherwise a retried part would be counted twice and the total would run past the file
+  size.
+- A ticker thread redraws every 200 ms regardless of whether anything reported, so a
+  stalled transfer is visibly stalled.
+
+**The scan is no longer silent.** It runs before the first byte moves, and on a large tree
+that is a pause with nothing on screen, which reads as a hang — the first thing the user
+sees is the worst case. Both the local walk and the S3 listing now report a running count
+(`Counting files… 15955`), erased when the transfer's own display takes over. The listing
+reports per page rather than per shard, so a bucket that is hundreds of round trips shows
+movement throughout.
+
+The two mutexes behind the display have an order that must be kept: `screen` before
+`active`, never the reverse. Printing a result line holds `screen` across erase, print and
+redraw — otherwise the ticker can redraw the bar into the gap and the result line lands on
+top of it — and building a frame needs `active` while that is held.
 
 Bugs this work surfaced in code already committed:
 

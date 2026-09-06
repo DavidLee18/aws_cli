@@ -236,6 +236,7 @@ impl<'a> Client<'a> {
                 ca_bundle: globals.ca_bundle.clone(),
                 read_timeout: globals.read_timeout,
                 connect_timeout: globals.connect_timeout,
+                watch: None,
             },
             retry: RefCell::new(retry::RetryPolicy::from_environment()),
             debug: globals.debug,

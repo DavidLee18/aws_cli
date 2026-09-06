@@ -27,18 +27,55 @@ const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 
 type HttpsClient = Client<hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>, BoxBody<Bytes, std::io::Error>>;
 
+/// Notified as body bytes actually move, so a caller can report progress at wire
+/// granularity rather than at request granularity.
+///
+/// Without this the only progress signal is "a request finished", which for an 8 MiB
+/// part over a home uplink is one event every several seconds — a progress bar that sits
+/// still and then jumps.
+pub trait Watcher: Send + Sync {
+    /// `count` more bytes have moved.
+    fn advance(&self, count: u64);
+    /// The request is about to be sent again from the start: whatever this attempt
+    /// reported never arrived, and should be taken back off the total.
+    fn restart(&self);
+}
+
 /// Transport-level options from the global arguments.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Transport {
     pub verify_ssl: bool,
     pub ca_bundle: Option<String>,
     pub read_timeout: Option<u64>,
     pub connect_timeout: Option<u64>,
+    /// Per-request, despite living on the shared options: callers that want byte-level
+    /// progress clone the transport and attach a watcher for that one request. The
+    /// pooled client is built once from the first transport it sees and ignores this.
+    pub watch: Option<std::sync::Arc<dyn Watcher>>,
+}
+
+/// Hand-written because a `dyn Watcher` is not `Debug`, and the field is noise anyway.
+impl std::fmt::Debug for Transport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Transport")
+            .field("verify_ssl", &self.verify_ssl)
+            .field("ca_bundle", &self.ca_bundle)
+            .field("read_timeout", &self.read_timeout)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("watch", &self.watch.is_some())
+            .finish()
+    }
 }
 
 impl Default for Transport {
     fn default() -> Self {
-        Transport { verify_ssl: true, ca_bundle: None, read_timeout: None, connect_timeout: None }
+        Transport {
+            verify_ssl: true,
+            ca_bundle: None,
+            read_timeout: None,
+            connect_timeout: None,
+            watch: None,
+        }
     }
 }
 
@@ -308,6 +345,9 @@ struct SizedStream {
     len: u64,
     /// Touched as each chunk leaves, which is what makes the send timeout idle-based.
     progress: Progress,
+    /// Told how many bytes each chunk carried, which is what makes the progress bar
+    /// move during a part rather than only at the end of one.
+    watch: Option<std::sync::Arc<dyn Watcher>>,
 }
 
 impl hyper::body::Body for SizedStream {
@@ -318,12 +358,14 @@ impl hyper::body::Body for SizedStream {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
-        let polled =
-            self.inner.as_mut().poll_next(cx).map(|next| next.map(|chunk| chunk.map(Frame::data)));
-        if matches!(polled, std::task::Poll::Ready(Some(Ok(_)))) {
+        let polled = self.inner.as_mut().poll_next(cx);
+        if let std::task::Poll::Ready(Some(Ok(chunk))) = &polled {
             self.progress.touch();
+            if let Some(watch) = &self.watch {
+                watch.advance(chunk.len() as u64);
+            }
         }
-        polled
+        polled.map(|next| next.map(|chunk| chunk.map(Frame::data)))
     }
 
     fn size_hint(&self) -> hyper::body::SizeHint {
@@ -336,6 +378,7 @@ impl hyper::body::Body for SizedStream {
 async fn into_hyper_body(
     body: Body,
     progress: &Progress,
+    watch: Option<std::sync::Arc<dyn Watcher>>,
 ) -> Result<BoxBody<Bytes, std::io::Error>, RuntimeError> {
     match body {
         Body::Empty => Ok(Full::new(Bytes::new())
@@ -358,7 +401,8 @@ async fn into_hyper_body(
                 .await
                 .map_err(|e| RuntimeError::Http(format!("{}: {e}", path.display())))?;
             let stream = tokio_util::io::ReaderStream::with_capacity(file.take(len), 64 * 1024);
-            Ok(SizedStream { inner: Box::pin(stream), len, progress: progress.clone() }.boxed())
+            Ok(SizedStream { inner: Box::pin(stream), len, progress: progress.clone(), watch }
+                .boxed())
         }
     }
 }
@@ -451,7 +495,7 @@ pub fn send(req: &Request, transport: &Transport) -> Result<Response, RuntimeErr
 pub async fn send_async(req: &Request, transport: &Transport) -> Result<Response, RuntimeError> {
     let client = client(transport)?;
     let progress = Progress::new();
-    let hyper_body = into_hyper_body(req.body.clone(), &progress).await?;
+    let hyper_body = into_hyper_body(req.body.clone(), &progress, transport.watch.clone()).await?;
     let request = build_hyper_request(req, hyper_body)?;
 
     let response = await_response(client.request(request), transport, &progress)
@@ -479,6 +523,9 @@ pub async fn send_async(req: &Request, transport: &Transport) -> Result<Response
     {
         let frame = frame.map_err(|e| RuntimeError::Http(e.to_string()))?;
         if let Ok(chunk) = frame.into_data() {
+            if let Some(watch) = &transport.watch {
+                watch.advance(chunk.len() as u64);
+            }
             collected.extend_from_slice(&chunk);
         }
     }
@@ -619,7 +666,8 @@ pub fn send_to_writer<W: std::io::Write>(
             let client = client(transport)?;
 
         let progress = Progress::new();
-        let hyper_body = into_hyper_body(req.body.clone(), &progress).await?;
+        let hyper_body =
+            into_hyper_body(req.body.clone(), &progress, transport.watch.clone()).await?;
         let request = build_hyper_request(req, hyper_body)?;
 
         let response = await_response(client.request(request), transport, &progress)
@@ -645,6 +693,9 @@ pub fn send_to_writer<W: std::io::Write>(
         {
             let frame = frame.map_err(|e| RuntimeError::Http(e.to_string()))?;
             if let Ok(chunk) = frame.into_data() {
+                if let Some(watch) = &transport.watch {
+                    watch.advance(chunk.len() as u64);
+                }
                 sink.write_all(&chunk).map_err(|e| RuntimeError::Http(e.to_string()))?;
             }
         }

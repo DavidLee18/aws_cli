@@ -42,6 +42,7 @@ impl Conn {
                 ca_bundle: globals.ca_bundle.clone(),
                 read_timeout: globals.read_timeout,
                 connect_timeout: globals.connect_timeout,
+                watch: None,
             },
             debug: globals.debug,
             no_sign_request: globals.no_sign_request,
@@ -58,6 +59,26 @@ impl Conn {
         headers: &[(String, String)],
         body: http::Body,
     ) -> Result<http::Response, Failure> {
+        self.send_watched(method, path, query, headers, body, None)
+    }
+
+    /// As [`Conn::send`], with a watcher told how many body bytes have actually moved.
+    ///
+    /// The watcher is attached to a *clone* of the transport rather than to the shared
+    /// one: many requests run at once on the same `Conn`, and each needs its own.
+    pub fn send_watched(
+        &self,
+        method: &str,
+        path: &str,
+        query: &str,
+        headers: &[(String, String)],
+        body: http::Body,
+        watch: Option<std::sync::Arc<dyn http::Watcher>>,
+    ) -> Result<http::Response, Failure> {
+        let transport = match &watch {
+            None => self.transport.clone(),
+            Some(watch) => http::Transport { watch: Some(watch.clone()), ..self.transport.clone() },
+        };
         let mut policy = retry::RetryPolicy::from_environment();
         let invocation_id = retry::new_invocation_id();
         let max_attempts = policy.max_attempts;
@@ -87,7 +108,7 @@ impl Conn {
                 eprintln!("{method} {}{path}?{query}", request.endpoint.url);
             }
 
-            let sent = http::send(&request, &signed, &self.transport);
+            let sent = http::send(&request, &signed, &transport);
             let delay = match &sent {
                 Err(e) => {
                     let message = e.to_string();
@@ -129,6 +150,12 @@ impl Conn {
                         );
                     }
                     std::thread::sleep(delay);
+                    // Whatever the failed attempt reported never landed; a retry sends
+                    // the body from the start, so counting both would push the total
+                    // past the file size.
+                    if let Some(watch) = &watch {
+                        watch.restart();
+                    }
                     attempt += 1;
                 }
                 None => {
@@ -150,7 +177,22 @@ impl Conn {
         headers: &[(String, String)],
         body: http::Body,
     ) -> Result<http::Response, Failure> {
-        let response = self.send(method, path, query, headers, body)?;
+        self.send_checked_watched(operation, method, path, query, headers, body, None)
+    }
+
+    /// As [`Conn::send_checked`], with a body-byte watcher.
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_checked_watched(
+        &self,
+        operation: &str,
+        method: &str,
+        path: &str,
+        query: &str,
+        headers: &[(String, String)],
+        body: http::Body,
+        watch: Option<std::sync::Arc<dyn http::Watcher>>,
+    ) -> Result<http::Response, Failure> {
+        let response = self.send_watched(method, path, query, headers, body, watch)?;
         if response.status >= 400 {
             return Err(super::service_error(operation, &response));
         }

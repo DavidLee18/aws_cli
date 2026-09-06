@@ -9,5 +9,5 @@ pub mod client;
 pub use body::Body;
 pub use client::{
     send, send_async, send_duplex, send_to_writer, BodySender, Request, Response, ResponseHead,
-    StreamClosed, Transport,
+    StreamClosed, Transport, Watcher,
 };

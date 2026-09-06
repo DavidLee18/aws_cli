@@ -5,7 +5,7 @@ use crate::sigv4::{self, Credentials, SigningContext, SigningRequest};
 use crate::transport::{self};
 use crate::RuntimeError;
 
-pub use crate::transport::{Body, BodySender, Response, ResponseHead, Transport};
+pub use crate::transport::{Body, BodySender, Response, ResponseHead, Transport, Watcher};
 
 /// A request built by the protocol layer, ready to sign and send.
 pub struct PreparedRequest {

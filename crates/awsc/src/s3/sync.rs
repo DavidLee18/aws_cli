@@ -84,13 +84,19 @@ pub fn run(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> {
             let conn = transfer::Conn::from_client(&client, globals);
             let root = transfer::abspath(local);
             let (mut left, scan_warnings) =
-                transfer::scan_local(local, true, options.follow_symlinks, options.quiet)?;
+                transfer::scan_local(
+                    local,
+                    true,
+                    options.follow_symlinks,
+                    options.quiet,
+                    options.progress && !options.quiet,
+                )?;
             // Patterns are anchored to the ABSOLUTISED root, so the paths matched against
             // them have to be absolute too -- see the note in `transfer::upload`.
             left.retain(|i| {
                 transfer::included(&transfer::abspath(&i.source), &root, &options.excludes)
             });
-            let right = transfer::scan_s3(&conn, &transfer::dir_prefix(key))?;
+            let right = transfer::scan_s3(&conn, &transfer::dir_prefix(key), options.progress && !options.quiet)?;
             let plan = plan(&left, &right, options.strategy, Verb::Sync, true, options.delete);
             transfer::sync_upload(&conn, plan, key, &options, bucket, scan_warnings)
         }
@@ -98,7 +104,7 @@ pub fn run(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> {
             let client = Client::for_bucket(&model, globals, Some(bucket))?;
             let conn = transfer::Conn::from_client(&client, globals);
             let root = format!("{bucket}/{}", key.trim_end_matches('/'));
-            let mut left = transfer::scan_s3(&conn, &transfer::dir_prefix(key))?;
+            let mut left = transfer::scan_s3(&conn, &transfer::dir_prefix(key), options.progress && !options.quiet)?;
             left.retain(|i| {
                 transfer::included(&format!("{bucket}/{}", i.source), &root, &options.excludes)
             });
@@ -115,11 +121,11 @@ pub fn run(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> {
             let source_client = Client::for_bucket(&model, globals, Some(sb))?;
             let source_conn = transfer::Conn::from_client(&source_client, globals);
             let root = format!("{sb}/{}", sk.trim_end_matches('/'));
-            let mut left = transfer::scan_s3(&source_conn, &transfer::dir_prefix(sk))?;
+            let mut left = transfer::scan_s3(&source_conn, &transfer::dir_prefix(sk), options.progress && !options.quiet)?;
             left.retain(|i| {
                 transfer::included(&format!("{sb}/{}", i.source), &root, &options.excludes)
             });
-            let right = transfer::scan_s3(&conn, &transfer::dir_prefix(dk))?;
+            let right = transfer::scan_s3(&conn, &transfer::dir_prefix(dk), options.progress && !options.quiet)?;
             let plan = plan(&left, &right, options.strategy, Verb::Sync, true, options.delete);
             transfer::sync_copy(&conn, &source_conn, plan, dk, &options, sb)
         }

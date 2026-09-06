@@ -12,6 +12,7 @@ use std::process::ExitCode;
 
 mod args;
 mod catalogue;
+mod color;
 mod client;
 mod configure;
 mod errorformat;
@@ -219,6 +220,10 @@ fn run() -> Result<ExitCode, Failure> {
         }
         Err(e) => return Err(Failure::new(exit::PARAM_VALIDATION, e)),
     };
+
+    // Before anything can print a warning or an error, and in particular before the
+    // transfer commands start.
+    color::configure(parsed.color.as_deref());
 
     let _ = ERROR_FORMAT.set(errorformat::resolve(
         parsed.error_format.as_deref(),

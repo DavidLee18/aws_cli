@@ -16,6 +16,7 @@
 
 use super::conn::Conn;
 use super::xml;
+use super::progress::Counter;
 use crate::exit;
 use crate::Failure;
 use awsc_runtime::http;
@@ -93,7 +94,7 @@ pub fn shallow(conn: &Conn, prefix: &str) -> Result<Shallow, Failure> {
 }
 
 /// Walk `prefix` and everything beneath it on a single continuation chain.
-pub fn sequential(conn: &Conn, prefix: &str) -> Result<Vec<Entry>, Failure> {
+pub fn sequential(conn: &Conn, prefix: &str, counter: &Counter) -> Result<Vec<Entry>, Failure> {
     let mut out = Vec::new();
     let mut token: Option<String> = None;
     loop {
@@ -102,7 +103,11 @@ pub fn sequential(conn: &Conn, prefix: &str) -> Result<Vec<Entry>, Failure> {
             conn.send_checked("ListObjectsV2", "GET", "/", &query, &[], http::Body::Empty)?;
         let root =
             xml::parse(&response.text()).map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
+        let before = out.len();
         entries_from(&root, &mut out);
+        // Reported per page rather than per listing: a bucket with a million keys is
+        // hundreds of round trips, and showing nothing until the last one looks hung.
+        counter.add((out.len() - before) as u64);
         match root.get("NextContinuationToken") {
             "" => break,
             next => token = Some(next.to_string()),
@@ -115,12 +120,19 @@ pub fn sequential(conn: &Conn, prefix: &str) -> Result<Vec<Entry>, Failure> {
 /// them to be worth it.
 ///
 /// Results come back in key order regardless of the order the shards finish in.
-pub fn deep(conn: &Conn, prefix: &str, workers: usize) -> Result<Vec<Entry>, Failure> {
+/// The running count goes to `counter` as pages arrive, so a long listing is visible
+/// while it happens rather than only once it is done.
+pub fn deep(
+    conn: &Conn,
+    prefix: &str,
+    workers: usize,
+    counter: &Counter,
+) -> Result<Vec<Entry>, Failure> {
     let top = shallow(conn, prefix)?;
     if top.prefixes.len() < MIN_SHARDS {
         // Nothing to split on. One extra request was spent finding that out, against a
         // walk that would have been sequential either way.
-        return sequential(conn, prefix);
+        return sequential(conn, prefix, counter);
     }
 
     let mut out = top.direct;
@@ -132,7 +144,7 @@ pub fn deep(conn: &Conn, prefix: &str, workers: usize) -> Result<Vec<Entry>, Fai
     for chunk in top.prefixes.chunks(workers.max(1)) {
         std::thread::scope(|scope| {
             for shard in chunk {
-                scope.spawn(|| match sequential(conn, shard) {
+                scope.spawn(|| match sequential(conn, shard, counter) {
                     Ok(entries) => results.lock().expect("mutex").extend(entries),
                     Err(e) => {
                         let mut slot = failure.lock().expect("mutex");
@@ -175,7 +187,7 @@ pub fn deep_streaming(
 ) -> Result<(), Failure> {
     let top = shallow(conn, prefix)?;
     if top.prefixes.len() < MIN_SHARDS {
-        let mut all = sequential(conn, prefix)?;
+        let mut all = sequential(conn, prefix, &Counter::new(false, "objects"))?;
         all.sort_by(|a, b| a.key.cmp(&b.key));
         return emit(&all);
     }
@@ -189,7 +201,7 @@ pub fn deep_streaming(
         let results: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
         std::thread::scope(|scope| {
             for shard in chunk {
-                scope.spawn(|| match sequential(conn, shard) {
+                scope.spawn(|| match sequential(conn, shard, &Counter::new(false, "objects")) {
                     Ok(entries) => results.lock().expect("mutex").extend(entries),
                     Err(e) => {
                         let mut slot = failure.lock().expect("mutex");
