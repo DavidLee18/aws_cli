@@ -127,6 +127,8 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
         // so it reaches the dispatcher with an empty operation and gets told what is
         // actually missing, rather than "expected a subcommand".
         None if service == "configure" => String::new(),
+        // `update-models` takes no subcommand: it is the whole command.
+        None if service == "update-models" => String::new(),
         None => return Err(format!("`{service}`: expected a subcommand")),
     };
     if operation == "help" || operation == "--help" {

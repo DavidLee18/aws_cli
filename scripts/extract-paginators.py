@@ -36,7 +36,7 @@ REFERENCE_SITE_PACKAGES = (
     "/opt/homebrew/Cellar/awscli/2.36.22/libexec/lib/python3.14/site-packages"
 )
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_OUTPUT = REPO_ROOT / "data" / "paginators.json"
+DEFAULT_OUTPUT = REPO_ROOT / "crates" / "aws-cli-model" / "data" / "paginators.json"
 
 
 def load_reference():

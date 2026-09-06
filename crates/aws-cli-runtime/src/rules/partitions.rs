@@ -5,7 +5,7 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
-const EMBEDDED_JSON: &str = include_str!("../../../../data/partitions.json");
+const EMBEDDED_JSON: &str = include_str!("../../data/partitions.json");
 
 #[derive(Debug, Deserialize)]
 struct Table {

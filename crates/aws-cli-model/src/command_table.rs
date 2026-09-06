@@ -81,12 +81,12 @@ mod tests {
     use super::*;
 
     fn customizations() -> Customizations {
-        let text = include_str!("../../../data/customizations.json");
+        let text = include_str!("../data/customizations.json");
         serde_json::from_str(text).expect("customizations.json")
     }
 
     fn custom_surface() -> CustomSurface {
-        let text = include_str!("../../../data/custom-surface.json");
+        let text = include_str!("../data/custom-surface.json");
         serde_json::from_str(text).expect("custom-surface.json")
     }
 

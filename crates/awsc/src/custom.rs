@@ -39,6 +39,11 @@ pub fn dispatch(parsed: &Parsed) -> Result<Option<ExitCode>, Failure> {
         ("s3", _) => crate::s3::dispatch(parsed, &globals)?,
         // As is `configure`, which mostly edits the config files rather than calling AWS.
         ("configure", _) => crate::configure::dispatch(parsed)?,
+        // Not a reference command: an install that could not carry the 113 MB catalogue
+        // needs a way to ask for it, and to refresh it later.
+        ("update-models", "") => crate::catalogue::update_models()
+            .map(|()| exit::code(exit::SUCCESS))
+            .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?,
         _ => return Ok(None),
     };
     Ok(Some(outcome))

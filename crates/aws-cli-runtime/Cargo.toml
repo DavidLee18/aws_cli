@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "Runtime for a Rust port of the AWS CLI: SigV4, endpoint rulesets, the credential chain and SSO."
+repository = "https://github.com/DavidLee18/aws_cli"
+homepage = "https://github.com/DavidLee18/aws_cli"
+keywords = ["aws", "cli", "sigv4", "credentials"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 aws-cli-model = { workspace = true }

@@ -27,7 +27,7 @@ static XFORM_OVERRIDES: LazyLock<std::collections::HashMap<String, String>> =
         struct Table {
             overrides: std::collections::HashMap<String, String>,
         }
-        let embedded = include_str!("../../../data/xform-cache.json");
+        let embedded = include_str!("../data/xform-cache.json");
         let parsed: Table =
             serde_json::from_str(embedded).expect("embedded data/xform-cache.json is malformed");
         parsed.overrides

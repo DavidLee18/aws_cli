@@ -11,7 +11,6 @@
 use aws_cli_model::paginators::PaginatorOverlay;
 use aws_cli_protocol::pagination::{self, Accumulator, PaginationConfig};
 use serde_json::Value;
-use std::sync::LazyLock;
 
 use crate::{exit, Failure};
 
@@ -26,10 +25,14 @@ pub struct Settings<'a> {
     pub starting_token: Option<String>,
 }
 
-static OVERLAY: LazyLock<Option<PaginatorOverlay>> = LazyLock::new(|| {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/paginators.json");
-    PaginatorOverlay::load(&path).ok()
-});
+/// The paginator overlay is compiled in, not read from disk.
+///
+/// It was loaded from the build-time source path, and `.ok()` turned a missing file into
+/// `None` -- which makes `config_for` answer `None` for every operation, so an installed
+/// binary paginated nothing and said nothing about it.
+fn overlay() -> &'static PaginatorOverlay {
+    PaginatorOverlay::embedded()
+}
 
 /// Run an operation, paginating when it should be paginated.
 ///
@@ -134,8 +137,7 @@ fn config_for(settings: &Settings<'_>) -> Option<PaginationConfig> {
     if settings.no_paginate {
         return None;
     }
-    let overlay = OVERLAY.as_ref()?;
-    let paginator = overlay.get(settings.service, settings.operation)?;
+    let paginator = overlay().get(settings.service, settings.operation)?;
 
     let strings = |key: &str| -> Vec<String> {
         match paginator.config.get(key) {
@@ -269,5 +271,26 @@ mod tests {
         }
         assert_eq!(accumulator.finish(None)["Items"], json!([1, 2, 3]));
         assert_eq!(*seen_tokens.borrow(), vec![None, Some("p2".to_string())]);
+    }
+}
+
+#[cfg(test)]
+mod embedded_overlay_tests {
+    use super::*;
+
+    /// The overlay must be compiled in, not read from a path that only exists in the
+    /// build tree. When it was loaded from disk, an installed binary found nothing and
+    /// every operation silently became non-paginating -- a wrong answer that looks like a
+    /// short one, which is the failure mode this project keeps being bitten by.
+    #[test]
+    fn the_paginator_overlay_is_embedded_and_populated() {
+        let overlay = overlay();
+        assert!(overlay.services() > 300, "only {} services in the overlay", overlay.services());
+        assert!(overlay.entries() > 3000, "only {} paginated operations", overlay.entries());
+        // A spot check on an operation whose pagination users actually rely on.
+        assert!(
+            overlay.get("s3api", "list-objects-v2").is_some(),
+            "s3api list-objects-v2 is not in the embedded overlay"
+        );
     }
 }

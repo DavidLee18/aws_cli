@@ -122,6 +122,25 @@ Still to come: driving identical argv through both binaries and diffing stdout/s
 
 ## Install
 
+```sh
+cargo binstall awsc     # prebuilt binary from the release
+cargo install awsc      # build from source
+```
+
+Either of those installs the **binary alone** — `cargo-binstall` installs binaries and has
+no mechanism for data files, and crates.io caps a package at about 10 MB, so neither can
+carry the 113 MB catalogue. So the binary downloads it once, on the first command that
+needs it, from the release matching its version, verifying it against that release's
+published `SHA256SUMS` and caching it per user. `awsc update-models` does it ahead of time,
+and `AWSC_CACHE_DIR` decides where it lands.
+
+That checksum guards against a truncated or corrupted transfer and pins the catalogue to
+the release the binary came from. It is not protection against a compromised release — the
+checksum is served from the same place as the asset. To avoid the download, install from an
+archive below, or point `AWSC_MODELS_DIR` at a copy you vetted.
+
+### From a release archive
+
 Download the archive for your platform from the
 [releases page](https://github.com/DavidLee18/aws_cli/releases) and extract it:
 
@@ -161,12 +180,12 @@ Generated artefacts, and whether they are checked in:
 | Path | Checked in | Produced by | Why |
 |---|---|---|---|
 | `models/` | no (~110MB) | `scripts/fetch-models.sh` | Large and reproducible; pin with `AWS_SDK_RUST_REF` |
-| `data/service-names.json` | **yes** | `scripts/extract-service-names.py` | `include_str!`'d into the binary — required to build |
-| `data/paginators.json` | **yes** (642KB) | `scripts/extract-paginators.py` | botocore paginator overlay; which ops paginate is *not* derivable from Smithy |
-| `data/partitions.json` | **yes** (7KB) | `scripts/extract-partitions.py` | `aws.partition` table + the no-region global-endpoint fallback |
-| `data/protocol-metadata.json` | **yes** | `scripts/extract-protocol-metadata.py` | awsJson `targetPrefix`; not derivable from the Smithy models |
-| `data/customizations.json` | **yes** (9KB) | `scripts/extract-customizations.py` | argrename/removals/alias tables, extracted from the customization modules |
-| `data/custom-surface.json` | **yes** (57KB) | `scripts/extract-custom-surface.py` | per-op arg patches, custom commands, botocore waiter catalogue (re-runs merge; see `--no-merge`) |
+| `crates/aws-cli-model/data/service-names.json` | **yes** | `scripts/extract-service-names.py` | `include_str!`'d into the binary — required to build |
+| `crates/aws-cli-model/data/paginators.json` | **yes** (642KB) | `scripts/extract-paginators.py` | botocore paginator overlay; which ops paginate is *not* derivable from Smithy |
+| `crates/aws-cli-runtime/data/partitions.json` | **yes** (7KB) | `scripts/extract-partitions.py` | `aws.partition` table + the no-region global-endpoint fallback |
+| `crates/aws-cli-model/data/protocol-metadata.json` | **yes** | `scripts/extract-protocol-metadata.py` | awsJson `targetPrefix`; not derivable from the Smithy models |
+| `crates/aws-cli-model/data/customizations.json` | **yes** (9KB) | `scripts/extract-customizations.py` | argrename/removals/alias tables, extracted from the customization modules |
+| `crates/aws-cli-model/data/custom-surface.json` | **yes** (57KB) | `scripts/extract-custom-surface.py` | per-op arg patches, custom commands, botocore waiter catalogue (re-runs merge; see `--no-merge`) |
 | `tests/golden/reference-surface.json` | **yes** (5.9MB) | `scripts/extract-reference-surface.py` | Lets CI run conformance without an awscli install, and makes surface changes reviewable in diffs |
 
 Every `scripts/extract-*.py` reads the reference install read-only and pins

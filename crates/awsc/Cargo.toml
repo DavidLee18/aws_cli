@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "A Rust port of the AWS CLI v2: a drop-in `aws` with matching arguments, exit codes and output."
+repository = "https://github.com/DavidLee18/aws_cli"
+homepage = "https://github.com/DavidLee18/aws_cli"
+keywords = ["aws", "cli", "awscli", "s3"]
+categories = ["command-line-utilities"]
+readme = "README.md"
 
 [[bin]]
 name = "awsc"
@@ -18,6 +24,13 @@ serde_json = { workspace = true }
 regex = "1"
 # Only for SSE-C: S3 requires the customer key's MD5 alongside the key itself.
 md-5 = "0.10"
+# Fetching the service catalogue when the install did not bring one. `ureq` is already
+# the runtime's HTTP client; `flate2` is here because the catalogue is 113 MB raw and
+# 16 MB gzipped, and making every user download 113 MB to avoid one small pure-Rust
+# dependency is the wrong trade.
+ureq = { version = "2", default-features = false, features = ["tls"] }
+flate2 = "1"
+sha2 = "0.10"
 base64ct = { version = "1", features = ["alloc"] }
 quick-xml = { workspace = true }
 serde = { workspace = true }
@@ -25,3 +38,16 @@ serde = { workspace = true }
 [target.'cfg(unix)'.dependencies]
 # Terminal width for the transfer progress line.
 libc = "0.2"
+
+# cargo-binstall: fetch the release archive instead of building from source.
+#
+# The archive also contains models.bin, but binstall installs *binaries* -- it has no
+# mechanism for data files -- so only `awsc` lands on PATH and the binary downloads its
+# own catalogue on first use. See `src/catalogue.rs`.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ version }-{ target }.{ archive-format }"
+pkg-fmt = "tgz"
+bin-dir = "{ name }-{ version }-{ target }/{ bin }{ binary-ext }"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"

@@ -11,6 +11,7 @@ use aws_cli_model::Model;
 use std::process::ExitCode;
 
 mod args;
+mod catalogue;
 mod client;
 mod configure;
 mod errorformat;
@@ -32,6 +33,8 @@ A Rust port of the AWS CLI. Options:
   --endpoint-url <url>     override the resolved endpoint
   --debug                  print the signed request to stderr
   --version                print version
+
+  update-models            download the service catalogue this build needs
 ";
 
 /// The block the reference prints after an argument-parsing failure.
@@ -227,6 +230,12 @@ fn run() -> Result<ExitCode, Failure> {
     if let Some(code) = custom::dispatch(&parsed)? {
         return Ok(code);
     }
+
+    // Make sure there IS a catalogue before blaming the user for the service name. A
+    // missing one used to surface as `Found invalid choice 'sts'`, which sends someone
+    // hunting for a typo in a command that does not exist -- and that is exactly what
+    // every `cargo binstall` install would have said, on every command.
+    models_dir_or_fetch().map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
 
     // An unknown service is argparse's `argument command`, one level up from `argument
     // operation`; the wording differs only in that word.
@@ -629,7 +638,7 @@ pub fn now_unix() -> i64 {
 /// `s3`, `logs` and `configservice`. The scan result is therefore cached in the models
 /// directory and reused, and rebuilt whenever a lookup misses.
 pub fn load_model(cli_service: &str) -> Result<Model, String> {
-    let dir = models_dir();
+    let dir = models_dir_or_fetch()?;
 
     // The compiled container: one mapped file, a binary search, and shapes decoded only
     // as the command reaches them. The JSON path below stays as a fallback for a models
@@ -724,7 +733,54 @@ fn models_dir() -> std::path::PathBuf {
             return candidate;
         }
     }
+    // Downloaded by a previous run. `cargo binstall` and `cargo install` deliver the
+    // binary alone -- neither can carry a 113 MB data file -- so for those installs this
+    // is where the catalogue actually lives.
+    if let Some(cached) = catalogue::cached() {
+        return cached;
+    }
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models")
+}
+
+/// The models directory, downloading the catalogue if this install did not come with one.
+///
+/// Separate from [`models_dir`] because only the paths that are about to *load* a model
+/// should trigger a download: a bad flag or an unknown command must fail on its own terms
+/// rather than pulling 16 MB first.
+///
+/// Memoised, and deliberately so: this is consulted once to check the catalogue exists and
+/// again to load a model, and without the memo a fresh install downloads the whole
+/// catalogue **twice** in a single command.
+fn models_dir_or_fetch() -> Result<std::path::PathBuf, String> {
+    static RESOLVED: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    if let Some(dir) = RESOLVED.get() {
+        return Ok(dir.clone());
+    }
+
+    let dir = models_dir();
+    if is_populated(&dir) {
+        return Ok(RESOLVED.get_or_init(|| dir).clone());
+    }
+    // Checked before fetching, not only inside `models_dir`: an explicit
+    // `AWSC_MODELS_DIR` short-circuits that lookup, so without this a pointer at an empty
+    // directory would re-download the catalogue on every single command.
+    if let Some(cached) = catalogue::cached() {
+        return Ok(RESOLVED.get_or_init(|| cached).clone());
+    }
+
+    let fetched = catalogue::fetch(true).map_err(|e| catalogue::unavailable(&e))?;
+    Ok(RESOLVED.get_or_init(|| fetched).clone())
+}
+
+/// Does this directory actually hold models -- the compiled container, the built index, or
+/// the raw JSON a source checkout keeps?
+fn is_populated(dir: &std::path::Path) -> bool {
+    if dir.join("models.bin").is_file() || dir.join(".awsc-model-index.json").is_file() {
+        return true;
+    }
+    std::fs::read_dir(dir).is_ok_and(|entries| {
+        entries.flatten().any(|e| e.path().extension().is_some_and(|x| x == "json"))
+    })
 }
 
 /// The places a packaged `awsc` may keep its models, in order: beside the executable, as

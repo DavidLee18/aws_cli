@@ -16,12 +16,12 @@ to that licence and its attribution requirement. They are derivative works of:
   Licensed under the Apache License, Version 2.0
   https://github.com/aws/aws-cli
 
-      data/service-names.json
-      data/paginators.json
-      data/partitions.json
-      data/customizations.json
-      data/custom-surface.json
-      data/protocol-metadata.json
+      crates/aws-cli-model/data/service-names.json
+      crates/aws-cli-model/data/paginators.json
+      crates/aws-cli-runtime/data/partitions.json
+      crates/aws-cli-model/data/customizations.json
+      crates/aws-cli-model/data/custom-surface.json
+      crates/aws-cli-model/data/protocol-metadata.json
       tests/golden/reference-surface.json
 
   AWS SDK for Rust (Smithy service models)

@@ -39,10 +39,18 @@ jobs:
         run: |
           test -s models/models.bin || { echo "models.bin missing or empty"; exit 1; }
           ls -la models/models.bin
+      # Compressed for publishing: 113 MB raw, ~16 MB gzipped. This is the asset a
+      # `cargo binstall` or `cargo install` copy downloads on first use, since neither
+      # install path can carry a data file of any size.
+      - name: Compress the catalogue for publishing
+        run: gzip -9 -c models/models.bin > models/models.bin.gz && ls -la models/
+
       - uses: actions/upload-artifact@v4
         with:
           name: models
-          path: models/models.bin
+          path: |
+            models/models.bin
+            models/models.bin.gz
           retention-days: 1
 
   build:
@@ -166,6 +174,15 @@ jobs:
           pattern: dist-*
           merge-multiple: true
           path: dist
+      # The standalone catalogue rides along in the release so an installed binary can
+      # fetch it, and its checksum goes in SHA256SUMS -- which is what the binary reads to
+      # verify the download.
+      - uses: actions/download-artifact@v4
+        with:
+          name: models
+          path: models
+      - name: Add the catalogue to the release
+        run: mv models/models.bin.gz dist/ && ls -la dist/
       - name: Checksums
         run: |
           cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
@@ -178,3 +195,8 @@ jobs:
             binary looks for `models.bin` beside itself (or in `../share/awsc`, or at
             `$AWSC_MODELS_DIR`), so extract the archive and run `awsc` from it, or copy
             both into the same directory on your `PATH`.
+
+            Installing with `cargo binstall awsc` or `cargo install awsc` gets you the
+            binary alone — neither can carry a 113 MB data file — so it downloads
+            `models.bin.gz` from this release on first use and caches it per user.
+            `awsc update-models` fetches it explicitly.

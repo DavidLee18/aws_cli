@@ -21,7 +21,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-const EMBEDDED: &str = include_str!("../../../data/service-names.json");
+const EMBEDDED: &str = include_str!("../data/service-names.json");
 
 #[derive(Deserialize)]
 struct Table {

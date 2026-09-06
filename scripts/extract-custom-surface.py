@@ -59,10 +59,10 @@ REFERENCE_SITE_PACKAGES = (
     "/opt/homebrew/Cellar/awscli/2.36.22/libexec/lib/python3.14/site-packages"
 )
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_OUTPUT = REPO_ROOT / "data" / "custom-surface.json"
+DEFAULT_OUTPUT = REPO_ROOT / "crates" / "aws-cli-model" / "data" / "custom-surface.json"
 WORKLIST = REPO_ROOT / "docs" / "remaining-divergences.txt"
 CORPUS = REPO_ROOT / "tests" / "golden" / "reference-surface.json"
-CUSTOMIZATIONS = REPO_ROOT / "data" / "customizations.json"
+CUSTOMIZATIONS = REPO_ROOT / "crates" / "aws-cli-model" / "data" / "customizations.json"
 
 MAX_DEPTH = 4  # same command-tree depth limit as extract-reference-surface.py
 

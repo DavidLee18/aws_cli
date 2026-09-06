@@ -17,7 +17,7 @@ use crate::customizations::Customizations;
 use std::sync::LazyLock;
 
 static EMBEDDED: LazyLock<Customizations> = LazyLock::new(|| {
-    let text = include_str!("../../../data/customizations.json");
+    let text = include_str!("../data/customizations.json");
     serde_json::from_str(text).expect("embedded data/customizations.json is malformed")
 });
 
@@ -26,7 +26,7 @@ pub fn get() -> &'static Customizations {
 }
 
 static EMBEDDED_SURFACE: LazyLock<crate::custom_surface::CustomSurface> = LazyLock::new(|| {
-    let text = include_str!("../../../data/custom-surface.json");
+    let text = include_str!("../data/custom-surface.json");
     serde_json::from_str(text).expect("embedded data/custom-surface.json is malformed")
 });
 
@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn embedded_table_matches_the_file_on_disk() {
         let path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/customizations.json");
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data/customizations.json");
         let from_disk = Customizations::load(&path).expect("customizations.json should load");
         assert_eq!(from_disk.removed_operations, get().removed_operations);
         assert_eq!(from_disk.argument_renames, get().argument_renames);

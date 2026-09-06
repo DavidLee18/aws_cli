@@ -35,7 +35,25 @@ pub struct Paginator {
     pub config: BTreeMap<String, serde_json::Value>,
 }
 
+/// The overlay compiled into the binary.
+///
+/// It has to be embedded rather than read from a path: which operations paginate is not
+/// derivable from the Smithy models, so with no overlay `config_for` returns `None` for
+/// *every* operation and auto-pagination silently does nothing. It used to be loaded from
+/// the build-time source tree, which meant every installed copy -- including the released
+/// v0.2.0 binaries -- paginated nothing while reporting success. 642 KB is a cheap fix for
+/// a failure whose only symptom is a short answer.
+const EMBEDDED: &str = include_str!("../data/paginators.json");
+
 impl PaginatorOverlay {
+    /// The compiled-in overlay, parsed once.
+    pub fn embedded() -> &'static PaginatorOverlay {
+        static OVERLAY: std::sync::OnceLock<PaginatorOverlay> = std::sync::OnceLock::new();
+        OVERLAY.get_or_init(|| {
+            serde_json::from_str(EMBEDDED).expect("embedded data/paginators.json is malformed")
+        })
+    }
+
     pub fn load(path: &Path) -> Result<Self, String> {
         let bytes = std::fs::read(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
         Self::from_json(&bytes).map_err(|e| format!("parsing {}: {e}", path.display()))
