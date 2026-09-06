@@ -588,13 +588,24 @@ fn glob_match(pattern: &str, text: &str) -> bool {
     let (mut pi, mut ti) = (0usize, 0usize);
     let (mut star, mut mark) = (usize::MAX, 0usize);
     while ti < t.len() {
+        // A `[...]` that PARSES is authoritative, whether or not it matched. Falling
+        // through to the literal comparison below on a non-match made `[` match a literal
+        // `[` in the text, so `[Erai-raws] One Piece -*.mkv` matched a file actually named
+        // `[Erai-raws] One Piece - 1001.mkv` -- where fnmatch reads the brackets as a
+        // character class and matches nothing. Only an *unterminated* `[` is a literal.
         if pi < p.len() && p[pi] == '[' {
             if let Some((matched, next)) = match_class(&p, pi, t[ti]) {
                 if matched {
                     pi = next;
                     ti += 1;
-                    continue;
+                } else if star != usize::MAX {
+                    pi = star + 1;
+                    mark += 1;
+                    ti = mark;
+                } else {
+                    return false;
                 }
+                continue;
             }
         }
         if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
@@ -710,35 +721,113 @@ pub fn verb_word(verb: Verb, uploading: bool) -> &'static str {
     }
 }
 
+/// The reference's warning for anything it cannot read, on stderr, naming the absolute
+/// path. It is a *warning*, not an error: the walk continues and the command exits 2.
+fn warn_unreadable(path: &std::path::Path, quiet: bool) {
+    if !quiet {
+        eprintln!(
+            "warning: Skipping file {}. File/Directory is not readable.",
+            abspath(&path.to_string_lossy())
+        );
+    }
+}
+
+/// Special files have no contents to upload, and the reference says so distinctly.
+fn warn_special(path: &std::path::Path, quiet: bool) {
+    if !quiet {
+        eprintln!(
+            "warning: Skipping file {}. File is character special device, block special \
+             device, FIFO, or socket.",
+            abspath(&path.to_string_lossy())
+        );
+    }
+}
+
+/// Can this file actually be opened?
+///
+/// `metadata` succeeding does not mean the bytes are readable -- a mode-000 file stats
+/// fine and fails to open. The reference opens every candidate for exactly this reason,
+/// and skipping here is much better than discovering it mid-transfer, where it would abort
+/// everything already in flight.
+fn is_readable_file(path: &std::path::Path) -> bool {
+    std::fs::File::open(path).is_ok()
+}
+
 /// Walk a local directory, or yield the single file.
-pub fn scan_local(root: &str, recursive: bool, follow_symlinks: bool) -> Result<Vec<Item>, Failure> {
+///
+/// Returns the items and the number of warnings emitted. Anything unreadable is **skipped
+/// with a warning**, never fatal: one protected directory somewhere under the source used
+/// to abort the entire transfer with `fatal error: Operation not permitted (os error 1)`,
+/// which on macOS is what a TCC-protected folder returns for `read_dir`. The reference
+/// walks past it and uploads everything else.
+pub fn scan_local(
+    root: &str,
+    recursive: bool,
+    follow_symlinks: bool,
+    quiet: bool,
+) -> Result<(Vec<Item>, u64), Failure> {
     let path = std::path::Path::new(root);
     let io = |e: std::io::Error| Failure::new(exit::GENERAL_ERROR, e);
+    let mut warnings = 0u64;
     if !recursive {
         let meta = std::fs::metadata(path).map_err(io)?;
-        return Ok(vec![Item {
-            source: root.to_string(),
-            dest: String::new(),
-            size: meta.len(),
-            modified: mtime_seconds(&meta),
-        }]);
+        if is_special(&meta) {
+            warn_special(path, quiet);
+            return Ok((Vec::new(), 1));
+        }
+        if !is_readable_file(path) {
+            warn_unreadable(path, quiet);
+            return Ok((Vec::new(), 1));
+        }
+        return Ok((
+            vec![Item {
+                source: root.to_string(),
+                dest: String::new(),
+                size: meta.len(),
+                modified: mtime_seconds(&meta),
+            }],
+            0,
+        ));
     }
     let mut out = Vec::new();
     let mut stack = vec![path.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir).map_err(io)? {
-            let entry = entry.map_err(io)?;
+        // A directory we cannot list is the case that used to kill the whole walk.
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => {
+                warn_unreadable(&dir, quiet);
+                warnings += 1;
+                continue;
+            }
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                warn_unreadable(&dir, quiet);
+                warnings += 1;
+                continue;
+            };
             let entry_path = entry.path();
             // `DirEntry::metadata` does NOT traverse symlinks, unlike `fs::metadata` —
             // following is the default, so the link has to be resolved explicitly.
             // A broken link is skipped rather than failing the whole walk.
-            let link_meta = std::fs::symlink_metadata(&entry_path).map_err(io)?;
+            let Ok(link_meta) = std::fs::symlink_metadata(&entry_path) else {
+                warn_unreadable(&entry_path, quiet);
+                warnings += 1;
+                continue;
+            };
             if link_meta.file_type().is_symlink() && !follow_symlinks {
                 continue;
             }
             let Ok(meta) = std::fs::metadata(&entry_path) else { continue };
             if meta.is_dir() {
                 stack.push(entry_path);
+            } else if is_special(&meta) {
+                warn_special(&entry_path, quiet);
+                warnings += 1;
+            } else if meta.is_file() && !is_readable_file(&entry_path) {
+                warn_unreadable(&entry_path, quiet);
+                warnings += 1;
             } else if meta.is_file() {
                 let relative = entry_path
                     .strip_prefix(path)
@@ -756,7 +845,22 @@ pub fn scan_local(root: &str, recursive: bool, follow_symlinks: bool) -> Result<
     }
     // Byte order, so a listing matches S3's own collation.
     out.sort_by(|a, b| a.dest.cmp(&b.dest));
-    Ok(out)
+    Ok((out, warnings))
+}
+
+/// A device, FIFO or socket: nothing to upload, and reading one may block forever.
+fn is_special(meta: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        let t = meta.file_type();
+        return t.is_block_device() || t.is_char_device() || t.is_fifo() || t.is_socket();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        false
+    }
 }
 
 /// Scan a local tree that may not exist yet — a sync destination often does not.
@@ -764,7 +868,9 @@ pub fn scan_local_if_present(root: &str) -> Result<Vec<Item>, Failure> {
     if !std::path::Path::new(root).exists() {
         return Ok(Vec::new());
     }
-    scan_local(root, true, true)
+    // The destination side of a sync: warnings about it are not the user's concern here,
+    // since nothing is being read from it.
+    Ok(scan_local(root, true, true, true)?.0)
 }
 
 /// Execute a sync plan whose transfers are uploads.
@@ -774,6 +880,7 @@ pub fn sync_upload(
     key: &str,
     options: &Options,
     bucket: &str,
+    scan_warnings: u64,
 ) -> Result<ExitCode, Failure> {
     let mut uploads = Vec::new();
     let mut deletes = Vec::new();
@@ -788,10 +895,17 @@ pub fn sync_upload(
     }
 
     let total: u64 = uploads.iter().map(|i| i.size).sum();
+    // Anything the scan could not read is already reported; it still has to reach the
+    // exit code, which is 2 when warnings were the only problem.
     let count = (uploads.len() + deletes.len()) as u64;
     let progress = Progress::new(count, total, options.progress && !options.quiet);
     let outcome = Outcome::default();
+    // Unreadable paths the scan skipped count toward the exit code: 2 when they were the
+    // only problem, which is what the reference returns.
+    outcome.warned.fetch_add(scan_warnings, Ordering::Relaxed);
 
+    // A dry run still reports warnings in its exit code: the reference returns 2 when it
+    // skipped something unreadable, whether or not it went on to transfer anything.
     if options.dryrun {
         for item in &uploads {
             println!(
@@ -803,7 +917,7 @@ pub fn sync_upload(
         for item in &deletes {
             println!("(dryrun) delete: s3://{bucket}/{}", item.source);
         }
-        return Ok(exit::code(exit::SUCCESS));
+        return Ok(outcome.code());
     }
 
     execute_uploads(conn, &uploads, options, "upload", &progress, &outcome)?;
@@ -848,7 +962,7 @@ pub fn sync_download(
         for item in &deletes {
             println!("(dryrun) delete: {}", display_local(&item.source));
         }
-        return Ok(exit::code(exit::SUCCESS));
+        return Ok(outcome.code());
     }
 
     let pool = Pool::new(options.concurrency);
@@ -934,7 +1048,7 @@ pub fn sync_copy(
         for item in &deletes {
             println!("(dryrun) delete: s3://{}", display_key(conn, &item.source));
         }
-        return Ok(exit::code(exit::SUCCESS));
+        return Ok(outcome.code());
     }
 
     let pool = Pool::new(options.concurrency);
@@ -1319,7 +1433,8 @@ fn upload(
     options: &Options,
     verb: Verb,
 ) -> Result<ExitCode, Failure> {
-    let mut items = scan_local(local, options.recursive, options.follow_symlinks)?;
+    let (mut items, scan_warnings) =
+        scan_local(local, options.recursive, options.follow_symlinks, options.quiet)?;
     if !options.recursive {
         let base = std::path::Path::new(local)
             .file_name()
@@ -1340,13 +1455,21 @@ fn upload(
         for item in &mut items {
             item.dest = join_key(key, &item.dest);
         }
-        items.retain(|i| included(&i.source, &root, &options.excludes));
+        // Patterns are anchored to the ABSOLUTISED root, so the paths matched against them
+        // must be absolute too. The scan yields paths in the form the user typed, so a
+        // relative source like `.` produced `./x.mkv` against a root of `/abs/dir` and
+        // matched NOTHING -- every --exclude and --include was silently ignored, and
+        // `--exclude "*" --include "..."` uploaded the entire tree.
+        items.retain(|i| included(&abspath(&i.source), &root, &options.excludes));
     }
 
     let total_bytes: u64 = items.iter().map(|i| i.size).sum();
     let progress =
         Progress::new(items.len() as u64, total_bytes, options.progress && !options.quiet);
     let outcome = Outcome::default();
+    // Unreadable paths the scan skipped count toward the exit code: 2 when they were the
+    // only problem, which is what the reference returns.
+    outcome.warned.fetch_add(scan_warnings, Ordering::Relaxed);
     let word = verb_word(verb, true);
 
     if options.dryrun {
@@ -1357,7 +1480,7 @@ fn upload(
                 display_key(conn, &item.dest)
             );
         }
-        return Ok(exit::code(exit::SUCCESS));
+        return Ok(outcome.code());
     }
 
     execute_uploads(conn, &items, options, word, &progress, &outcome)?;
@@ -1699,7 +1822,7 @@ fn download(
                 display_local(&item.dest)
             );
         }
-        return Ok(exit::code(exit::SUCCESS));
+        return Ok(outcome.code());
     }
 
     // Preallocate the large files, then queue every range next to the small files so one
@@ -1886,7 +2009,7 @@ fn copy(
         for item in &items {
             println!("(dryrun) {word}: s3://{source_bucket}/{} to s3://{}", item.source, display_key(conn, &item.dest));
         }
-        return Ok(exit::code(exit::SUCCESS));
+        return Ok(outcome.code());
     }
 
     // A `CopyObject` is capped at 5 GiB, and a single request for a large object ties up
@@ -1972,7 +2095,7 @@ fn remove(conn: &Conn, key: &str, options: &Options) -> Result<ExitCode, Failure
         for item in &items {
             println!("(dryrun) delete: s3://{}", display_key(conn, &item.source));
         }
-        return Ok(exit::code(exit::SUCCESS));
+        return Ok(outcome.code());
     }
 
     let keys: Vec<String> = items.iter().map(|i| i.source.clone()).collect();
@@ -2101,5 +2224,120 @@ mod tests {
         assert_eq!(guess_content_type("a/b.json").as_deref(), Some("application/json"));
         assert_eq!(guess_content_type("IMG.JPG").as_deref(), Some("image/jpeg"));
         assert_eq!(guess_content_type("noextension"), None);
+    }
+}
+
+#[cfg(test)]
+mod scan_regression_tests {
+    use super::*;
+
+    /// `[...]` is a character class, exactly as Python's `fnmatch` reads it. A class that
+    /// parses but does not match is a MISMATCH, not a literal `[` -- getting that wrong
+    /// made `--include "[Erai-raws] One Piece -*.mkv"` select files literally named
+    /// `[Erai-raws] One Piece - ....mkv`, which the reference does not select at all.
+    /// Every case here was checked against the reference binary.
+    #[test]
+    fn character_classes_match_fnmatch() {
+        let file = "[Erai-raws] One Piece - 1001 [1080p].mkv";
+        assert!(!glob_match("[Erai-raws] One Piece -*.mkv", file), "brackets are a class");
+        assert!(glob_match("[[]Erai-raws] One Piece -*.mkv", file), "[[] is a literal bracket");
+        assert!(glob_match("*One Piece*.mkv", file));
+
+        assert!(glob_match("[a-z]*", "notes.txt"));
+        assert!(!glob_match("[a-z]*", "Notes.txt"));
+        assert!(glob_match("[!SE]*", "notes.txt"));
+        assert!(!glob_match("[!n]*", "notes.txt"));
+        assert!(glob_match("notes.tx[t]", "notes.txt"));
+
+        // An unterminated class has no closing bracket, so `[` really is a literal.
+        assert!(glob_match("unterminated[abc", "unterminated[abc"));
+        assert!(!glob_match("unterminated[abc", "unterminated"));
+
+        // A class that fails to match must still allow an earlier `*` to backtrack.
+        assert!(glob_match("*[0-9].mkv", "One Piece - 1001.mkv"));
+        assert!(!glob_match("*[0-9].mkv", "One Piece - x.mkv"));
+    }
+
+    /// Patterns are anchored to the absolutised root, so the paths matched against them
+    /// have to be absolute too. `scan_local` yields paths in the form the user typed, so
+    /// with a relative source every pattern was compared against `./x.mkv` while anchored
+    /// at `/abs/dir/` -- nothing ever matched, and **every `--exclude` and `--include` was
+    /// silently ignored**. `--exclude "*" --include "only-these"` uploaded the whole tree.
+    #[test]
+    fn filters_apply_to_a_relative_source() {
+        let root = abspath(".");
+        let rules = vec![(false, "*".to_string()), (true, "*.mkv".to_string())];
+
+        // The form the scan produces for a relative source, absolutised as the filter
+        // site now does.
+        assert!(included(&abspath("./keep.mkv"), &root, &rules), "an included file was dropped");
+        assert!(!included(&abspath("./drop.txt"), &root, &rules), "--exclude did not exclude");
+
+        // The raw scan form is exactly what used to be passed, and it matches nothing --
+        // which is why the bug was invisible rather than noisy.
+        assert!(
+            included("./drop.txt", &root, &rules),
+            "the unabsolutised path should match no pattern; if this fails the anchoring \
+             changed and this test no longer guards the bug it was written for"
+        );
+    }
+
+    /// A directory the walk cannot read is skipped with a warning, not fatal. One
+    /// TCC-protected folder anywhere under the source used to abort the whole transfer
+    /// with `fatal error: Operation not permitted (os error 1)`.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_directory_is_skipped_not_fatal() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::{AtomicU32, Ordering as O};
+        static N: AtomicU32 = AtomicU32::new(0);
+
+        let base = std::env::temp_dir()
+            .join(format!("awsc-scan-{}-{}", std::process::id(), N.fetch_add(1, O::Relaxed)));
+        let locked = base.join("locked");
+        std::fs::create_dir_all(&locked).expect("temp tree");
+        std::fs::write(base.join("readable.txt"), b"x").expect("write");
+        std::fs::write(locked.join("inner.txt"), b"x").expect("write");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+
+        let scanned = scan_local(&base.to_string_lossy(), true, true, true);
+
+        // Restore before asserting, so a failure cannot leave an unremovable directory.
+        let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
+        let _ = std::fs::remove_dir_all(&base);
+
+        let (items, warnings) = scanned.expect("an unreadable directory must not be fatal");
+        assert_eq!(warnings, 1, "the skipped directory should have warned exactly once");
+        let sources: Vec<&String> = items.iter().map(|i| &i.source).collect();
+        assert_eq!(items.len(), 1, "the readable file should still be found: {sources:?}");
+        assert!(items[0].source.ends_with("readable.txt"), "{:?}", items[0].source);
+    }
+
+    /// A file that stats fine but cannot be opened is skipped too. Discovering it
+    /// mid-transfer would abort everything already in flight.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_file_is_skipped_not_fatal() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::{AtomicU32, Ordering as O};
+        static N: AtomicU32 = AtomicU32::new(0);
+
+        let base = std::env::temp_dir()
+            .join(format!("awsc-scanf-{}-{}", std::process::id(), N.fetch_add(1, O::Relaxed)));
+        std::fs::create_dir_all(&base).expect("temp tree");
+        std::fs::write(base.join("open.txt"), b"x").expect("write");
+        let shut = base.join("shut.txt");
+        std::fs::write(&shut, b"x").expect("write");
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+
+        let scanned = scan_local(&base.to_string_lossy(), true, true, true);
+        let _ = std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o644));
+        let _ = std::fs::remove_dir_all(&base);
+
+        let (items, warnings) = scanned.expect("an unreadable file must not be fatal");
+        assert_eq!(warnings, 1, "the unopenable file should have warned");
+        let sources: Vec<&String> = items.iter().map(|i| &i.source).collect();
+        assert_eq!(items.len(), 1, "only the readable file should be listed: {sources:?}");
+        assert!(items[0].source.ends_with("open.txt"), "{:?}", items[0].source);
     }
 }

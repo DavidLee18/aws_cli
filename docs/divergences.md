@@ -1357,3 +1357,63 @@ are unexercised: they need a token, and getting one registers a client in a real
 and needs a human at a browser. What is checked is the prompt sequence, the service-error
 shape and exit code, the legacy-format refusal, and — through `configure sso-session`,
 which needs no login — the whole session-writing path they share.
+
+
+---
+
+## Three bugs in `aws s3 cp --recursive`, found from one report
+
+A user ran `aws s3 cp . s3://bucket/ --recursive --exclude "*" --include "..."` and got
+`fatal error: Operation not permitted (os error 1)`. That reproduced immediately, and two
+worse bugs sat behind it.
+
+### One unreadable directory aborted the whole transfer
+
+`scan_local` propagated any `read_dir`, `symlink_metadata` or directory-entry error as a
+fatal failure, so a single unreadable directory anywhere under the source killed the
+command and uploaded nothing. On macOS `read_dir` on a TCC-protected folder — Desktop,
+Documents, Downloads — returns exactly `EPERM`, which is `os error 1`.
+
+The reference skips it: `should_ignore_file` calls `is_readable`, which tries `os.listdir`
+for a directory and `open` for a file, and on `OSError` emits
+`warning: Skipping file <absolute path>. File/Directory is not readable.` to stderr and
+carries on. Warnings alone make the exit code **2**.
+
+Now matched, including the parts that are easy to miss: unreadable *files* are skipped too
+(a mode-000 file stats fine and fails to open, so testing `metadata` is not enough, and
+discovering it mid-transfer would abort work already in flight), special files get the
+reference's distinct wording, and **a dry run reports the warning in its exit code** — it
+was returning 0 unconditionally.
+
+### `--exclude` and `--include` were silently ignored for any relative source
+
+Far more dangerous, and invisible. Patterns are anchored to `os.path.abspath(src)`, which
+we reproduced — but `scan_local` yields paths in the form the *user typed*. With a
+relative source the filter compared `./x.mkv` against patterns rooted at `/abs/dir/`, so
+**nothing ever matched and every filter was dropped**. `--exclude "*" --include "only.mkv"`
+uploaded the entire tree. It worked with an absolute source, which is presumably why it was
+not caught.
+
+The reference matches absolute paths throughout, confirmed directly: `--exclude
+'/private/tmp/*'` excludes everything from a `.` source while `--exclude './*'` excludes
+nothing. Fixed by absolutising the scanned path at the filter site, in both `cp` and
+`sync`.
+
+### A character class that did not match fell back to a literal `[`
+
+`glob_match` consulted `match_class` and, when the class parsed but did not match, fell
+through to comparing `[` literally — which then matched a literal `[` in the filename. So
+`--include "[Erai-raws] One Piece -*.mkv"` selected files actually named
+`[Erai-raws] One Piece - 1001.mkv`, where `fnmatch` reads `[Erai-raws]` as a one-character
+class and selects **nothing**. A parsed class is now authoritative, and only an
+unterminated `[` is a literal; a failed class also backtracks to an earlier `*` correctly.
+
+Verified against the reference: 10 `cp` invocations (upload set, warnings and exit code) and
+7 glob patterns, including negation, ranges, `[[]` for a literal bracket, and an
+unterminated class.
+
+### Still outstanding, found alongside and not fixed
+
+`aws s3 sync` reports a failed bucket listing as exit **254** where the reference wraps it
+as a `fatal error:` line at **1**. Pre-existing — the released 0.3.1 does the same — and
+separate from the `cp` path fixed here.
