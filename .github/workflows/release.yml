@@ -48,9 +48,15 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: models
-          path: |
-            models/models.bin
-            models/models.bin.gz
+          path: models/models.bin
+          retention-days: 1
+
+      # A separate artifact so the four build jobs do not each pull a copy of the
+      # compressed catalogue they have no use for.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: models-archive
+          path: models/models.bin.gz
           retention-days: 1
 
   build:
@@ -179,16 +185,24 @@ jobs:
       # verify the download.
       - uses: actions/download-artifact@v4
         with:
-          name: models
+          name: models-archive
           path: models
       - name: Add the catalogue to the release
-        run: mv models/models.bin.gz dist/ && ls -la dist/
+        run: |
+          mv models/models.bin.gz dist/
+          test -s dist/models.bin.gz || { echo "models.bin.gz missing"; exit 1; }
+          ls -la dist/
       - name: Checksums
         run: |
           cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      # Published as a DRAFT. Releases in this repository are immutable, so a published
+      # release cannot have an asset added, replaced or removed -- the only remedy for a
+      # bad one is to burn a version number. The draft is inspected first and published by
+      # hand once its assets check out.
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          draft: true
           generate_release_notes: true
           body: |
             Each archive contains `awsc` and `models.bin`. Keep them together — the

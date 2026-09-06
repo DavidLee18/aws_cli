@@ -25,7 +25,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "aws-cli-conformance"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aws-cli-model",
  "serde",
@@ -34,7 +34,7 @@ dependencies = [
 
 [[package]]
 name = "aws-cli-model"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "elsa",
  "indexmap",
@@ -47,7 +47,7 @@ dependencies = [
 
 [[package]]
 name = "aws-cli-output"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "jmespath",
  "serde",
@@ -57,7 +57,7 @@ dependencies = [
 
 [[package]]
 name = "aws-cli-protocol"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aws-cli-model",
  "quick-xml",
@@ -67,7 +67,7 @@ dependencies = [
 
 [[package]]
 name = "aws-cli-runtime"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aws-cli-model",
  "bytes",
@@ -117,7 +117,7 @@ dependencies = [
 
 [[package]]
 name = "awsc"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aws-cli-model",
  "aws-cli-output",
