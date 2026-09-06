@@ -7,7 +7,7 @@
 //! All six AWS wire protocols are dispatched from `dispatch.rs`; `rpcv2Cbor` is
 //! recognised and refused explicitly rather than mis-serialized.
 
-use aws_cli_model::Model;
+use awsc_model::Model;
 use std::process::ExitCode;
 
 mod args;
@@ -253,10 +253,10 @@ fn run() -> Result<ExitCode, Failure> {
     // The command table applies every name-level customization: removals, renames and
     // aliases. It is the same derivation the conformance harness uses, so the two cannot
     // disagree about which commands exist.
-    let table = aws_cli_model::command_table::build(
+    let table = awsc_model::command_table::build(
         &model,
-        aws_cli_model::surface_overlays::get(),
-        aws_cli_model::surface_overlays::custom_surface(),
+        awsc_model::surface_overlays::get(),
+        awsc_model::surface_overlays::custom_surface(),
     )
     .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
 
@@ -308,11 +308,11 @@ fn run() -> Result<ExitCode, Failure> {
             )
             .map_err(input_failure)?;
             let validation =
-                aws_cli_protocol::validate::validate(&model, input_shape, built.as_ref());
+                awsc_protocol::validate::validate(&model, input_shape, built.as_ref());
             if !validation.is_empty() {
                 return Err(Failure::new(
                     exit::PARAM_VALIDATION,
-                    aws_cli_runtime::RuntimeError::ParamValidation(validation.report()),
+                    awsc_runtime::RuntimeError::ParamValidation(validation.report()),
                 ));
             }
         }
@@ -326,15 +326,15 @@ fn run() -> Result<ExitCode, Failure> {
         // generated `Arn: "Arn"` is 3 characters against a minimum of 20.
         if mode == "output" {
             let validation =
-                aws_cli_protocol::validate::validate(&model, output_shape, Some(&skeleton));
+                awsc_protocol::validate::validate(&model, output_shape, Some(&skeleton));
             if !validation.is_empty() {
                 return Err(Failure::new(
                     exit::PARAM_VALIDATION,
-                    aws_cli_runtime::RuntimeError::ParamValidation(validation.report()),
+                    awsc_runtime::RuntimeError::ParamValidation(validation.report()),
                 ));
             }
         }
-        match aws_cli_output::render_named(op_id.name(), &skeleton, parsed.output) {
+        match awsc_output::render_named(op_id.name(), &skeleton, parsed.output) {
             Ok(Some(text)) => print!("{text}"),
             Ok(None) => {}
             Err(e) => return Err(Failure::new(exit::GENERAL_ERROR, e)),
@@ -359,7 +359,7 @@ fn run() -> Result<ExitCode, Failure> {
             None if parsed.generate_skeleton.is_none() => {
                 return Err(Failure::new(
                     exit::PARAM_VALIDATION,
-                    aws_cli_runtime::RuntimeError::ParamValidation(
+                    awsc_runtime::RuntimeError::ParamValidation(
                         "the following arguments are required: outfile".to_string(),
                     ),
                 ))
@@ -380,7 +380,7 @@ fn run() -> Result<ExitCode, Failure> {
             exit::PARAM_VALIDATION,
             format!(
                 "{}\n\n{USAGE_HINT}",
-                aws_cli_runtime::RuntimeError::ParamValidation(format!(
+                awsc_runtime::RuntimeError::ParamValidation(format!(
                     "the following arguments are required: {}",
                     missing.join(", ")
                 ))
@@ -426,11 +426,11 @@ fn run() -> Result<ExitCode, Failure> {
 
     // Client-side validation runs before any network work, exactly as the reference
     // does — the error text and exit code both differ from letting the service reject.
-    let validation = aws_cli_protocol::validate::validate(&model, input_shape, input.as_ref());
+    let validation = awsc_protocol::validate::validate(&model, input_shape, input.as_ref());
     if !validation.is_empty() {
         return Err(Failure::new(
             exit::PARAM_VALIDATION,
-            aws_cli_runtime::RuntimeError::ParamValidation(validation.report()),
+            awsc_runtime::RuntimeError::ParamValidation(validation.report()),
         ));
     }
 
@@ -447,14 +447,14 @@ fn run() -> Result<ExitCode, Failure> {
         std::fs::write(path, response.bytes())
             .map_err(|e| Failure::new(exit::GENERAL_ERROR, format!("{path}: {e}")))?;
         let document = match output_shape {
-            Some(shape) => aws_cli_protocol::http_binding::bind_output_headers(
+            Some(shape) => awsc_protocol::http_binding::bind_output_headers(
                 &model,
                 shape,
                 response.headers(),
             ),
             None => serde_json::Value::Object(Default::default()),
         };
-        match aws_cli_output::render_named(op_id.name(), &document, parsed.output) {
+        match awsc_output::render_named(op_id.name(), &document, parsed.output) {
             Ok(Some(text)) => print!("{text}"),
             Ok(None) => {}
             Err(e) => return Err(Failure::new(exit::GENERAL_ERROR, e)),
@@ -467,13 +467,13 @@ fn run() -> Result<ExitCode, Failure> {
     // it lands. Collecting them into a single array would defeat the point of a stream
     // that may never end — `logs start-live-tail` runs until interrupted.
     if let Some(shape) = output_shape.filter(|s| {
-        aws_cli_protocol::eventstream::stream_member(&model, s).is_some()
+        awsc_protocol::eventstream::stream_member(&model, s).is_some()
     }) {
         use std::io::Write;
         let mut stdout = std::io::stdout();
         let mut stream_error = None;
-        let mut emit = |event: aws_cli_protocol::eventstream::Event| -> Result<(), Failure> {
-            use aws_cli_protocol::eventstream::Event;
+        let mut emit = |event: awsc_protocol::eventstream::Event| -> Result<(), Failure> {
+            use awsc_protocol::eventstream::Event;
             match event {
                 Event::Event { name, value } => {
                     let line = serde_json::json!({ name: value });
@@ -508,7 +508,7 @@ fn run() -> Result<ExitCode, Failure> {
         // the same `{"EventName": {...}}` shape the response events print, so the two
         // halves of a conversation are written the same way.
         let duplex = input_shape
-            .is_some_and(|s| aws_cli_protocol::eventstream::stream_member(&model, s).is_some());
+            .is_some_and(|s| awsc_protocol::eventstream::stream_member(&model, s).is_some());
         if duplex {
             // `stdin().lock()` yields a guard that cannot cross threads, and `Stdin`
             // itself is not `BufRead`; wrapping it gives both.
@@ -554,14 +554,14 @@ fn run() -> Result<ExitCode, Failure> {
     // --query runs after the pagination merge and after ResponseMetadata removal, so an
     // expression can never see either. Matches the reference's ordering.
     let value = match &parsed.query {
-        Some(expression) => aws_cli_output::query::apply(&value, expression)
+        Some(expression) => awsc_output::query::apply(&value, expression)
             .map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?,
         None => value,
     };
 
     // The table titles itself with the API operation name (`GetCallerIdentity`), not the
     // CLI spelling (`get-caller-identity`).
-    match aws_cli_output::render_named(op_id.name(), &value, parsed.output) {
+    match awsc_output::render_named(op_id.name(), &value, parsed.output) {
         Ok(Some(text)) => print!("{text}"),
         Ok(None) => {}
         Err(e) => return Err(Failure::new(exit::GENERAL_ERROR, e)),
@@ -579,7 +579,7 @@ fn invalid_choice<'a>(
     typed: &str,
     choices: impl IntoIterator<Item = &'a str>,
 ) -> Failure {
-    let suggestions = aws_cli_model::close_matches::get_close_matches(typed, choices, 3, 0.8);
+    let suggestions = awsc_model::close_matches::get_close_matches(typed, choices, 3, 0.8);
     let mut message = format!("argument {argument}: Found invalid choice '{typed}'\n");
     if !suggestions.is_empty() {
         message.push_str("\nMaybe you meant:\n");
@@ -595,7 +595,7 @@ fn invalid_choice<'a>(
         // that has them -- which is why this appends only two.
         format!(
             "{}\n\n{USAGE_HINT}",
-            aws_cli_runtime::RuntimeError::ParamValidation(message)
+            awsc_runtime::RuntimeError::ParamValidation(message)
         ),
     )
 }

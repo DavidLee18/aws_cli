@@ -24,75 +24,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
-name = "aws-cli-conformance"
-version = "0.3.0"
-dependencies = [
- "aws-cli-model",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "aws-cli-model"
-version = "0.3.0"
-dependencies = [
- "elsa",
- "indexmap",
- "memmap2",
- "regex",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "aws-cli-output"
-version = "0.3.0"
-dependencies = [
- "jmespath",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "aws-cli-protocol"
-version = "0.3.0"
-dependencies = [
- "aws-cli-model",
- "quick-xml",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "aws-cli-runtime"
-version = "0.3.0"
-dependencies = [
- "aws-cli-model",
- "bytes",
- "futures-core",
- "futures-util",
- "hmac",
- "http",
- "http-body-util",
- "hyper",
- "hyper-rustls",
- "hyper-util",
- "libc",
- "rustls",
- "rustls-pemfile",
- "serde",
- "serde_json",
- "sha1",
- "sha2",
- "thiserror",
- "tokio",
- "tokio-util",
- "ureq",
-]
-
-[[package]]
 name = "aws-lc-rs"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -119,10 +50,10 @@ dependencies = [
 name = "awsc"
 version = "0.3.0"
 dependencies = [
- "aws-cli-model",
- "aws-cli-output",
- "aws-cli-protocol",
- "aws-cli-runtime",
+ "awsc-model",
+ "awsc-output",
+ "awsc-protocol",
+ "awsc-runtime",
  "base64ct",
  "flate2",
  "libc",
@@ -132,6 +63,75 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "ureq",
+]
+
+[[package]]
+name = "awsc-conformance"
+version = "0.3.0"
+dependencies = [
+ "awsc-model",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "awsc-model"
+version = "0.3.0"
+dependencies = [
+ "elsa",
+ "indexmap",
+ "memmap2",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "awsc-output"
+version = "0.3.0"
+dependencies = [
+ "jmespath",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "awsc-protocol"
+version = "0.3.0"
+dependencies = [
+ "awsc-model",
+ "quick-xml",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "awsc-runtime"
+version = "0.3.0"
+dependencies = [
+ "awsc-model",
+ "bytes",
+ "futures-core",
+ "futures-util",
+ "hmac",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "libc",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "tokio-util",
  "ureq",
 ]
 

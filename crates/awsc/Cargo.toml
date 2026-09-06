@@ -16,10 +16,10 @@ name = "awsc"
 path = "src/main.rs"
 
 [dependencies]
-aws-cli-model = { workspace = true }
-aws-cli-protocol = { workspace = true }
-aws-cli-runtime = { workspace = true }
-aws-cli-output = { workspace = true }
+awsc-model = { workspace = true }
+awsc-protocol = { workspace = true }
+awsc-runtime = { workspace = true }
+awsc-output = { workspace = true }
 serde_json = { workspace = true }
 regex = "1"
 # Only for SSE-C: S3 requires the customer key's MD5 alongside the key itself.

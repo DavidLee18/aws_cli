@@ -1,7 +1,7 @@
 # Known divergences
 
 Every divergence the conformance report prints, traced to its cause in the reference CLI.
-Regenerate with `cargo run -p aws-cli-conformance`.
+Regenerate with `cargo run -p awsc-conformance`.
 
 ## Current state: ZERO surface divergence, and a deliberate superset
 
@@ -30,7 +30,7 @@ Three gates, and it is worth being clear about what each one does *not* cover:
   entirely and leave it green. Extras are permitted only where they *equal* the
   event-stream table — a real extra cannot hide inside the exemption, and a table entry
   that stops being derived is caught too.
-- The report binary (`cargo run -p aws-cli-conformance`) prints the extras separately and
+- The report binary (`cargo run -p awsc-conformance`) prints the extras separately and
   exits zero when nothing else diverges, so it is safe to gate CI on.
 
 New divergence means a regression or upstream drift after refetching; fix or regenerate
@@ -77,7 +77,7 @@ the reference while building the STS vertical slice.
 
 - **Endpoint resolution** — `smithy.rules#endpointRuleSet` is fully interpreted, and the
   implementation passes **AWS's own conformance suite: 14,112 of 14,112 cases across all
-  431 services** (`cargo test -p aws-cli-runtime --test endpoint_rules`). That covers
+  431 services** (`cargo test -p awsc-runtime --test endpoint_rules`). That covers
   dualstack, FIPS, global endpoints, per-partition DNS suffixes, S3 virtual-host vs
   path-style, and the auth-scheme overrides where the signing region differs from the
   endpoint region.
@@ -917,7 +917,7 @@ Both were individually reasonable and they disagreed, and the harness reported "
 divergences" the whole time — a harness that re-derives the surface can only check its own
 derivation.
 
-`aws_cli_model::command_table` is now that derivation, applying removals, operation
+`awsc_model::command_table` is now that derivation, applying removals, operation
 renames, aliases and replacements. The binary resolves commands through it and the surface
 builder enumerates through it, so they agree by construction rather than by two
 implementations happening to match.

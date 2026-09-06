@@ -2,15 +2,15 @@
 //!
 //! Custom commands on the modelled `sso` service: neither corresponds to an operation on
 //! it, so both are dispatched before the model is consulted. The work itself lives in
-//! [`aws_cli_runtime::credentials::sso_login`], next to the provider that consumes what
+//! [`awsc_runtime::credentials::sso_login`], next to the provider that consumes what
 //! they produce.
 
 use crate::args::{Arity, Parsed};
 use crate::exit;
 use crate::Failure;
-use aws_cli_runtime::credentials::profile::Config;
-use aws_cli_runtime::credentials::sso_login::{self, LoginRequest};
-use aws_cli_runtime::RuntimeError;
+use awsc_runtime::credentials::profile::Config;
+use awsc_runtime::credentials::sso_login::{self, LoginRequest};
+use awsc_runtime::RuntimeError;
 use std::process::ExitCode;
 
 /// `sso login`'s flags. `--sso-session` takes a value; the other two are switches.
@@ -23,7 +23,7 @@ pub fn flag_arity(flag: &str) -> Arity {
 
 pub fn login(parsed: &Parsed) -> Result<ExitCode, Failure> {
     let config = Config::load().map_err(|e| Failure::new(exit::CONFIGURATION, e))?;
-    let profile = aws_cli_runtime::credentials::profile::profile_name(parsed.profile.as_deref());
+    let profile = awsc_runtime::credentials::profile::profile_name(parsed.profile.as_deref());
     let explicit_session = parsed.parameters.get("--sso-session").and_then(Clone::clone);
 
     let request = build_request(&config, &profile, explicit_session, parsed)?;
@@ -67,7 +67,7 @@ fn build_request(
             let session = config.sso_sessions.get(&name).ok_or_else(|| {
                 Failure::new(
                     exit::CONFIGURATION,
-                    aws_cli_runtime::RuntimeError::Configuration(format!(
+                    awsc_runtime::RuntimeError::Configuration(format!(
                         "The specified sso-session does not exist: \"{name}\""
                     )),
                 )
@@ -94,7 +94,7 @@ fn build_request(
         };
         return Err(Failure::new(
             exit::CONFIGURATION,
-            aws_cli_runtime::RuntimeError::Configuration(format!(
+            awsc_runtime::RuntimeError::Configuration(format!(
                 "Missing the following required SSO configuration values: {}.{hint}",
                 missing.join(", ")
             )),

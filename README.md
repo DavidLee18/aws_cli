@@ -60,11 +60,11 @@ Crates are added as they are implemented.
 
 | Crate | Status | Responsibility |
 |---|---|---|
-| `aws-cli-model` | **implemented** | Smithy AST loader, shape index, botocore-compatible naming, overlays |
-| `aws-cli-conformance` | **implemented** | Differential testing against the reference CLI |
-| `aws-cli-protocol` | **all six** ✅ | awsQuery, ec2Query, awsJson 1.0/1.1, restJson1, restXml, plus pagination, shorthand and response fix-ups |
-| `aws-cli-runtime` | **partial** | sigv4 ✅, endpoint rulesets ✅ (14,112/14,112 AWS conformance cases), credentials ✅ (env, static, SSO + refresh, assume-role, credential_process, IMDSv2, container) |
-| `aws-cli-output` | **all six** ✅ | `json`, `text`, `table`, `yaml`, `yaml-stream`, `off`, plus `--query` (JMESPath) |
+| `awsc-model` | **implemented** | Smithy AST loader, shape index, botocore-compatible naming, overlays |
+| `awsc-conformance` | **implemented** | Differential testing against the reference CLI |
+| `awsc-protocol` | **all six** ✅ | awsQuery, ec2Query, awsJson 1.0/1.1, restJson1, restXml, plus pagination, shorthand and response fix-ups |
+| `awsc-runtime` | **partial** | sigv4 ✅, endpoint rulesets ✅ (14,112/14,112 AWS conformance cases), credentials ✅ (env, static, SSO + refresh, assume-role, credential_process, IMDSv2, container) |
+| `awsc-output` | **all six** ✅ | `json`, `text`, `table`, `yaml`, `yaml-stream`, `off`, plus `--query` (JMESPath) |
 | `awsc` | **runs** | The binary: dispatch, global args, exit codes |
 | `aws-cli-custom` | planned | The hand-written customisations as behaviour |
 
@@ -97,10 +97,10 @@ Two halves, of which the first exists today:
 **Surface conformance** — offline, no credentials, covers the whole catalogue.
 `scripts/extract-reference-surface.py` drives the reference CLI's own `CLIDriver` to dump
 every service, operation and `--flag` into `tests/golden/reference-surface.json`.
-`aws-cli-conformance` derives the same surface from Smithy models and diffs the two:
+`awsc-conformance` derives the same surface from Smithy models and diffs the two:
 
 ```sh
-cargo run -p aws-cli-conformance     # divergence report; non-zero exit if any
+cargo run -p awsc-conformance     # divergence report; non-zero exit if any
 ```
 
 Driving the real `CLIDriver` rather than reading raw models matters: the command table it
@@ -114,7 +114,7 @@ worklist.
 - `tests/golden/sigv4-sts-get-caller-identity.json` pins the signer byte-for-byte against
   a request captured from the reference (sigv4 is deterministic given credentials,
   timestamp and request, so this needs neither network nor real credentials).
-- `cargo test -p aws-cli-runtime --test endpoint_rules` runs AWS's own endpoint suite —
+- `cargo test -p awsc-runtime --test endpoint_rules` runs AWS's own endpoint suite —
   14,112 cases across 431 services.
 - Exit codes and error wording are compared against the reference directly.
 
@@ -172,7 +172,7 @@ repository — see Development below.
 scripts/fetch-models.sh          # vendor the protocol-coverage model set into models/
 scripts/fetch-models.sh s3 ec2   # or specific services
 cargo test                       # unit + integration tests
-cargo run -p aws-cli-conformance # divergence report
+cargo run -p awsc-conformance # divergence report
 ```
 
 Generated artefacts, and whether they are checked in:
@@ -180,12 +180,12 @@ Generated artefacts, and whether they are checked in:
 | Path | Checked in | Produced by | Why |
 |---|---|---|---|
 | `models/` | no (~110MB) | `scripts/fetch-models.sh` | Large and reproducible; pin with `AWS_SDK_RUST_REF` |
-| `crates/aws-cli-model/data/service-names.json` | **yes** | `scripts/extract-service-names.py` | `include_str!`'d into the binary — required to build |
-| `crates/aws-cli-model/data/paginators.json` | **yes** (642KB) | `scripts/extract-paginators.py` | botocore paginator overlay; which ops paginate is *not* derivable from Smithy |
-| `crates/aws-cli-runtime/data/partitions.json` | **yes** (7KB) | `scripts/extract-partitions.py` | `aws.partition` table + the no-region global-endpoint fallback |
-| `crates/aws-cli-model/data/protocol-metadata.json` | **yes** | `scripts/extract-protocol-metadata.py` | awsJson `targetPrefix`; not derivable from the Smithy models |
-| `crates/aws-cli-model/data/customizations.json` | **yes** (9KB) | `scripts/extract-customizations.py` | argrename/removals/alias tables, extracted from the customization modules |
-| `crates/aws-cli-model/data/custom-surface.json` | **yes** (57KB) | `scripts/extract-custom-surface.py` | per-op arg patches, custom commands, botocore waiter catalogue (re-runs merge; see `--no-merge`) |
+| `crates/awsc-model/data/service-names.json` | **yes** | `scripts/extract-service-names.py` | `include_str!`'d into the binary — required to build |
+| `crates/awsc-model/data/paginators.json` | **yes** (642KB) | `scripts/extract-paginators.py` | botocore paginator overlay; which ops paginate is *not* derivable from Smithy |
+| `crates/awsc-runtime/data/partitions.json` | **yes** (7KB) | `scripts/extract-partitions.py` | `aws.partition` table + the no-region global-endpoint fallback |
+| `crates/awsc-model/data/protocol-metadata.json` | **yes** | `scripts/extract-protocol-metadata.py` | awsJson `targetPrefix`; not derivable from the Smithy models |
+| `crates/awsc-model/data/customizations.json` | **yes** (9KB) | `scripts/extract-customizations.py` | argrename/removals/alias tables, extracted from the customization modules |
+| `crates/awsc-model/data/custom-surface.json` | **yes** (57KB) | `scripts/extract-custom-surface.py` | per-op arg patches, custom commands, botocore waiter catalogue (re-runs merge; see `--no-merge`) |
 | `tests/golden/reference-surface.json` | **yes** (5.9MB) | `scripts/extract-reference-surface.py` | Lets CI run conformance without an awscli install, and makes surface changes reviewable in diffs |
 
 Every `scripts/extract-*.py` reads the reference install read-only and pins

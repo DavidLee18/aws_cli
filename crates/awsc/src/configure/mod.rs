@@ -16,7 +16,7 @@ pub mod writer;
 use crate::args::{Arity, Parsed};
 use crate::exit;
 use crate::Failure;
-use aws_cli_runtime::credentials::profile::Config;
+use awsc_runtime::credentials::profile::Config;
 use std::collections::BTreeMap;
 use std::process::ExitCode;
 use writer::{Setting, Update};
@@ -75,7 +75,7 @@ pub fn dispatch(parsed: &Parsed) -> Result<ExitCode, Failure> {
         )),
         other => Err(Failure::new(
             exit::PARAM_VALIDATION,
-            aws_cli_runtime::RuntimeError::ParamValidation(format!(
+            awsc_runtime::RuntimeError::ParamValidation(format!(
                 "argument subcommand: Invalid choice: '{other}'"
             )),
         )),
@@ -133,7 +133,7 @@ fn list(parsed: &Parsed) -> Result<ExitCode, Failure> {
     // Credentials always report the *provider* that supplied them, never where the value
     // was looked up -- which is why the LOCATION column is empty for them, and why
     // `Credentials` has to carry its own method.
-    match aws_cli_runtime::credentials::resolve(parsed.profile.as_deref(), None) {
+    match awsc_runtime::credentials::resolve(parsed.profile.as_deref(), None) {
         Ok(credentials) => {
             out.push_str(&row(
                 "access_key",
@@ -153,7 +153,7 @@ fn list(parsed: &Parsed) -> Result<ExitCode, Failure> {
         // every row would confirm a setup that is not there. Everything printed so far
         // still goes out, matching the reference, which has already written those rows by
         // the time the lookup raises.
-        Err(e @ aws_cli_runtime::credentials::CredentialError::UnknownProfile(_)) => {
+        Err(e @ awsc_runtime::credentials::CredentialError::UnknownProfile(_)) => {
             print!("{out}");
             return Err(Failure::new(exit::GENERAL_ERROR, e));
         }
@@ -220,7 +220,7 @@ fn get(parsed: &Parsed) -> Result<ExitCode, Failure> {
             if explicit && !config.profile_exists(&profile) {
                 return Err(Failure::new(
                     exit::GENERAL_ERROR,
-                    aws_cli_runtime::credentials::CredentialError::UnknownProfile(profile),
+                    awsc_runtime::credentials::CredentialError::UnknownProfile(profile),
                 ));
             }
             config.profile(&profile).and_then(|p| p.get(&varname).cloned())
@@ -263,7 +263,7 @@ fn subsection(parsed: &Parsed) -> Result<Option<(&'static str, String)>, Failure
     match (sso, services) {
         (Some(_), Some(_)) => Err(Failure::new(
             exit::PARAM_VALIDATION,
-            aws_cli_runtime::RuntimeError::ParamValidation(
+            awsc_runtime::RuntimeError::ParamValidation(
                 "The key \"services\" cannot be specified when one of the following keys \
                  are also specified: sso_session"
                     .to_string(),
@@ -400,7 +400,7 @@ fn nest_strict(varname: &str, value: String) -> Result<(String, Setting), Failur
     if varname.split('.').count() > 2 {
         return Err(Failure::new(
             exit::PARAM_VALIDATION,
-            aws_cli_runtime::RuntimeError::ParamValidation(
+            awsc_runtime::RuntimeError::ParamValidation(
                 "Found more than two parts in the property to set. \
                  Deep nesting of properties is not supported."
                     .to_string(),
@@ -456,12 +456,12 @@ fn warn_if_permissive(path: &std::path::Path) {
 }
 
 pub(crate) fn config_path() -> std::path::PathBuf {
-    aws_cli_runtime::credentials::profile::config_file_path()
+    awsc_runtime::credentials::profile::config_file_path()
         .unwrap_or_else(|| std::path::PathBuf::from("config"))
 }
 
 fn credentials_path() -> std::path::PathBuf {
-    aws_cli_runtime::credentials::profile::credentials_file_path()
+    awsc_runtime::credentials::profile::credentials_file_path()
         .unwrap_or_else(|| std::path::PathBuf::from("credentials"))
 }
 
@@ -489,7 +489,7 @@ fn missing_positionals(names: &[&str]) -> Failure {
         exit::PARAM_VALIDATION,
         format!(
             "{}\n\n{}",
-            aws_cli_runtime::RuntimeError::ParamValidation(format!(
+            awsc_runtime::RuntimeError::ParamValidation(format!(
                 "the following arguments are required: {}",
                 names.join(", ")
             )),

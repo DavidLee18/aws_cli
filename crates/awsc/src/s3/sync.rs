@@ -50,7 +50,7 @@ pub fn run(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> {
             exit::PARAM_VALIDATION,
             format!(
                 "{}\n\n{}",
-                aws_cli_runtime::RuntimeError::ParamValidation(
+                awsc_runtime::RuntimeError::ParamValidation(
                     "the following arguments are required: paths".to_string()
                 ),
                 crate::USAGE_HINT

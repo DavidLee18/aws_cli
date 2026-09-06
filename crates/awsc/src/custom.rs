@@ -56,7 +56,7 @@ pub fn dispatch(parsed: &Parsed) -> Result<Option<ExitCode>, Failure> {
 fn unknown_options(extras: &[String]) -> Failure {
     Failure::new(
         exit::PARAM_VALIDATION,
-        aws_cli_runtime::RuntimeError::ParamValidation(format!(
+        awsc_runtime::RuntimeError::ParamValidation(format!(
             "Unknown options: {}",
             extras.join(",")
         )),
@@ -69,7 +69,7 @@ fn missing_required(missing: &[&str]) -> Failure {
         exit::PARAM_VALIDATION,
         format!(
             "{}\n\n{}",
-            aws_cli_runtime::RuntimeError::ParamValidation(format!(
+            awsc_runtime::RuntimeError::ParamValidation(format!(
                 "the following arguments are required: {}",
                 missing.join(", ")
             )),
@@ -155,7 +155,7 @@ fn get_login_password(
             Failure::new(exit::GENERAL_ERROR, "GetAuthorizationToken returned no authorizationToken")
         })?;
 
-    let decoded = aws_cli_protocol::shapes::base64_decode(encoded)
+    let decoded = awsc_protocol::shapes::base64_decode(encoded)
         .and_then(|bytes| String::from_utf8(bytes).ok())
         .ok_or_else(|| {
             Failure::new(exit::GENERAL_ERROR, "authorizationToken is not valid base64 UTF-8")
@@ -254,7 +254,7 @@ fn generate_db_auth_token(parsed: &Parsed, globals: &Globals) -> Result<ExitCode
     })?;
 
     let region = resolve_region(globals)
-        .ok_or_else(|| Failure::new(exit::CONFIGURATION, aws_cli_runtime::RuntimeError::NoRegion))?;
+        .ok_or_else(|| Failure::new(exit::CONFIGURATION, awsc_runtime::RuntimeError::NoRegion))?;
     let creds = resolve_credentials(globals, &region)?;
 
     // The signed host omits `:443` and is lowercased, but the emitted URL keeps the port
@@ -265,15 +265,15 @@ fn generate_db_auth_token(parsed: &Parsed, globals: &Globals) -> Result<ExitCode
         format!("{}:{port}", hostname.to_ascii_lowercase())
     };
 
-    let ctx = aws_cli_runtime::sigv4::SigningContext {
+    let ctx = awsc_runtime::sigv4::SigningContext {
         credentials: &creds,
         region: &region,
         service: "rds-db",
-        timestamp: &aws_cli_runtime::sigv4::format_timestamp(crate::now_unix()),
+        timestamp: &awsc_runtime::sigv4::format_timestamp(crate::now_unix()),
     };
-    let query = aws_cli_runtime::presign::presign(
+    let query = awsc_runtime::presign::presign(
         &ctx,
-        &aws_cli_runtime::presign::PresignRequest {
+        &awsc_runtime::presign::PresignRequest {
             method: "GET",
             host: &signed_host,
             path: "/",
@@ -283,7 +283,7 @@ fn generate_db_auth_token(parsed: &Parsed, globals: &Globals) -> Result<ExitCode
             ],
             extra_signed_headers: Vec::new(),
             expires: 900,
-            payload: aws_cli_runtime::presign::Payload::EmptyBody,
+            payload: awsc_runtime::presign::Payload::EmptyBody,
         },
     );
 
@@ -363,7 +363,7 @@ fn codecommit_credential_helper(parsed: &Parsed, globals: &Globals) -> Result<Ex
     let region = codecommit_region(host)
         .map(str::to_string)
         .or_else(|| resolve_region(globals))
-        .ok_or_else(|| Failure::new(exit::CONFIGURATION, aws_cli_runtime::RuntimeError::NoRegion))?;
+        .ok_or_else(|| Failure::new(exit::CONFIGURATION, awsc_runtime::RuntimeError::NoRegion))?;
     let creds = resolve_credentials(globals, &region)?;
 
     // The port is stripped from the signed host but its case is preserved — this uses
@@ -375,17 +375,17 @@ fn codecommit_credential_helper(parsed: &Parsed, globals: &Globals) -> Result<Ex
 
     let canonical_request = format!("GIT\n{url_path}\n\nhost:{signed_host}\n\nhost\n");
 
-    let stamp = aws_cli_runtime::sigv4::format_timestamp(crate::now_unix());
+    let stamp = awsc_runtime::sigv4::format_timestamp(crate::now_unix());
     // `%Y%m%dT%H%M%S` — the reference's timestamp has no `Z` inside the string-to-sign.
     let unzoned = stamp.trim_end_matches('Z');
-    let ctx = aws_cli_runtime::sigv4::SigningContext {
+    let ctx = awsc_runtime::sigv4::SigningContext {
         credentials: &creds,
         region: &region,
         service: "codecommit",
         timestamp: unzoned,
     };
     let (_, signature) =
-        aws_cli_runtime::sigv4::sign_canonical_request(&ctx, &canonical_request);
+        awsc_runtime::sigv4::sign_canonical_request(&ctx, &canonical_request);
 
     let mut username = creds.access_key_id.clone();
     if let Some(token) = &creds.session_token {
@@ -416,7 +416,7 @@ fn eks_get_token(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure
     if cluster_name.is_some() && cluster_id.is_some() {
         return Err(Failure::new(
             exit::PARAM_VALIDATION,
-            aws_cli_runtime::RuntimeError::ParamValidation(
+            awsc_runtime::RuntimeError::ParamValidation(
                 "The key \"cluster_id\" cannot be specified when one of the following \
                  keys are also specified: cluster_name"
                     .to_string(),
@@ -433,7 +433,7 @@ fn eks_get_token(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure
     };
 
     let region = resolve_region(globals)
-        .ok_or_else(|| Failure::new(exit::CONFIGURATION, aws_cli_runtime::RuntimeError::NoRegion))?;
+        .ok_or_else(|| Failure::new(exit::CONFIGURATION, awsc_runtime::RuntimeError::NoRegion))?;
 
     // `--endpoint-url` is not forwarded here: the reference builds the STS client without
     // it, so an override aimed at EKS must not redirect the token's STS endpoint.
@@ -457,7 +457,7 @@ fn eks_get_token(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure
             let creds = assumed.get("Credentials").ok_or_else(|| {
                 Failure::new(exit::GENERAL_ERROR, "AssumeRole returned no Credentials")
             })?;
-            aws_cli_runtime::credentials::Credentials {
+            awsc_runtime::credentials::Credentials {
                 access_key_id: string(creds, "AccessKeyId").to_string(),
                 secret_access_key: string(creds, "SecretAccessKey").to_string(),
                 session_token: Some(string(creds, "SessionToken").to_string()),
@@ -468,15 +468,15 @@ fn eks_get_token(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure
     };
 
     let now = crate::now_unix();
-    let ctx = aws_cli_runtime::sigv4::SigningContext {
+    let ctx = awsc_runtime::sigv4::SigningContext {
         credentials: &credentials,
         region: &sts.endpoint.signing_region,
         service: &sts.endpoint.signing_name,
-        timestamp: &aws_cli_runtime::sigv4::format_timestamp(now),
+        timestamp: &awsc_runtime::sigv4::format_timestamp(now),
     };
-    let query = aws_cli_runtime::presign::presign(
+    let query = awsc_runtime::presign::presign(
         &ctx,
-        &aws_cli_runtime::presign::PresignRequest {
+        &awsc_runtime::presign::PresignRequest {
             method: "GET",
             host: &sts.endpoint.host,
             path: "/",
@@ -486,7 +486,7 @@ fn eks_get_token(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure
             ],
             extra_signed_headers: vec![("x-k8s-aws-id".into(), identifier.to_string())],
             expires: 60,
-            payload: aws_cli_runtime::presign::Payload::EmptyBody,
+            payload: awsc_runtime::presign::Payload::EmptyBody,
         },
     );
     let url = format!("{}/?{query}", sts.endpoint.url.trim_end_matches('/'));
@@ -504,11 +504,11 @@ fn eks_get_token(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure
     });
 
     let document = match &parsed.query {
-        Some(expression) => aws_cli_output::query::apply(&document, expression)
+        Some(expression) => awsc_output::query::apply(&document, expression)
             .map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?,
         None => document,
     };
-    match aws_cli_output::render_named("get-token", &document, parsed.output) {
+    match awsc_output::render_named("get-token", &document, parsed.output) {
         Ok(Some(text)) => print!("{text}"),
         Ok(None) => {}
         Err(e) => return Err(Failure::new(exit::GENERAL_ERROR, e)),
@@ -562,7 +562,7 @@ fn discover_api_version() -> String {
 
 /// `base64.urlsafe_b64encode(...).rstrip('=')`.
 fn base64url_unpadded(bytes: &[u8]) -> String {
-    aws_cli_protocol::shapes::base64_encode(bytes)
+    awsc_protocol::shapes::base64_encode(bytes)
         .trim_end_matches('=')
         .replace('+', "-")
         .replace('/', "_")
@@ -570,7 +570,7 @@ fn base64url_unpadded(bytes: &[u8]) -> String {
 
 /// `%Y-%m-%dT%H:%M:%SZ`, built from the sigv4 formatter so there is one date routine.
 fn format_rfc3339(unix_seconds: i64) -> String {
-    let compact = aws_cli_runtime::sigv4::format_timestamp(unix_seconds);
+    let compact = awsc_runtime::sigv4::format_timestamp(unix_seconds);
     format!(
         "{}-{}-{}T{}:{}:{}Z",
         &compact[0..4],
@@ -598,15 +598,15 @@ fn codecommit_region(host: &str) -> Option<&str> {
 /// The region, honouring the profile's `region` key as botocore's precedence does.
 fn resolve_region(globals: &Globals) -> Option<String> {
     let profile_region =
-        aws_cli_runtime::credentials::profile::profile_region(globals.profile.as_deref());
-    aws_cli_runtime::endpoint::resolve_region(globals.region.as_deref(), profile_region.as_deref())
+        awsc_runtime::credentials::profile::profile_region(globals.profile.as_deref());
+    awsc_runtime::endpoint::resolve_region(globals.region.as_deref(), profile_region.as_deref())
 }
 
 fn resolve_credentials(
     globals: &Globals,
     region: &str,
-) -> Result<aws_cli_runtime::credentials::Credentials, Failure> {
-    aws_cli_runtime::credentials::resolve(globals.profile.as_deref(), Some(region)).map_err(|e| {
+) -> Result<awsc_runtime::credentials::Credentials, Failure> {
+    awsc_runtime::credentials::resolve(globals.profile.as_deref(), Some(region)).map_err(|e| {
         let code = if e.is_configuration_error() {
             exit::CONFIGURATION
         } else if e.is_client_error() {
@@ -647,7 +647,7 @@ fn configservice_subscribe(parsed: &Parsed, globals: &Globals) -> Result<ExitCod
     };
 
     let region = resolve_region(globals)
-        .ok_or_else(|| Failure::new(exit::CONFIGURATION, aws_cli_runtime::RuntimeError::NoRegion))?;
+        .ok_or_else(|| Failure::new(exit::CONFIGURATION, awsc_runtime::RuntimeError::NoRegion))?;
     let other = Globals { region: Some(region.clone()), ..globals.for_other_service() };
 
     // "s3api" is the CLI's name for the modelled S3 service; plain "s3" is the separate

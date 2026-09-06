@@ -1,9 +1,9 @@
 //! Command-line parsing and model-driven parameter binding.
 
-use aws_cli_model::shape::StructureShape;
-use aws_cli_model::{naming, surface_overlays, Model, Shape, ShapeId};
-use aws_cli_protocol::shorthand;
-use aws_cli_output::Format;
+use awsc_model::shape::StructureShape;
+use awsc_model::{naming, surface_overlays, Model, Shape, ShapeId};
+use awsc_protocol::shorthand;
+use awsc_output::Format;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
@@ -229,7 +229,7 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
                 let expression = take_value()?;
                 // Validated here so a bad expression fails before any API call, which is
                 // where the reference validates it too.
-                aws_cli_output::query::validate(&expression).map_err(|e| e.to_string())?;
+                awsc_output::query::validate(&expression).map_err(|e| e.to_string())?;
                 parsed.query = Some(expression);
             }
             "--no-sign-request" => parsed.no_sign_request = true,
@@ -354,7 +354,7 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
     // The profile is the only other source for this one, and only when the flag is absent.
     if !binary_format_given {
         if let Some(configured) =
-            aws_cli_runtime::credentials::profile_setting("cli_binary_format", parsed.profile.as_deref())
+            awsc_runtime::credentials::profile_setting("cli_binary_format", parsed.profile.as_deref())
         {
             // An unrecognised value in config is ignored rather than fatal, as it is for
             // every other config-sourced setting; only the flag rejects.
@@ -455,7 +455,7 @@ pub fn build_input_named(
             if let Some(bytes) = read_fileb(raw_value).map_err(|e| format!("{flag}: {e}"))? {
                 out.insert(
                     (*member_name).clone(),
-                    Value::String(aws_cli_protocol::shapes::base64_encode(&bytes)),
+                    Value::String(awsc_protocol::shapes::base64_encode(&bytes)),
                 );
                 already_bytes.insert((*member_name).clone());
                 continue;
@@ -503,7 +503,7 @@ impl From<String> for InputError {
 
 /// A blob that carries a value, as opposed to a streaming payload whose argument is a
 /// path to send from. Streaming members are never touched by any of this.
-fn is_plain_blob(model: &Model, target: &aws_cli_model::ShapeId) -> bool {
+fn is_plain_blob(model: &Model, target: &awsc_model::ShapeId) -> bool {
     matches!(model.shape(target), Some(Shape::Blob(b)) if !b.traits.has("smithy.api#streaming"))
 }
 
@@ -546,7 +546,7 @@ fn normalize_blobs(
 
 fn normalize_blob_value(
     model: &Model,
-    target: &aws_cli_model::ShapeId,
+    target: &awsc_model::ShapeId,
     value: &mut Value,
     format: BinaryFormat,
 ) -> Result<(), InputError> {
@@ -557,7 +557,7 @@ fn normalize_blob_value(
                 // The text is already base64; it only has to be *valid*, because the
                 // reference decodes it here and reports the failure with this wording.
                 BinaryFormat::Base64 => {
-                    if aws_cli_protocol::shapes::base64_decode(text).is_none() {
+                    if awsc_protocol::shapes::base64_decode(text).is_none() {
                         return Err(InputError {
                             message: format!("Invalid base64: \"{text}\""),
                             general: true,
@@ -567,7 +567,7 @@ fn normalize_blob_value(
                 // v1 semantics: the text is the bytes.
                 BinaryFormat::RawInBase64Out => {
                     *value =
-                        Value::String(aws_cli_protocol::shapes::base64_encode(text.as_bytes()));
+                        Value::String(awsc_protocol::shapes::base64_encode(text.as_bytes()));
                 }
             }
         }
@@ -596,7 +596,7 @@ fn normalize_blob_value(
     Ok(())
 }
 
-fn arity(model: &Model, member: &aws_cli_model::shape::Member) -> Arity {
+fn arity(model: &Model, member: &awsc_model::shape::Member) -> Arity {
     match model.shape(&member.target) {
         Some(Shape::Boolean(_)) => Arity::None,
         Some(Shape::List(_) | Shape::Set(_)) => Arity::Many,
@@ -624,7 +624,7 @@ pub fn rebalance(
     }
     let Some(shape) = input_shape else { return };
     // Same mapping the binder uses, so a renamed flag resolves to the same member.
-    let by_flag: BTreeMap<String, &aws_cli_model::shape::Member> = shape
+    let by_flag: BTreeMap<String, &awsc_model::shape::Member> = shape
         .members
         .iter()
         .map(|(name, member)| {
@@ -677,7 +677,7 @@ pub fn rebalance(
 /// `--generate-cli-skeleton` is present, since those legitimately supply or replace the
 /// parameters.
 pub fn missing_required_flags(
-    model: &aws_cli_model::Model,
+    model: &awsc_model::Model,
     input_shape: Option<&StructureShape>,
     parsed: &Parsed,
     service: &str,
@@ -691,7 +691,7 @@ pub fn missing_required_flags(
     // would make the operation impossible to invoke. `bedrock-runtime` marks its stream
     // member required.
     let stream_member =
-        aws_cli_protocol::eventstream::stream_member(model, shape).map(|(name, _)| name);
+        awsc_protocol::eventstream::stream_member(model, shape).map(|(name, _)| name);
     shape
         .members
         .iter()
@@ -927,8 +927,8 @@ pub fn merge_cli_input(built: &mut Value, document: &Value) -> Result<(), String
 #[cfg(test)]
 mod tests {
     /// Fixture with a blob member, a nested structure holding one, and a streaming blob.
-    fn blob_model() -> (aws_cli_model::Model, StructureShape) {
-        let model = aws_cli_model::Model::from_json(
+    fn blob_model() -> (awsc_model::Model, StructureShape) {
+        let model = awsc_model::Model::from_json(
             br#"{"smithy":"2.0","shapes":{
               "com.x#S":{"type":"service","version":"1","traits":{}},
               "com.x#Str":{"type":"string"},
@@ -942,7 +942,7 @@ mod tests {
                 "Wrap":{"target":"com.x#Inner"}}}}}"#,
         )
         .expect("fixture model");
-        let id = aws_cli_model::ShapeId::parse("com.x#In").expect("shape id");
+        let id = awsc_model::ShapeId::parse("com.x#In").expect("shape id");
         let shape = match model.shape(&id).expect("shape present") {
             Shape::Structure(s) => s.clone(),
             other => panic!("expected a structure, got {other:?}"),
@@ -1021,7 +1021,7 @@ mod tests {
     /// outfile.
     #[test]
     fn splits_flag_values_from_positionals_by_shape() {
-        let model = aws_cli_model::Model::from_json(
+        let model = awsc_model::Model::from_json(
             br#"{"smithy":"2.0","shapes":{
               "com.x#S":{"type":"service","version":"1","traits":{}},
               "com.x#Str":{"type":"string"},
@@ -1033,7 +1033,7 @@ mod tests {
                 "DryRun":{"target":"com.x#Flag"}}}}}"#,
         )
         .expect("fixture model");
-        let id = aws_cli_model::ShapeId::parse("com.x#In").expect("shape id");
+        let id = awsc_model::ShapeId::parse("com.x#In").expect("shape id");
         let shape = match model.shape(&id).expect("shape present") {
             Shape::Structure(s) => s.clone(),
             other => panic!("expected a structure, got {other:?}"),
@@ -1073,7 +1073,7 @@ mod tests {
     /// A boolean keeps nothing: every token after it is a positional.
     #[test]
     fn a_boolean_flag_returns_all_its_tokens() {
-        let model = aws_cli_model::Model::from_json(
+        let model = awsc_model::Model::from_json(
             br#"{"smithy":"2.0","shapes":{
               "com.x#S":{"type":"service","version":"1","traits":{}},
               "com.x#Flag":{"type":"boolean"},
@@ -1081,7 +1081,7 @@ mod tests {
                 "DryRun":{"target":"com.x#Flag"}}}}}"#,
         )
         .expect("fixture model");
-        let id = aws_cli_model::ShapeId::parse("com.x#In").expect("shape id");
+        let id = awsc_model::ShapeId::parse("com.x#In").expect("shape id");
         let shape = match model.shape(&id).expect("shape present") {
             Shape::Structure(s) => s.clone(),
             other => panic!("expected a structure, got {other:?}"),

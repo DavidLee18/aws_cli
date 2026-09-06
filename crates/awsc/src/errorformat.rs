@@ -20,7 +20,7 @@
 //!   the setting entirely and prints the plain line. So this applies to service errors and
 //!   to the recognised parameter/configuration failures, and to nothing else.
 
-use aws_cli_output::Format;
+use awsc_output::Format;
 use serde_json::{Map, Value};
 
 /// The choices `data/cli.json` declares, in its order.
@@ -40,7 +40,7 @@ pub fn resolve(flag: Option<&str>, profile: Option<&str>) -> String {
         .map(str::to_string)
         .or_else(|| std::env::var("AWS_CLI_ERROR_FORMAT").ok().filter(|s| !s.is_empty()))
         .or_else(|| {
-            aws_cli_runtime::credentials::profile_setting("cli_error_format", profile)
+            awsc_runtime::credentials::profile_setting("cli_error_format", profile)
         });
     match candidate {
         Some(v) if ERROR_FORMATS.contains(&v.to_lowercase().as_str()) => v.to_lowercase(),
@@ -62,7 +62,7 @@ pub fn render(format: &str, message: &str, info: Option<&Map<String, Value>>) ->
         "json" | "yaml" | "text" | "table" => {
             let value = Value::Object(info.clone());
             let output = Format::parse(format).expect("checked against ERROR_FORMATS");
-            match aws_cli_output::render_named("error", &value, output) {
+            match awsc_output::render_named("error", &value, output) {
                 Ok(Some(text)) => text,
                 // An empty render falls back rather than printing nothing: an error that
                 // reports nothing at all is worse than one in the wrong style.

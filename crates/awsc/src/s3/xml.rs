@@ -1,6 +1,6 @@
 //! Just enough XML reading for the S3 responses the `s3` tree issues.
 //!
-//! The generic parser in `aws-cli-protocol` works from a modelled shape; these requests
+//! The generic parser in `awsc-protocol` works from a modelled shape; these requests
 //! are hand-built and have no shape to hand it, so this walks the document directly.
 
 use quick_xml::events::Event;

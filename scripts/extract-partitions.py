@@ -35,7 +35,7 @@ REFERENCE_SITE_PACKAGES = (
 SOURCE = Path(REFERENCE_SITE_PACKAGES) / "awscli/botocore/data/partitions.json"
 ENDPOINTS_SOURCE = Path(REFERENCE_SITE_PACKAGES) / "awscli/botocore/data/endpoints.json"
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_OUTPUT = REPO_ROOT / "crates" / "aws-cli-runtime" / "data" / "partitions.json"
+DEFAULT_OUTPUT = REPO_ROOT / "crates" / "awsc-runtime" / "data" / "partitions.json"
 
 
 def main() -> int:

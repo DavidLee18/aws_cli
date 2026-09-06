@@ -7,12 +7,12 @@
 
 use crate::exit;
 use crate::Failure;
-use aws_cli_runtime::{credentials::Credentials, endpoint::Endpoint, http, retry, sigv4};
+use awsc_runtime::{credentials::Credentials, endpoint::Endpoint, http, retry, sigv4};
 
 /// The service error code of a response that is about to be retried, for the trace.
 fn retried_error_code(response: &http::Response) -> Option<String> {
     if response.status >= 400 {
-        aws_cli_protocol::xml::parse_error(&response.text()).map(|e| e.code)
+        awsc_protocol::xml::parse_error(&response.text()).map(|e| e.code)
     } else {
         None
     }
@@ -100,7 +100,7 @@ impl Conn {
                 }
                 Ok(response) => {
                     let code = if response.status >= 400 {
-                        aws_cli_protocol::xml::parse_error(&response.text()).map(|e| e.code)
+                        awsc_protocol::xml::parse_error(&response.text()).map(|e| e.code)
                     } else {
                         None
                     };

@@ -12,9 +12,9 @@
 use crate::dispatch;
 use crate::exit;
 use crate::Failure;
-use aws_cli_model::{Model, Protocol};
-use aws_cli_protocol::eventstream;
-use aws_cli_runtime::{credentials, endpoint, http, retry, sigv4};
+use awsc_model::{Model, Protocol};
+use awsc_protocol::eventstream;
+use awsc_runtime::{credentials, endpoint, http, retry, sigv4};
 use serde_json::Value;
 use std::cell::RefCell;
 
@@ -66,7 +66,7 @@ impl Globals {
 /// Order is user-visible: the CLI prints members in the order the model declares them,
 /// and a response that mixes header and body bindings must interleave them accordingly.
 fn merge_in_model_order(
-    output_shape: Option<&aws_cli_model::shape::StructureShape>,
+    output_shape: Option<&awsc_model::shape::StructureShape>,
     headers: Value,
     body: Value,
 ) -> Value {
@@ -147,7 +147,7 @@ impl<'a> Client<'a> {
     pub fn for_operation(
         model: &'a Model,
         globals: &Globals,
-        operation: &aws_cli_model::shape::OperationShape,
+        operation: &awsc_model::shape::OperationShape,
         input: Option<&Value>,
     ) -> Result<Client<'a>, Failure> {
         // S3's ruleset branches on the bucket name — a directory bucket
@@ -177,7 +177,7 @@ impl<'a> Client<'a> {
         model: &'a Model,
         globals: &Globals,
         bucket: Option<&str>,
-        operation: Option<(&aws_cli_model::shape::OperationShape, Option<&Value>)>,
+        operation: Option<(&awsc_model::shape::OperationShape, Option<&Value>)>,
     ) -> Result<Client<'a>, Failure> {
         let protocol = model.protocol().map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
         // The profile's `region` key is the last step of botocore's precedence, and
@@ -321,7 +321,7 @@ impl<'a> Client<'a> {
                 }
                 Ok(response) => {
                     let code = if response.status >= 400 {
-                        aws_cli_protocol::xml::parse_error(&response.text()).map(|e| e.code)
+                        awsc_protocol::xml::parse_error(&response.text()).map(|e| e.code)
                     } else {
                         None
                     };
@@ -363,9 +363,9 @@ impl<'a> Client<'a> {
     pub fn call_operation_events(
         &self,
         operation_wire_name: &str,
-        op: &aws_cli_model::shape::OperationShape,
-        input_shape: Option<&aws_cli_model::shape::StructureShape>,
-        output_shape: &aws_cli_model::shape::StructureShape,
+        op: &awsc_model::shape::OperationShape,
+        input_shape: Option<&awsc_model::shape::StructureShape>,
+        output_shape: &awsc_model::shape::StructureShape,
         input: Option<&Value>,
         on_event: &mut dyn FnMut(eventstream::Event) -> Result<(), Failure>,
     ) -> Result<(), Failure> {
@@ -426,7 +426,7 @@ impl<'a> Client<'a> {
             return Err(failure);
         }
         match sent {
-            Err(aws_cli_runtime::RuntimeError::HttpStatus { status, body, headers }) => {
+            Err(awsc_runtime::RuntimeError::HttpStatus { status, body, headers }) => {
                 let (code, message) = dispatch::parse_error(
                     self.protocol,
                     status,
@@ -478,9 +478,9 @@ impl<'a> Client<'a> {
     pub fn call_operation_duplex(
         &self,
         operation_wire_name: &str,
-        op: &aws_cli_model::shape::OperationShape,
-        input_shape: Option<&aws_cli_model::shape::StructureShape>,
-        output_shape: &aws_cli_model::shape::StructureShape,
+        op: &awsc_model::shape::OperationShape,
+        input_shape: Option<&awsc_model::shape::StructureShape>,
+        output_shape: &awsc_model::shape::StructureShape,
         input: Option<&Value>,
         lines: Box<dyn Iterator<Item = std::io::Result<String>> + Send>,
         on_event: &mut dyn FnMut(eventstream::Event) -> Result<(), Failure>,
@@ -602,8 +602,8 @@ impl<'a> Client<'a> {
     fn pump_duplex(
         &self,
         operation_wire_name: &str,
-        request_union: &aws_cli_model::shape::StructureShape,
-        response_union: &aws_cli_model::shape::StructureShape,
+        request_union: &awsc_model::shape::StructureShape,
+        response_union: &awsc_model::shape::StructureShape,
         wake_rx: &std::sync::mpsc::Receiver<Wake>,
         frame_tx: std::sync::mpsc::Sender<Vec<u8>>,
         seed: &str,
@@ -680,7 +680,7 @@ impl<'a> Client<'a> {
     /// One line of input: `{"EventName": {...}}`, the same shape an output event prints.
     fn encode_request_event(
         &self,
-        request_union: &aws_cli_model::shape::StructureShape,
+        request_union: &awsc_model::shape::StructureShape,
         line: &str,
     ) -> Result<Vec<u8>, Failure> {
         let document: Value = serde_json::from_str(line).map_err(|e| {
@@ -700,7 +700,7 @@ impl<'a> Client<'a> {
 
     /// Wrap one frame in its signature and advance the chain.
     fn sign_event_frame(&self, prior: &mut String, inner: &[u8]) -> Vec<u8> {
-        use aws_cli_protocol::eventstream::HeaderValue;
+        use awsc_protocol::eventstream::HeaderValue;
 
         let now = crate::now_unix();
         let date = vec![(":date".to_string(), HeaderValue::Timestamp(now * 1000))];
@@ -725,10 +725,10 @@ impl<'a> Client<'a> {
     fn duplex_failure(
         &self,
         operation_wire_name: &str,
-        error: aws_cli_runtime::RuntimeError,
+        error: awsc_runtime::RuntimeError,
     ) -> Failure {
         match error {
-            aws_cli_runtime::RuntimeError::HttpStatus { status, body, headers } => {
+            awsc_runtime::RuntimeError::HttpStatus { status, body, headers } => {
                 let (code, message) = dispatch::parse_error(
                     self.protocol,
                     status,
@@ -760,8 +760,8 @@ impl<'a> Client<'a> {
     pub fn call_operation_raw(
         &self,
         operation_wire_name: &str,
-        op: &aws_cli_model::shape::OperationShape,
-        input_shape: Option<&aws_cli_model::shape::StructureShape>,
+        op: &awsc_model::shape::OperationShape,
+        input_shape: Option<&awsc_model::shape::StructureShape>,
         input: Option<&Value>,
     ) -> Result<http::Response, Failure> {
         let wire = dispatch::serialize(
@@ -810,15 +810,15 @@ impl<'a> Client<'a> {
     pub fn call_operation(
         &self,
         operation_wire_name: &str,
-        op: &aws_cli_model::shape::OperationShape,
-        input_shape: Option<&aws_cli_model::shape::StructureShape>,
-        output_shape: Option<&aws_cli_model::shape::StructureShape>,
+        op: &awsc_model::shape::OperationShape,
+        input_shape: Option<&awsc_model::shape::StructureShape>,
+        output_shape: Option<&awsc_model::shape::StructureShape>,
         input: Option<&Value>,
     ) -> Result<Value, Failure> {
         // S3's list operations are always sent with `EncodingType=url`, so a key that
         // cannot be represented in XML survives the round trip. The response is decoded
         // again below.
-        let url_encoded = aws_cli_protocol::response_fixups::wants_url_encoding(
+        let url_encoded = awsc_protocol::response_fixups::wants_url_encoding(
             &self.endpoint.signing_name,
             operation_wire_name,
         );
@@ -960,7 +960,7 @@ impl<'a> Client<'a> {
         // only the body left it with nothing to parse.
         let from_headers = match (self.protocol, output_shape) {
             (Protocol::RestJson1 | Protocol::RestXml, Some(shape)) => Some(
-                aws_cli_protocol::http_binding::bind_output_headers(
+                awsc_protocol::http_binding::bind_output_headers(
                     self.model,
                     shape,
                     response.headers(),
@@ -995,7 +995,7 @@ impl<'a> Client<'a> {
             None => from_body,
         };
         if url_encoded {
-            aws_cli_protocol::response_fixups::decode_encoded_keys(&mut document);
+            awsc_protocol::response_fixups::decode_encoded_keys(&mut document);
         }
         Ok(document)
     }
@@ -1006,9 +1006,9 @@ impl<'a> Client<'a> {
 /// A `Write` implementation because that is what the transport hands a streaming body,
 /// which means event streams reuse the download path rather than adding a second one.
 struct EventSink<'a> {
-    model: &'a aws_cli_model::Model,
+    model: &'a awsc_model::Model,
     protocol: Protocol,
-    union_shape: &'a aws_cli_model::shape::StructureShape,
+    union_shape: &'a awsc_model::shape::StructureShape,
     decoder: eventstream::Decoder,
     on_event: &'a mut dyn FnMut(eventstream::Event) -> Result<(), Failure>,
     /// The real error, since `Write` can only report an `io::Error`.
@@ -1063,7 +1063,7 @@ enum Wake {
     /// Raw response bytes, in whatever sizes the network produced.
     Response(Vec<u8>),
     /// The HTTP call returned, with its error if it had one.
-    Finished(Option<aws_cli_runtime::RuntimeError>),
+    Finished(Option<awsc_runtime::RuntimeError>),
 }
 
 /// Forwards response bytes into the event loop's channel.

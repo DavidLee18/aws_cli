@@ -5,11 +5,11 @@
 //! "the protocols work" and "the output is right".
 //!
 //! The pure parts (path evaluation, page merging) live in
-//! [`aws_cli_protocol::pagination`]; this module owns the loop and the decision of
+//! [`awsc_protocol::pagination`]; this module owns the loop and the decision of
 //! whether to paginate at all.
 
-use aws_cli_model::paginators::PaginatorOverlay;
-use aws_cli_protocol::pagination::{self, Accumulator, PaginationConfig};
+use awsc_model::paginators::PaginatorOverlay;
+use awsc_protocol::pagination::{self, Accumulator, PaginationConfig};
 use serde_json::Value;
 
 use crate::{exit, Failure};

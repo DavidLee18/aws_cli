@@ -18,7 +18,7 @@ use super::conn::Conn;
 use super::xml;
 use crate::exit;
 use crate::Failure;
-use aws_cli_runtime::http;
+use awsc_runtime::http;
 use std::sync::Mutex;
 
 /// Below this many sub-prefixes, fanning out costs more in extra requests than it saves.

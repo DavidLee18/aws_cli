@@ -1,0 +1,17 @@
+[package]
+name = "awsc-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "AWS wire protocols for a Rust port of the AWS CLI: awsQuery, ec2Query, awsJson, restJson1, restXml and rpcv2Cbor."
+repository = "https://github.com/DavidLee18/aws_cli"
+homepage = "https://github.com/DavidLee18/aws_cli"
+keywords = ["aws", "cli", "protocol", "smithy"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+awsc-model = { workspace = true }
+serde_json = { workspace = true }
+quick-xml = { workspace = true }
+thiserror = { workspace = true }

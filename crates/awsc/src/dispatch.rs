@@ -4,10 +4,10 @@
 //! Keeping this out of `main` means the binary's flow reads the same for every protocol,
 //! and adding one is a matter of extending two `match` arms.
 
-use aws_cli_model::shape::{OperationShape, StructureShape};
-use aws_cli_model::{Model, Protocol};
-use aws_cli_runtime::http::Body;
-use aws_cli_protocol::{
+use awsc_model::shape::{OperationShape, StructureShape};
+use awsc_model::{Model, Protocol};
+use awsc_runtime::http::Body;
+use awsc_protocol::{
     aws_json, cbor, ec2_query, http_binding, json, query, response_fixups, xml, ProtocolError,
 };
 use serde_json::Value;
@@ -24,7 +24,7 @@ pub struct WireRequest {
     pub headers: Vec<(String, String)>,
     /// Bytes, not text: `rpcv2Cbor` bodies are binary — and a streaming payload is not
     /// bytes at all, but a file read while the request is in flight.
-    pub body: aws_cli_runtime::http::Body,
+    pub body: awsc_runtime::http::Body,
 }
 
 /// Whether the service requires a checksum header on this operation's request body.
@@ -218,7 +218,7 @@ fn serialize_rest(
         let member = shape.members.get(name)?;
         let target = model.shape(&member.target)?;
         match target {
-            aws_cli_model::Shape::Blob(blob) if blob.traits.has("smithy.api#streaming") => {
+            awsc_model::Shape::Blob(blob) if blob.traits.has("smithy.api#streaming") => {
                 values.get(name)?.as_str().map(str::to_string)
             }
             _ => None,
@@ -248,11 +248,11 @@ fn serialize_rest(
             .members
             .get(name)
             .and_then(|m| model.shape(&m.target))
-            .is_some_and(|t| matches!(t, aws_cli_model::Shape::Blob(_)));
+            .is_some_and(|t| matches!(t, awsc_model::Shape::Blob(_)));
         if is_blob {
             let decoded = body_value
                 .as_str()
-                .and_then(aws_cli_protocol::shapes::base64_decode)
+                .and_then(awsc_protocol::shapes::base64_decode)
                 .unwrap_or_default();
             return Ok(WireRequest {
                 method: http.method,
@@ -398,7 +398,7 @@ pub fn parse_error(
     let fallback = || {
         let text = body.trim();
         if text.is_empty() {
-            (status.to_string(), aws_cli_runtime::http::reason_phrase(status).to_string())
+            (status.to_string(), awsc_runtime::http::reason_phrase(status).to_string())
         } else {
             // A CBOR body is binary, so its lossy text is noise rather than a message.
             let readable = if protocol == Protocol::Rpcv2Cbor { "" } else { text };

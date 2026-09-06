@@ -13,7 +13,7 @@
 //! lines, and the exit-code rule (1 if anything failed, 2 if only warnings).
 
 pub use super::conn::Conn;
-use aws_cli_runtime::http;
+use awsc_runtime::http;
 use super::delete;
 use super::pool::Pool;
 use super::progress::Progress;
@@ -433,7 +433,7 @@ fn run(parsed: &Parsed, globals: &Globals, verb: Verb) -> Result<ExitCode, Failu
             exit::PARAM_VALIDATION,
             format!(
                 "{}\n\n{}",
-                aws_cli_runtime::RuntimeError::ParamValidation(
+                awsc_runtime::RuntimeError::ParamValidation(
                     "the following arguments are required: paths".to_string()
                 ),
                 crate::USAGE_HINT

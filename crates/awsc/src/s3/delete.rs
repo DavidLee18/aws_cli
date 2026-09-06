@@ -17,7 +17,7 @@ use super::conn::Conn;
 use super::pool::Pool;
 use super::xml;
 use crate::Failure;
-use aws_cli_runtime::http;
+use awsc_runtime::http;
 
 /// The API's hard limit on keys per request.
 pub const MAX_KEYS: usize = 1000;

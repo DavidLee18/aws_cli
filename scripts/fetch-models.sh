@@ -58,7 +58,7 @@ fetch_one() {
 # container alone, so skipping this step produces an artifact with no models at all.
 compile_container() {
   echo "compiling ${DEST}/models.bin"
-  cargo run --release -q -p aws-cli-model --bin compile-models -- "${DEST}"
+  cargo run --release -q -p awsc-model --bin compile-models -- "${DEST}"
 }
 
 mkdir -p "$DEST"

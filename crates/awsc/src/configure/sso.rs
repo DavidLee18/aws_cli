@@ -15,9 +15,9 @@ use crate::args::Parsed;
 use crate::configure::writer::{self, Setting, Update};
 use crate::exit;
 use crate::Failure;
-use aws_cli_runtime::credentials::profile::{Config, Section};
-use aws_cli_runtime::credentials::sso_login::{self, LoginRequest};
-use aws_cli_runtime::RuntimeError;
+use awsc_runtime::credentials::profile::{Config, Section};
+use awsc_runtime::credentials::sso_login::{self, LoginRequest};
+use awsc_runtime::RuntimeError;
 use std::io::Write;
 use std::process::ExitCode;
 

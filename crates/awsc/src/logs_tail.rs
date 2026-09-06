@@ -224,7 +224,7 @@ impl Options {
         if !leftover.is_empty() {
             return Err(Failure::new(
                 exit::PARAM_VALIDATION,
-                aws_cli_runtime::RuntimeError::ParamValidation(format!(
+                awsc_runtime::RuntimeError::ParamValidation(format!(
                     "Unknown options: {}",
                     leftover.join(",")
                 )),
@@ -238,7 +238,7 @@ impl Options {
                     exit::PARAM_VALIDATION,
                     format!(
                         "{}\n\n{}",
-                        aws_cli_runtime::RuntimeError::ParamValidation(
+                        awsc_runtime::RuntimeError::ParamValidation(
                             "the following arguments are required: group_name".to_string()
                         ),
                         crate::USAGE_HINT
@@ -312,7 +312,7 @@ fn parts(millis: i64) -> (String, i64) {
     let seconds = millis.div_euclid(1000);
     let micros = millis.rem_euclid(1000) * 1000;
     // `YYYYMMDDTHHMMSSZ` from the one date routine the workspace has.
-    let compact = aws_cli_runtime::sigv4::format_timestamp(seconds);
+    let compact = awsc_runtime::sigv4::format_timestamp(seconds);
     let formatted = format!(
         "{}-{}-{}T{}:{}:{}",
         &compact[0..4],
@@ -538,7 +538,7 @@ mod tests {
     #[test]
     fn round_trips_the_civil_date_conversion() {
         for seconds in [0_i64, 1_786_657_696, 1_709_164_800] {
-            let compact = aws_cli_runtime::sigv4::format_timestamp(seconds);
+            let compact = awsc_runtime::sigv4::format_timestamp(seconds);
             let iso = format!(
                 "{}-{}-{}T{}:{}:{}Z",
                 &compact[0..4],

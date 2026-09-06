@@ -106,7 +106,7 @@ pub fn decode_listed(value: &str) -> String {
 /// `logs/`, or `delimiter=/` — is signed as `%2F` by S3 but sent raw by us, and the
 /// signature does not match. That failure only appears against the real service.
 pub fn encode_query(value: &str) -> String {
-    aws_cli_runtime::presign::percent_encode(value)
+    awsc_runtime::presign::percent_encode(value)
 }
 
 /// Base-2 sizes, as `--human-readable` and the progress bar render them.
@@ -158,19 +158,19 @@ pub fn parse_int<T: std::str::FromStr>(raw: &str) -> Result<T, Failure> {
 pub fn param_error(message: impl std::fmt::Display) -> Failure {
     Failure::new(
         exit::PARAM_VALIDATION,
-        aws_cli_runtime::RuntimeError::ParamValidation(message.to_string()),
+        awsc_runtime::RuntimeError::ParamValidation(message.to_string()),
     )
 }
 
 /// Turn a non-2xx S3 response into the error the reference would report.
-pub fn service_error(operation: &str, response: &aws_cli_runtime::http::Response) -> Failure {
+pub fn service_error(operation: &str, response: &awsc_runtime::http::Response) -> Failure {
     let text = response.text();
-    let (code, message) = match aws_cli_protocol::xml::parse_error(&text) {
+    let (code, message) = match awsc_protocol::xml::parse_error(&text) {
         Some(e) => (e.code, e.message),
         // HeadObject and friends answer with an empty body, so the status is all there is.
         None => (
             response.status.to_string(),
-            aws_cli_runtime::http::reason_phrase(response.status).to_string(),
+            awsc_runtime::http::reason_phrase(response.status).to_string(),
         ),
     };
     let mut failure = Failure::new(
@@ -199,7 +199,7 @@ pub fn dispatch(parsed: &Parsed, globals: &Globals) -> Result<std::process::Exit
             exit::PARAM_VALIDATION,
             format!(
                 "{}\n\n\n{}",
-                aws_cli_runtime::RuntimeError::ParamValidation(format!(
+                awsc_runtime::RuntimeError::ParamValidation(format!(
                     "argument subcommand: Found invalid choice '{other}'"
                 )),
                 crate::USAGE_HINT

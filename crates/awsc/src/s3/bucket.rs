@@ -5,7 +5,7 @@
 //! letting the driver print `aws: [ERROR]:` and exit 254. That is reproduced.
 
 use super::{param_error, service_error, uri};
-use aws_cli_runtime::http;
+use awsc_runtime::http;
 use crate::args::Parsed;
 use crate::client::{Client, Globals};
 use crate::exit;
@@ -162,18 +162,18 @@ pub fn presign(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> 
         crate::load_model("s3api").map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
     let client = Client::for_bucket(&model, globals, Some(&bucket))?;
 
-    let ctx = aws_cli_runtime::sigv4::SigningContext {
+    let ctx = awsc_runtime::sigv4::SigningContext {
         credentials: &client.credentials,
         region: &client.endpoint.signing_region,
         service: &client.endpoint.signing_name,
-        timestamp: &aws_cli_runtime::sigv4::format_timestamp(crate::now_unix()),
+        timestamp: &awsc_runtime::sigv4::format_timestamp(crate::now_unix()),
     };
     // The bucket lives in the host under virtual-host addressing, but in the path when
     // the ruleset falls back to path-style (a bucket name containing a dot).
     let path_part = format!("{}/{}", client.endpoint.path_prefix, super::encode_key(&key));
-    let query = aws_cli_runtime::presign::presign(
+    let query = awsc_runtime::presign::presign(
         &ctx,
-        &aws_cli_runtime::presign::PresignRequest {
+        &awsc_runtime::presign::PresignRequest {
             method: "GET",
             host: &client.endpoint.host,
             path: &path_part,
@@ -181,7 +181,7 @@ pub fn presign(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> 
             extra_signed_headers: Vec::new(),
             expires,
             // S3 presigns with the literal UNSIGNED-PAYLOAD, not the empty-body hash.
-            payload: aws_cli_runtime::presign::Payload::Unsigned,
+            payload: awsc_runtime::presign::Payload::Unsigned,
         },
     );
 

@@ -6,7 +6,7 @@
 //! Output goes straight to stdout; `--output`, `--query` and `--no-paginate` are ignored,
 //! which the reference states in its own description.
 
-use aws_cli_runtime::http;
+use awsc_runtime::http;
 use super::{human_readable_size, param_error, service_error, uri, xml};
 use crate::args::Parsed;
 use crate::client::{Client, Globals};
@@ -311,8 +311,8 @@ fn last_modified(iso: &str) -> String {
     let Some(unix) = parse_iso8601(iso) else {
         return " ".repeat(19);
     };
-    let local = unix + aws_cli_runtime::localtime::offset_seconds(unix);
-    let compact = aws_cli_runtime::sigv4::format_timestamp(local);
+    let local = unix + awsc_runtime::localtime::offset_seconds(unix);
+    let compact = awsc_runtime::sigv4::format_timestamp(local);
     format!(
         "{}-{}-{} {}:{}:{}",
         &compact[0..4],

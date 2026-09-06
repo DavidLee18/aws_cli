@@ -30,7 +30,7 @@ REFERENCE_SITE_PACKAGES = (
 )
 DATA_GLOB = f"{REFERENCE_SITE_PACKAGES}/awscli/botocore/data/*/*/service-2.json"
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_OUTPUT = REPO_ROOT / "crates" / "aws-cli-model" / "data" / "protocol-metadata.json"
+DEFAULT_OUTPUT = REPO_ROOT / "crates" / "awsc-model" / "data" / "protocol-metadata.json"
 
 
 def main() -> int:

@@ -39,7 +39,7 @@ fn every_load_model_name_resolves() {
                 }
                 std::fs::read(&path)
                     .ok()
-                    .and_then(|bytes| aws_cli_model::Model::from_json(&bytes).ok())
+                    .and_then(|bytes| awsc_model::Model::from_json(&bytes).ok())
                     .is_some_and(|model| model.cli_service_name().is_ok_and(|n| &n == name))
             });
         assert!(found, "no model resolves to the CLI service name `{name}`");
