@@ -145,8 +145,8 @@ Download the archive for your platform from the
 [releases page](https://github.com/DavidLee18/aws_cli/releases) and extract it:
 
 ```sh
-tar xzf awsc-0.3.0-aarch64-apple-darwin.tar.gz
-cd awsc-0.3.0-aarch64-apple-darwin
+tar xzf awsc-0.3.1-aarch64-apple-darwin.tar.gz
+cd awsc-0.3.1-aarch64-apple-darwin
 ./awsc s3 ls
 ```
 
