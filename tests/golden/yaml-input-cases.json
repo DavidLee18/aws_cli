@@ -1,0 +1,847 @@
+{
+  "loader": "ruamel.yaml YAML(typ='safe', pure=True)",
+  "ruamel_version": "0.19.1",
+  "cases": [
+    {
+      "yaml": "a: 1\nb: two",
+      "value": {
+        "a": 1,
+        "b": "two"
+      }
+    },
+    {
+      "yaml": "a:\n  b:\n    c: 1",
+      "value": {
+        "a": {
+          "b": {
+            "c": 1
+          }
+        }
+      }
+    },
+    {
+      "yaml": "outer:\n  inner: 1\nsibling: 2",
+      "value": {
+        "outer": {
+          "inner": 1
+        },
+        "sibling": 2
+      }
+    },
+    {
+      "yaml": "a: 1\n\n\nb: 2",
+      "value": {
+        "a": 1,
+        "b": 2
+      }
+    },
+    {
+      "yaml": "key with spaces: 1",
+      "value": {
+        "key with spaces": 1
+      }
+    },
+    {
+      "yaml": "'quoted key': 1",
+      "value": {
+        "quoted key": 1
+      }
+    },
+    {
+      "yaml": "1: one",
+      "value": {
+        "1": "one"
+      }
+    },
+    {
+      "yaml": "true: yes",
+      "value": {
+        "true": "yes"
+      }
+    },
+    {
+      "yaml": "- 1\n- 2\n- 3",
+      "value": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "yaml": "a:\n- 1\n- 2",
+      "value": {
+        "a": [
+          1,
+          2
+        ]
+      }
+    },
+    {
+      "yaml": "a:\n  - 1\n  - 2",
+      "value": {
+        "a": [
+          1,
+          2
+        ]
+      }
+    },
+    {
+      "yaml": "- a: 1\n  b: 2",
+      "value": [
+        {
+          "a": 1,
+          "b": 2
+        }
+      ]
+    },
+    {
+      "yaml": "- - 1\n  - 2",
+      "value": [
+        [
+          1,
+          2
+        ]
+      ]
+    },
+    {
+      "yaml": "a:\n  - x: 1\n    y: 2",
+      "value": {
+        "a": [
+          {
+            "x": 1,
+            "y": 2
+          }
+        ]
+      }
+    },
+    {
+      "yaml": "a:\n  - - 1\n    - 2",
+      "value": {
+        "a": [
+          [
+            1,
+            2
+          ]
+        ]
+      }
+    },
+    {
+      "yaml": "-",
+      "value": [
+        null
+      ]
+    },
+    {
+      "yaml": "- ",
+      "value": [
+        null
+      ]
+    },
+    {
+      "yaml": "a: []\nb: {}",
+      "value": {
+        "a": [],
+        "b": {}
+      }
+    },
+    {
+      "yaml": "a: [1, two, {b: 3}]",
+      "value": {
+        "a": [
+          1,
+          "two",
+          {
+            "b": 3
+          }
+        ]
+      }
+    },
+    {
+      "yaml": "{\"a\": 1, \"b\": [2]}",
+      "value": {
+        "a": 1,
+        "b": [
+          2
+        ]
+      }
+    },
+    {
+      "yaml": "a: [1,\n  2,\n  3]",
+      "value": {
+        "a": [
+          1,
+          2,
+          3
+        ]
+      }
+    },
+    {
+      "yaml": "[a, b,]",
+      "value": [
+        "a",
+        "b"
+      ]
+    },
+    {
+      "yaml": "{a: 1, b: 2}",
+      "value": {
+        "a": 1,
+        "b": 2
+      }
+    },
+    {
+      "yaml": "{a:1}",
+      "value": {
+        "a:1": null
+      }
+    },
+    {
+      "yaml": "a: [1, {b: 2}]",
+      "value": {
+        "a": [
+          1,
+          {
+            "b": 2
+          }
+        ]
+      }
+    },
+    {
+      "yaml": "{\"a\":1}",
+      "value": {
+        "a": 1
+      }
+    },
+    {
+      "yaml": "a: [[1, 2], [3]]",
+      "value": {
+        "a": [
+          [
+            1,
+            2
+          ],
+          [
+            3
+          ]
+        ]
+      }
+    },
+    {
+      "yaml": "a: yes\nb: no\nc: on\nd: off",
+      "value": {
+        "a": "yes",
+        "b": "no",
+        "c": "on",
+        "d": "off"
+      }
+    },
+    {
+      "yaml": "a: true\nb: True\nc: TRUE\nd: false\ne: False",
+      "value": {
+        "a": true,
+        "b": true,
+        "c": true,
+        "d": false,
+        "e": false
+      }
+    },
+    {
+      "yaml": "a: y\nb: n\nc: Y",
+      "value": {
+        "a": "y",
+        "b": "n",
+        "c": "Y"
+      }
+    },
+    {
+      "yaml": "a: null\nb: ~\nc: NULL\nd:",
+      "value": {
+        "a": null,
+        "b": null,
+        "c": null,
+        "d": null
+      }
+    },
+    {
+      "yaml": "a: 017\nb: 0o17\nc: 0x1f\nd: 0b101\ne: 00",
+      "value": {
+        "a": 17,
+        "b": 15,
+        "c": 31,
+        "d": 5,
+        "e": 0
+      }
+    },
+    {
+      "yaml": "a: 1_000\nb: 1__0",
+      "value": {
+        "a": 1000,
+        "b": 10
+      }
+    },
+    {
+      "yaml": "a: -0\nb: +5\nc: -17",
+      "value": {
+        "a": 0,
+        "b": 5,
+        "c": -17
+      }
+    },
+    {
+      "yaml": "a: 0.5\nb: .5\nc: 5.\nd: 1e3\ne: 1.0e+3\nf: -2.5",
+      "value": {
+        "a": 0.5,
+        "b": 0.5,
+        "c": 5.0,
+        "d": 1000.0,
+        "e": 1000.0,
+        "f": -2.5
+      }
+    },
+    {
+      "yaml": "a: 1:30",
+      "value": {
+        "a": "1:30"
+      }
+    },
+    {
+      "yaml": "a: 1.2.3",
+      "value": {
+        "a": "1.2.3"
+      }
+    },
+    {
+      "yaml": "a: 2020-01-01",
+      "value": {
+        "a": {
+          "__timestamp__": "2020-01-01"
+        }
+      }
+    },
+    {
+      "yaml": "a: 2020-01-01T10:00:00Z",
+      "value": {
+        "a": {
+          "__timestamp__": "2020-01-01T10:00:00+00:00"
+        }
+      }
+    },
+    {
+      "yaml": "a: '2020-01-01'",
+      "value": {
+        "a": "2020-01-01"
+      }
+    },
+    {
+      "yaml": "a: v1.2",
+      "value": {
+        "a": "v1.2"
+      }
+    },
+    {
+      "yaml": "a: 12345678901234567890123",
+      "value": {
+        "a": 12345678901234567890123
+      }
+    },
+    {
+      "yaml": "a: ''\nb: \"\"",
+      "value": {
+        "a": "",
+        "b": ""
+      }
+    },
+    {
+      "yaml": "a: '012345678901'",
+      "value": {
+        "a": "012345678901"
+      }
+    },
+    {
+      "yaml": "a: 012345678901",
+      "value": {
+        "a": 12345678901
+      }
+    },
+    {
+      "yaml": "a: text with spaces",
+      "value": {
+        "a": "text with spaces"
+      }
+    },
+    {
+      "yaml": "a: :colon",
+      "value": {
+        "a": ":colon"
+      }
+    },
+    {
+      "yaml": "a: b:c",
+      "value": {
+        "a": "b:c"
+      }
+    },
+    {
+      "yaml": "a: x#y",
+      "value": {
+        "a": "x#y"
+      }
+    },
+    {
+      "yaml": "a: x #y",
+      "value": {
+        "a": "x"
+      }
+    },
+    {
+      "yaml": "a: '#'",
+      "value": {
+        "a": "#"
+      }
+    },
+    {
+      "yaml": "a: 'it''s'",
+      "value": {
+        "a": "it's"
+      }
+    },
+    {
+      "yaml": "a: \"esc\\n\\u0041\\t\"",
+      "value": {
+        "a": "esc\nA\t"
+      }
+    },
+    {
+      "yaml": "a: \"tab\\tseparated\"",
+      "value": {
+        "a": "tab\tseparated"
+      }
+    },
+    {
+      "yaml": "a: multi\n  line plain",
+      "value": {
+        "a": "multi line plain"
+      }
+    },
+    {
+      "yaml": "a: 'x\n  y'",
+      "value": {
+        "a": "x y"
+      }
+    },
+    {
+      "yaml": "a: \"x\n  y\"",
+      "value": {
+        "a": "x y"
+      }
+    },
+    {
+      "yaml": "a: -",
+      "value": {
+        "__error__": "ScannerError"
+      }
+    },
+    {
+      "yaml": "a: --flag",
+      "value": {
+        "a": "--flag"
+      }
+    },
+    {
+      "yaml": "key: value # comment",
+      "value": {
+        "key": "value"
+      }
+    },
+    {
+      "yaml": "# only a comment\na: 1",
+      "value": {
+        "a": 1
+      }
+    },
+    {
+      "yaml": "a: 1\n# between\nb: 2",
+      "value": {
+        "a": 1,
+        "b": 2
+      }
+    },
+    {
+      "yaml": "a: 'x'  # c",
+      "value": {
+        "a": "x"
+      }
+    },
+    {
+      "yaml": "a: |\n  line1\n  line2\n",
+      "value": {
+        "a": "line1\nline2\n"
+      }
+    },
+    {
+      "yaml": "a: |-\n  x\n",
+      "value": {
+        "a": "x"
+      }
+    },
+    {
+      "yaml": "a: |+\n  x\n\n",
+      "value": {
+        "a": "x\n\n"
+      }
+    },
+    {
+      "yaml": "a: >\n  fold1\n  fold2\n",
+      "value": {
+        "a": "fold1 fold2\n"
+      }
+    },
+    {
+      "yaml": "a: >-\n  x\n  y\n",
+      "value": {
+        "a": "x y"
+      }
+    },
+    {
+      "yaml": "a: |2\n    x\n",
+      "value": {
+        "a": "  x\n"
+      }
+    },
+    {
+      "yaml": "a: |\n  x\n\n  y\n",
+      "value": {
+        "a": "x\n\ny\n"
+      }
+    },
+    {
+      "yaml": "a: >\n  x\n\n  y\n",
+      "value": {
+        "a": "x\ny\n"
+      }
+    },
+    {
+      "yaml": "a: |\n  # not a comment\n",
+      "value": {
+        "a": "# not a comment\n"
+      }
+    },
+    {
+      "yaml": "a: |\n  one\nb: 2",
+      "value": {
+        "a": "one\n",
+        "b": 2
+      }
+    },
+    {
+      "yaml": "a: &anc 1\nb: *anc",
+      "value": {
+        "a": 1,
+        "b": 1
+      }
+    },
+    {
+      "yaml": "base: &b {x: 1}\nchild:\n  <<: *b\n  y: 2",
+      "value": {
+        "base": {
+          "x": 1
+        },
+        "child": {
+          "x": 1,
+          "y": 2
+        }
+      }
+    },
+    {
+      "yaml": "base: &b {x: 1}\nchild:\n  <<: *b\n  x: 2",
+      "value": {
+        "base": {
+          "x": 1
+        },
+        "child": {
+          "x": 2
+        }
+      }
+    },
+    {
+      "yaml": "a: &anc\n  b: 1\nc: *anc",
+      "value": {
+        "a": {
+          "b": 1
+        },
+        "c": {
+          "b": 1
+        }
+      }
+    },
+    {
+      "yaml": "a: !!str 123",
+      "value": {
+        "a": "123"
+      }
+    },
+    {
+      "yaml": "a: !!int '5'",
+      "value": {
+        "a": 5
+      }
+    },
+    {
+      "yaml": "a: !!null ''",
+      "value": {
+        "a": null
+      }
+    },
+    {
+      "yaml": "---\na: 1",
+      "value": {
+        "a": 1
+      }
+    },
+    {
+      "yaml": "--- \na: 1",
+      "value": {
+        "a": 1
+      }
+    },
+    {
+      "yaml": "a: 1\n...\n",
+      "value": {
+        "a": 1
+      }
+    },
+    {
+      "yaml": "a: 1\n---\nb: 2",
+      "value": {
+        "__error__": "ComposerError"
+      }
+    },
+    {
+      "yaml": "",
+      "value": null
+    },
+    {
+      "yaml": "\n\n",
+      "value": null
+    },
+    {
+      "yaml": "plain scalar",
+      "value": "plain scalar"
+    },
+    {
+      "yaml": "123",
+      "value": 123
+    },
+    {
+      "yaml": "[1,2]",
+      "value": [
+        1,
+        2
+      ]
+    },
+    {
+      "yaml": "null",
+      "value": null
+    },
+    {
+      "yaml": "a: 1\na: 2",
+      "value": {
+        "__error__": "DuplicateKeyError"
+      }
+    },
+    {
+      "yaml": "{a: 1, a: 2}",
+      "value": {
+        "__error__": "DuplicateKeyError"
+      }
+    },
+    {
+      "yaml": "a: 'unterminated",
+      "value": {
+        "__error__": "ScannerError"
+      }
+    },
+    {
+      "yaml": "a: *nope",
+      "value": {
+        "__error__": "ComposerError"
+      }
+    },
+    {
+      "yaml": "a:\n\tb: 1",
+      "value": {
+        "__error__": "ScannerError"
+      }
+    },
+    {
+      "yaml": "a: - 1",
+      "value": {
+        "__error__": "ScannerError"
+      }
+    },
+    {
+      "yaml": "a: @at",
+      "value": {
+        "__error__": "ScannerError"
+      }
+    },
+    {
+      "yaml": "a: `tick`",
+      "value": {
+        "__error__": "ScannerError"
+      }
+    },
+    {
+      "yaml": "a: %pct",
+      "value": {
+        "__error__": "ScannerError"
+      }
+    },
+    {
+      "yaml": "k: x@y",
+      "value": {
+        "k": "x@y"
+      }
+    },
+    {
+      "yaml": "k: 50%",
+      "value": {
+        "k": "50%"
+      }
+    },
+    {
+      "yaml": "a: >\n  more text",
+      "value": {
+        "a": "more text"
+      }
+    },
+    {
+      "yaml": "a: |\n  x",
+      "value": {
+        "a": "x"
+      }
+    },
+    {
+      "yaml": "a: |+\n  x",
+      "value": {
+        "a": "x"
+      }
+    },
+    {
+      "yaml": "a: |+\n  \n",
+      "value": {
+        "a": "\n"
+      }
+    },
+    {
+      "yaml": "a:\n- x\n  - y",
+      "value": {
+        "a": [
+          "x - y"
+        ]
+      }
+    },
+    {
+      "yaml": "a: text\n  - more",
+      "value": {
+        "a": "text - more"
+      }
+    },
+    {
+      "yaml": "a: text\n\n  more",
+      "value": {
+        "a": "text\nmore"
+      }
+    },
+    {
+      "yaml": "a: text\n  b1",
+      "value": {
+        "a": "text b1"
+      }
+    },
+    {
+      "yaml": "a: text\n  b: 1",
+      "value": {
+        "__error__": "ScannerError"
+      }
+    },
+    {
+      "yaml": "a:\n- x\n  - {k: v}",
+      "value": {
+        "__error__": "ScannerError"
+      }
+    },
+    {
+      "yaml": "a:\n- x\n  - [1]",
+      "value": {
+        "a": [
+          "x - [1]"
+        ]
+      }
+    },
+    {
+      "yaml": "k: ~\n  more",
+      "value": {
+        "k": "~ more"
+      }
+    },
+    {
+      "yaml": "true: 1\n1: 2",
+      "value": {
+        "__error__": "DuplicateKeyError"
+      }
+    },
+    {
+      "yaml": "1: a\n1.0: b",
+      "value": {
+        "__error__": "DuplicateKeyError"
+      }
+    },
+    {
+      "yaml": "a: -",
+      "value": {
+        "__error__": "ScannerError"
+      }
+    },
+    {
+      "yaml": "Filters:\n  - Name: tag:Env\n    Values:\n      - prod\nMaxResults: 5",
+      "value": {
+        "Filters": [
+          {
+            "Name": "tag:Env",
+            "Values": [
+              "prod"
+            ]
+          }
+        ],
+        "MaxResults": 5
+      }
+    },
+    {
+      "yaml": "repositoryName: demo\nbranchName: main\nputFiles:\n  - filePath: a.txt\n    fileContent: aGk=\ncommitMessage: |\n  Add a file\n\n  With a body.\n",
+      "value": {
+        "repositoryName": "demo",
+        "branchName": "main",
+        "putFiles": [
+          {
+            "filePath": "a.txt",
+            "fileContent": "aGk="
+          }
+        ],
+        "commitMessage": "Add a file\n\nWith a body.\n"
+      }
+    },
+    {
+      "yaml": "TableName: t\nKey:\n  id:\n    S: '123'\nConsistentRead: true",
+      "value": {
+        "TableName": "t",
+        "Key": {
+          "id": {
+            "S": "123"
+          }
+        },
+        "ConsistentRead": true
+      }
+    }
+  ]
+}

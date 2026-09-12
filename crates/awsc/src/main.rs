@@ -22,6 +22,7 @@ mod logs_tail;
 mod paginate;
 mod s3;
 mod sso;
+mod yaml;
 mod exit;
 
 const USAGE: &str = "\
@@ -409,13 +410,37 @@ fn run() -> Result<ExitCode, Failure> {
     // command line wins, and the fill is shallow: a key set by an argument discards the
     // document's value for it wholesale.
     if let Some(raw) = &parsed.cli_input {
+        let flag = if parsed.cli_input_yaml { "cli-input-yaml" } else { "cli-input-json" };
         let text = args::expand_paramfile(raw)
             .map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
-        let document: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|_| Failure::new(exit::PARAM_VALIDATION, "Invalid JSON received."))?;
+        // The reference names the flag *without* its dashes when the document will not
+        // parse, and *with* them when it parses into the wrong type — `ParamError` is
+        // constructed from `self.name` in one place and `self.cli_name` in the other
+        // (`customizations/cliinput.py:64-71,130-156`). Two spellings of one flag in two
+        // adjacent messages looks like a bug until you read the reference.
+        let document: serde_json::Value = if parsed.cli_input_yaml {
+            crate::yaml::parse(&text).map_err(|e| match e {
+                crate::yaml::Error::Invalid(_) => Failure::new(
+                    exit::PARAM_VALIDATION,
+                    format!("Error parsing parameter '{flag}': Invalid YAML received."),
+                ),
+                crate::yaml::Error::Unsupported(detail) => Failure::new(
+                    exit::PARAM_VALIDATION,
+                    format!("Error parsing parameter '{flag}': {detail}"),
+                ),
+            })?
+        } else {
+            serde_json::from_str(&text).map_err(|_| {
+                Failure::new(
+                    exit::PARAM_VALIDATION,
+                    format!("Error parsing parameter '{flag}': Invalid JSON received."),
+                )
+            })?
+        };
         let mut built = input.take().unwrap_or_else(|| serde_json::Value::Object(Default::default()));
-        args::merge_cli_input(&mut built, &document)
-            .map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
+        args::merge_cli_input(&mut built, &document).map_err(|e| {
+            Failure::new(exit::PARAM_VALIDATION, format!("Error parsing parameter '--{flag}': {e}"))
+        })?;
         input = Some(built);
     }
 

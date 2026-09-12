@@ -194,6 +194,47 @@ the reference while building the STS vertical slice.
   arguments win, and a key an argument set discards the document's value wholesale rather
   than deep-merging.
 
+  **`--cli-input-yaml` reads YAML 1.2, not 1.1** (`crates/awsc/src/yaml.rs`). The
+  reference loads it with `ruamel.yaml`'s `YAML(typ='safe', pure=True)`, which is a 1.2
+  loader — and almost everything written about YAML in Python describes PyYAML's
+  `safe_load`, which is 1.1. The versions disagree about ordinary documents: under 1.1
+  `yes`/`no`/`on`/`off` are booleans and `017` is octal 15; under 1.2 they are the strings
+  `"yes"`…`"off"` and the number 17. A reader built from the wrong version reads every
+  document happily and sends different values than `aws` does, so the rules were not
+  transcribed from prose: `scripts/extract-yaml-input-cases.py` runs the reference's own
+  loader over a corpus and records its answers as `tests/golden/yaml-input-cases.json`,
+  which the reader is tested against. Three rounds of 4,000 randomly generated documents
+  were compared the same way; the reader now agrees on all but one, a folded block scalar
+  containing a more-indented line followed by a blank one.
+
+  Four behaviours in there are worth knowing because each looked like a bug first:
+
+  - `017` matches the *octal* branch of ruamel's integer regex and is then built by
+    Python's `int()`, which reads it as **decimal**. Construction wins over resolution.
+  - A block scalar's trailing newline follows the document's: `a: |\n  x` is `"x"`, and
+    `a: |\n  x\n` is `"x\n"`.
+  - A more-indented line continues a plain scalar even when it looks like structure —
+    `a:\n- x\n  - y` is the one-item list `["x - y"]` — but a `: ` on such a line is an
+    error, even inside what looks like a flow collection.
+  - The loader builds a Python `dict`, where `True == 1`, so a mapping with both `true:`
+    and `1:` is a **duplicate key** and refused, though JSON would keep them apart.
+
+  Two divergences remain. A **timestamp stays a string**: ruamel resolves `2020-01-01` to
+  a `datetime.date` and JSON has no date, so the source text is kept — which every AWS
+  timestamp member accepts, and which only differs for a timestamp handed to a *string*
+  member, where the reference errors and we send the text. And constructs the reference
+  accepts but this reader does not implement are **named rather than approximated**:
+  explicit keys (`? key`), `%YAML` directives (which can switch the document back to 1.1
+  and change the meaning of every scalar under it), and the `!!set`/`!!omap` tags. Those
+  report what is unsupported instead of the reference's bare `Invalid YAML received.`;
+  anchors, aliases, merge keys and the scalar tags are all implemented.
+
+  The two `--cli-input-*` error messages name their flag **differently on purpose**:
+  `Error parsing parameter 'cli-input-yaml': Invalid YAML received.` for a document that
+  will not parse, and `Error parsing parameter '--cli-input-yaml': Invalid type: expecting
+  map, received <class 'list'>` for one that parses to the wrong thing. The reference
+  builds the first `ParamError` from `self.name` and the second from `self.cli_name`.
+
   `--generate-cli-skeleton output` now works too, including the quirk that makes it a
   *checking* mode: the reference stubs the generated skeleton as the response and the
   stubber validates it against the output shape, so a placeholder that violates that
@@ -602,6 +643,14 @@ honest "unknown operation".
   existing `~/.kube/config` in place*, non-atomically and with no backup. A partial parser
   that mis-reads an unusual but valid kubeconfig would destroy a file the user depends on.
   This one should not be attempted until the YAML work above is done and tested.
+
+  There is now a YAML **reader** (`crates/awsc/src/yaml.rs`, for `--cli-input-yaml`),
+  which closes part of this — but only part, and the missing part is the dangerous one.
+  It reads a document into a value; it does not preserve comments, key order or the
+  original formatting, which is exactly what rewriting someone's `~/.kube/config` in
+  place requires. It is also a 1.2 reader, while `cloudformation package` needs 1.1
+  quoting rules and the `!Ref` short forms. Both commands still need the round-tripping
+  work; neither should reuse this reader as though it were that.
 
 ---
 

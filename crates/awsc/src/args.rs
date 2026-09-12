@@ -64,6 +64,10 @@ pub struct Parsed {
     pub connect_timeout: Option<u64>,
     /// `--cli-input-json` / `--cli-input-yaml`, already read from disk if `file://`.
     pub cli_input: Option<String>,
+    /// Which of the two spellings supplied [`Parsed::cli_input`]. They differ in more
+    /// than the parser: the reference names the flag in its error, and names it *without*
+    /// the leading dashes for a parse failure but *with* them for a type mismatch.
+    pub cli_input_yaml: bool,
     pub generate_skeleton: Option<String>,
     /// `--color on|off|auto`. Only `logs tail` reads it; nothing else colours output.
     pub color: Option<String>,
@@ -155,6 +159,7 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
         read_timeout: None,
         connect_timeout: None,
         cli_input: None,
+        cli_input_yaml: false,
         generate_skeleton: None,
         color: None,
         binary_format: BinaryFormat::default(),
@@ -282,6 +287,7 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
                 if parsed.cli_input.is_some() {
                     return Err("Only one --cli-input- parameter may be specified.".to_string());
                 }
+                parsed.cli_input_yaml = name == "--cli-input-yaml";
                 parsed.cli_input = Some(take_value()?);
             }
             "--generate-cli-skeleton" => {
@@ -902,6 +908,22 @@ fn coerce_scalar(model: &Model, target: &ShapeId, raw: &str) -> Value {
     }
 }
 
+/// How Python names the type of a JSON value, for an error message the reference builds
+/// with `%s % type(value)`.
+fn python_type(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "<class 'NoneType'>",
+        Value::Bool(_) => "<class 'bool'>",
+        // Python has no single number type: a JSON document's `1` loads as `int` and its
+        // `1.0` as `float`, and the message shows whichever it was.
+        Value::Number(n) if n.is_f64() => "<class 'float'>",
+        Value::Number(_) => "<class 'int'>",
+        Value::String(_) => "<class 'str'>",
+        Value::Array(_) => "<class 'list'>",
+        Value::Object(_) => "<class 'dict'>",
+    }
+}
+
 /// Merge a `--cli-input-json`/`-yaml` document into the built parameters.
 ///
 /// A **shallow, top-level-key-only, non-clobbering fill**: command-line arguments win,
@@ -909,10 +931,9 @@ fn coerce_scalar(model: &Model, target: &ShapeId, raw: &str) -> Value {
 /// the document's value for that key is discarded wholesale.
 pub fn merge_cli_input(built: &mut Value, document: &Value) -> Result<(), String> {
     let Some(doc) = document.as_object() else {
-        return Err(format!(
-            "Invalid type: expecting map, received {}",
-            if document.is_array() { "list" } else { "scalar" }
-        ));
+        // `"Invalid type: expecting map, received %s" % type(loaded_params)` — so the
+        // message carries Python's spelling of the type, not ours.
+        return Err(format!("Invalid type: expecting map, received {}", python_type(document)));
     };
     if !built.is_object() {
         *built = Value::Object(Default::default());
