@@ -668,6 +668,24 @@ exist, so the reader goes hunting for a typo in a name that is perfectly correct
 | the AWS CLI has it, we have not ported it | named as an unported custom command, pointing at `awsc <service> help` |
 | a customization *argument* we have not ported | named as such, rather than demanding the argument the customization replaces |
 
+**`custom_commands` in the surface data is not a list of hand-written commands**, which is
+easy to assume from the name and wrong in a way that leaks into user-facing text. It holds
+four different things (see `scripts/extract-custom-surface.py`): true `BasicCommand` trees
+(`deploy push`, `logs tail`, the wizards), model-derived commands under non-model names
+(`rds add-option-to-option-group`), botocore-modelled operations **absent from the Smithy
+models** (`s3api get-bucket-lifecycle`, the deprecated form of
+`get-bucket-lifecycle-configuration`), and operations whose CLI name comes from botocore's
+seeded `_xform_cache` (`mturk list-hits-...`, storagegateway's `*-iscsi-*`,
+socialmessaging's 30 `*whatsapp*` calls).
+
+Auditing all 103 against the binary: **12 are implemented here, 37 already work as ordinary
+modelled operations, 50 are genuinely missing, and 4 belong to `agent-toolkit`, a service
+absent from our catalogue entirely.** So the help page filters its "not implemented" list
+by whether the name resolves in the command table — without that it told readers that 37
+working commands, every WhatsApp call among them, did not work. And the wording of both the
+error and the help section says "no service model describes it" rather than "hand-written",
+because for the `s3api` four that would be false.
+
 The second and third read from the same `data/custom-surface.json` the conformance harness
 uses, so the list cannot drift from the reference's. `custom::IMPLEMENTED` is the other
 half — the commands this build actually dispatches — and a `debug_assert` in `dispatch`

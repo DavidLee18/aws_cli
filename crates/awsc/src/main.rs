@@ -694,10 +694,11 @@ fn unported_command(service: &str, operation: &str) -> Option<Failure> {
         exit::PARAM_VALIDATION,
         awsc_runtime::RuntimeError::ParamValidation(format!(
             "`{service} {operation}` is a command the AWS CLI provides that awsc {} does \
-             not implement yet.\n\n\
-             It is not a typo, and not an API operation: it is one of the AWS CLI's \
-             hand-written commands, so it has to be ported rather than derived from the \
-             service model. Every modelled operation of `{service}` does work — run \
+             not have.\n\n\
+             It is not a typo. Commands like this are the ones no service model \
+             describes: either hand-written in the AWS CLI, or an API the Smithy models \
+             this build derives from no longer carry. Either way it has to be ported \
+             rather than derived. Every modelled operation of `{service}` does work — run \
              `awsc {service} help` to see them.\n\n\
              Please report it at https://github.com/DavidLee18/aws_cli/issues if you need it.",
             env!("CARGO_PKG_VERSION"),

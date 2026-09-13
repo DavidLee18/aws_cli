@@ -124,15 +124,25 @@ fn service_page(service: &str) -> Result<String, crate::Failure> {
     out.push_str("OPERATIONS\n");
     out.push_str(&columns(&names));
 
-    let missing: Vec<&str> =
-        custom.iter().filter(|name| !crate::is_implemented(&cli_service, name)).copied().collect();
+    // A name is only missing if it is neither implemented as a custom command *nor*
+    // reachable as a modelled operation. Thirty-seven of the surface data's "custom
+    // commands" are ordinary model-backed operations that work here already — every
+    // `socialmessaging` WhatsApp call among them — and listing those as missing would be
+    // a help page telling the reader that working commands do not work.
+    let missing: Vec<&str> = custom
+        .iter()
+        .filter(|name| !crate::is_implemented(&cli_service, name))
+        .filter(|name| table.resolve(name.split_whitespace().next().unwrap_or(name)).is_none())
+        .copied()
+        .collect();
     if !missing.is_empty() {
         out.push('\n');
         out.push_str(&section(
             "NOT IMPLEMENTED IN AWSC",
             &format!(
-                "The AWS CLI also provides {} here. Each is a hand-written command rather \
-                 than a modelled API call, and has not been ported yet: {}.",
+                "The AWS CLI also provides {} here, which no service model describes — \
+                 either hand-written there, or an API the Smithy models this build \
+                 derives from no longer carry: {}.",
                 if missing.len() == 1 { "one command" } else { "these commands" },
                 missing.join(", ")
             ),
@@ -236,9 +246,9 @@ fn custom_command_page(service: &str, operation: &str) -> String {
                 "A custom command: hand-written rather than derived from a service model.",
             )
         } else {
-            "A custom command the AWS CLI provides, hand-written rather than derived from \
-             a service model. It has NOT been implemented in awsc yet, so running it will \
-             report that rather than doing anything."
+            "A command the AWS CLI provides that no service model describes. It has NOT \
+             been implemented in awsc, so running it reports that rather than doing \
+             anything."
         },
     ));
     let flags = crate::custom_command_flags(service, operation);
