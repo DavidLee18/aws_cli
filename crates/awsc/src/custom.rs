@@ -19,6 +19,37 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::process::ExitCode;
 
+/// The custom commands this build actually implements.
+///
+/// The reference has 103 of them and this list is the subset that works here. It exists
+/// so `help` and the unknown-command error can tell "the AWS CLI has no such command"
+/// apart from "the AWS CLI has it and we have not ported it" — two very different things
+/// to tell a user, and the second one used to be reported as the first.
+///
+/// It has to agree with the match in [`dispatch`]; the `debug_assert` there is what
+/// catches a new arm that forgets to add its entry.
+pub(crate) const IMPLEMENTED: &[(&str, &str, &str)] = &[
+    ("cloudfront", "sign", "Sign a URL for CloudFront private content, with a canned or a custom policy."),
+    ("codecommit", "credential-helper", "Answer git's credential protocol on stdin with a SigV4-derived password."),
+    ("configservice", "get-status", "Print the status of the configuration recorders and delivery channels."),
+    ("configservice", "subscribe", "Create the S3 bucket and SNS topic if needed, then start recording."),
+    ("ecr", "get-login-password", "Print the password for `docker login` against a private registry."),
+    ("ecr-public", "get-login-password", "Print the password for `docker login` against the public registry."),
+    ("eks", "get-token", "Print a presigned STS token as the ExecCredential kubectl expects."),
+    ("logs", "tail", "Print log events, optionally following the group as they arrive."),
+    ("rds", "generate-db-auth-token", "Print a signed token for IAM database authentication."),
+    ("sso", "login", "Run the device-authorization flow and cache the SSO token."),
+    ("sso", "logout", "Remove the cached SSO token and credentials."),
+];
+
+/// The one-line summary for an implemented custom command, if there is one.
+pub(crate) fn summary(service: &str, command: &str) -> Option<&'static str> {
+    IMPLEMENTED
+        .iter()
+        .find(|(s, c, _)| *s == service && *c == command)
+        .map(|(_, _, summary)| *summary)
+}
+
 /// Run a custom command if `parsed` names one. `Ok(None)` means it does not.
 pub fn dispatch(parsed: &Parsed) -> Result<Option<ExitCode>, Failure> {
     let globals = Globals::from_parsed(parsed);
@@ -29,6 +60,8 @@ pub fn dispatch(parsed: &Parsed) -> Result<Option<ExitCode>, Failure> {
         ("rds", "generate-db-auth-token") => generate_db_auth_token(parsed, &globals)?,
         ("codecommit", "credential-helper") => codecommit_credential_helper(parsed, &globals)?,
         ("eks", "get-token") => eks_get_token(parsed, &globals)?,
+        // Signs locally: no credentials, no region, no request.
+        ("cloudfront", "sign") => crate::cloudfront::sign(parsed)?,
         ("configservice", "subscribe") => configservice_subscribe(parsed, &globals)?,
         ("logs", "tail") => crate::logs_tail::run(parsed, &globals)?,
         // `sso login`/`logout` are custom commands on a modelled service: neither is an
@@ -44,7 +77,15 @@ pub fn dispatch(parsed: &Parsed) -> Result<Option<ExitCode>, Failure> {
         ("update-models", "") => crate::catalogue::update_models()
             .map(|()| exit::code(exit::SUCCESS))
             .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?,
-        _ => return Ok(None),
+        _ => {
+            debug_assert!(
+                summary(&parsed.service, &parsed.operation).is_none(),
+                "{} {} is listed as implemented but no arm handles it",
+                parsed.service,
+                parsed.operation
+            );
+            return Ok(None);
+        }
     };
     Ok(Some(outcome))
 }
@@ -64,7 +105,7 @@ fn unknown_options(extras: &[String]) -> Failure {
 }
 
 /// The reference's argparse wording for a missing required flag, with the usage block.
-fn missing_required(missing: &[&str]) -> Failure {
+pub(crate) fn missing_required(missing: &[&str]) -> Failure {
     Failure::new(
         exit::PARAM_VALIDATION,
         format!(
@@ -82,7 +123,7 @@ fn missing_required(missing: &[&str]) -> Failure {
 ///
 /// The reference's argparse does both; here it has to be explicit, because silently
 /// ignoring a flag would produce a request the user did not ask for.
-fn take_args<'a>(
+pub(crate) fn take_args<'a>(
     parsed: &'a Parsed,
     accepted: &[&str],
 ) -> Result<BTreeMap<&'a str, Option<&'a str>>, Failure> {

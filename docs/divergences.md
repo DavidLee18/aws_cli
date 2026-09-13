@@ -543,7 +543,7 @@ views of one service. Deferred to the customization phase.
 
 ## Custom commands (first tranche)
 
-Six custom commands are now implemented, each verified by byte-diffing our stdout/stderr
+Seven custom commands are now implemented, each verified by byte-diffing our stdout/stderr
 and exit code against the reference. `scripts/compare-custom-commands.sh` reproduces the
 comparison; it pins our clock to the reference's via `AWSC_FIXED_TIME`, because presigned
 URLs embed a timestamp and would otherwise never compare equal.
@@ -556,6 +556,7 @@ URLs embed a timestamp and would otherwise never compare equal.
 | `codecommit credential-helper get/store/erase` | byte-identical, 6 cases |
 | `eks get-token` | presigned URL byte-identical; document byte-identical in json/text/yaml/query |
 | `configservice get-status` | format strings ported from `getstatus.py`; needs a live account to diff |
+| `cloudfront sign` | canned and custom policies verified against `openssl dgst -sha1 -verify` |
 
 Facts worth recording, because each contradicts a reasonable assumption:
 
@@ -568,6 +569,16 @@ Facts worth recording, because each contradicts a reasonable assumption:
   query by sorting the encoded pairs — and `X-Amz-Security-Token` sorts before
   `X-Amz-SignedHeaders`. Emitting in canonical order produces a plausible URL that fails
   to authenticate.
+- **`cloudfront sign` is SHA-1, and its base64 is not base64url.** CloudFront specifies
+  RSA PKCS#1 v1.5 over **SHA-1** — which is why this is the one place in the tree that
+  cannot use the aws-lc-rs already linked in under rustls: that library verifies
+  PKCS#1-SHA1 but its *signing* encodings stop at SHA-256, so the `rsa` crate is pulled in
+  for this command alone. The encoding then substitutes `+`→`-`, `=`→`_` and `/`→`~`,
+  which is **not** base64url (`/`→`_`): base64url produces a URL that looks right and
+  fails to authenticate. The custom policy's key order is fixed too — `DateLessThan`,
+  `IpAddress`, `DateGreaterThan` — because a reordered document is a different signature.
+  Both forms were checked by recomputing the policy and verifying the signature with
+  `openssl dgst -sha1 -verify`, which is an oracle independent of this code.
 - **`codecommit credential-helper` is not SigV4.** The canonical request uses the literal
   method `GIT`, an empty canonical query, and an *empty payload-hash field* rather than a
   SHA-256; the timestamp inside the string-to-sign carries no trailing `Z`. The `Z` is
@@ -621,6 +632,49 @@ ISO 8601 *with* an explicit offset, and refuse a naive timestamp with an explana
 error. Assuming UTC would silently shift the query window by the local offset, which is
 worse than refusing. Closing this needs a timezone database the binary does not carry.
 Unparseable values match the reference's wording exactly.
+
+---
+
+## `help`, and telling "no such command" apart from "not ported"
+
+`help` is **deliberately not the reference's**. `aws help` renders reStructuredText into a
+man page with `groff` and pipes it through the user's pager; reproducing that byte for byte
+would mean shipping a roff pipeline for output nobody diffs. `crates/awsc/src/help.rs`
+instead prints plain text on stdout at exit 0, at three levels — `awsc help`,
+`awsc <service> help`, `awsc <service> <operation> help` — built from the models, which
+carry the same documentation the reference renders (as HTML, converted to text here).
+`--help` is accepted at each level too; the reference has no such flag, but it is what
+everyone types.
+
+Two things about it are worth keeping:
+
+- **Option names are not re-derived.** They come from `args::flag_for_member`, the same
+  function the binder uses, so a flag on a help page is by construction one the parser
+  accepts. This codebase has already been bitten by two independent derivations of one
+  surface (see "Service command names"), and a help page is exactly where the second
+  derivation would go unnoticed.
+- **`aws ec2 describe-instances help` used to make an API call.** The word was kept as a
+  positional and the command ran. Someone asking to read about an operation got a request
+  sent instead; `parse` now catches it before dispatch, except in the hand-written trees
+  (`s3`, `configure`, `sso`) where a positional `help` could be a real path or key.
+
+**Unknown-command errors now distinguish three cases**, because reporting all of them as
+argparse's `Found invalid choice` was actively misleading — it says the command does not
+exist, so the reader goes hunting for a typo in a name that is perfectly correct:
+
+| case | what is said |
+|---|---|
+| the AWS CLI has no such command | `Found invalid choice`, with `Maybe you meant:` — the reference's wording |
+| the AWS CLI has it, we have not ported it | named as an unported custom command, pointing at `awsc <service> help` |
+| a customization *argument* we have not ported | named as such, rather than demanding the argument the customization replaces |
+
+The second and third read from the same `data/custom-surface.json` the conformance harness
+uses, so the list cannot drift from the reference's. `custom::IMPLEMENTED` is the other
+half — the commands this build actually dispatches — and a `debug_assert` in `dispatch`
+fails if an arm is added without its entry. The third case matters more than it looks:
+`cloudfront create-invalidation --paths /a` used to report *"the following arguments are
+required: --invalidation-batch"*, sending the user to rewrite a command that was already
+correct for `aws`.
 
 ---
 

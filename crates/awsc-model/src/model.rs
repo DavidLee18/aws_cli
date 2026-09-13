@@ -154,6 +154,18 @@ impl Model {
     ///
     /// Returns `None` when the container is missing or does not carry this service, so
     /// callers can fall back to the JSON models.
+    /// Every `aws <command>` name the compiled catalogue holds.
+    ///
+    /// Used by `help` and by the unknown-service suggestion list. The lazily built
+    /// `.awsc-model-index.json` is not a substitute: it records only the services a
+    /// previous lookup had to fall back to JSON for, so on a normal install it is
+    /// empty and the help page listed no commands at all.
+    pub fn container_service_names(models_dir: &Path) -> Vec<String> {
+        container(&models_dir.join("models.bin"))
+            .map(|db| db.service_names().map(str::to_string).collect())
+            .unwrap_or_default()
+    }
+
     pub fn from_container(models_dir: &Path, cli_service: &str) -> Option<Model> {
         let db = container(&models_dir.join("models.bin"))?;
         let view = db.service(cli_service)?;

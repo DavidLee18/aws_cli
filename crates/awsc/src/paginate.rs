@@ -30,7 +30,7 @@ pub struct Settings<'a> {
 /// It was loaded from the build-time source path, and `.ok()` turned a missing file into
 /// `None` -- which makes `config_for` answer `None` for every operation, so an installed
 /// binary paginated nothing and said nothing about it.
-fn overlay() -> &'static PaginatorOverlay {
+pub fn overlay() -> &'static PaginatorOverlay {
     PaginatorOverlay::embedded()
 }
 

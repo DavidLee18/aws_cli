@@ -11,7 +11,8 @@ use std::collections::BTreeMap;
 /// for an explicit `help` but 252 for no arguments at all.
 pub enum Outcome {
     Run(Box<Parsed>),
-    Help,
+    /// Which help page: top level, one service, or one operation.
+    Help(crate::help::Request),
     Version,
     Usage,
 }
@@ -113,7 +114,7 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
         return Ok(Outcome::Usage);
     }
     if argv[0] == "help" || argv[0] == "--help" || argv[0] == "-h" {
-        return Ok(Outcome::Help);
+        return Ok(Outcome::Help(crate::help::Request::TopLevel));
     }
     // The version line stands alone: the reference prints it and nothing else, where
     // `help` prints the usage block. Sharing `Outcome::Help` printed both.
@@ -135,8 +136,8 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
         None if service == "update-models" => String::new(),
         None => return Err(format!("`{service}`: expected a subcommand")),
     };
-    if operation == "help" || operation == "--help" {
-        return Ok(Outcome::Help);
+    if operation == "help" || operation == "--help" || operation == "-h" {
+        return Ok(Outcome::Help(crate::help::Request::Service(service)));
     }
 
     let mut parsed = Parsed {
@@ -186,6 +187,17 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
     while i < argv.len() {
         let arg = &argv[i];
         if !arg.starts_with("--") {
+            // `aws ec2 describe-instances help` asks for the operation's page. Catching it
+            // here matters: it used to be kept as a positional, and the command then ran
+            // — an API call for someone who asked to read about one. The hand-written
+            // trees are excluded because their positionals are paths and profile keys,
+            // where `help` could plausibly be a real value.
+            if arg == "help" && parsed.positionals.is_empty() && !owns_its_arguments {
+                return Ok(Outcome::Help(crate::help::Request::Operation(
+                    parsed.service,
+                    parsed.operation,
+                )));
+            }
             // Held rather than rejected here: a custom command may declare subcommands.
             // The modeled path rejects any that are left over.
             parsed.positionals.push(arg.clone());
@@ -304,7 +316,16 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
                 };
                 parsed.generate_skeleton = Some(mode);
             }
-            "--help" => return Ok(Outcome::Help),
+            // `--help` after an operation asks about that operation; before one, about
+            // the service. The reference has no such flag at all -- it spells this `help`
+            // -- but a reader who types it should get the page, not "Unknown options".
+            "--help" | "-h" => {
+                return Ok(Outcome::Help(if parsed.operation.is_empty() {
+                    crate::help::Request::Service(parsed.service)
+                } else {
+                    crate::help::Request::Operation(parsed.service, parsed.operation)
+                }))
+            }
             other => {
                 // Operation parameters are resolved against the model later; store the
                 // raw value here (or None, which a boolean member will interpret).
@@ -633,11 +654,7 @@ pub fn rebalance(
     let by_flag: BTreeMap<String, &awsc_model::shape::Member> = shape
         .members
         .iter()
-        .map(|(name, member)| {
-            let derived = naming::xform_name(name, "-");
-            let renamed = surface_overlays::rename_argument(service, operation, &derived);
-            (format!("--{}", proxy_rename(service, operation, &renamed)), member)
-        })
+        .map(|(name, member)| (flag_for_member(service, operation, name), member))
         .collect();
 
     let mut returned: Vec<(usize, String)> = Vec::new();
@@ -673,6 +690,18 @@ pub fn rebalance(
     }
 }
 
+/// The CLI flag one input member is bound to.
+///
+/// Three rules compose, and all three matter: the derived kebab spelling, the 87
+/// `service.operation.argument` renames, and the two `rds` option-group proxies. This is
+/// the single definition — the binder, the required-argument check and `help` all call
+/// it, so a flag that appears in help is by construction one the parser accepts.
+pub fn flag_for_member(service: &str, operation: &str, member: &str) -> String {
+    let derived = naming::xform_name(member, "-");
+    let renamed = surface_overlays::rename_argument(service, operation, &derived);
+    format!("--{}", proxy_rename(service, operation, &renamed))
+}
+
 /// The flags an operation requires that the user did not supply.
 ///
 /// The reference enforces required arguments at the ARGUMENT-PARSING layer, before model
@@ -704,13 +733,9 @@ pub fn missing_required_flags(
         .filter(|(_, member)| member.traits.is_required())
         .filter(|(name, _)| Some(name.as_str()) != stream_member)
         .filter(|(name, _)| proxy_hidden_member(service, operation) != Some(name.as_str()))
-        .map(|(name, _)| {
-            // The renamed form is what the user must actually pass: `route53
-            // get-traffic-policy` requires `--traffic-policy-version`, not `--version`.
-            let derived = naming::xform_name(name, "-");
-            let renamed = surface_overlays::rename_argument(service, operation, &derived);
-            format!("--{}", proxy_rename(service, operation, &renamed))
-        })
+        // The renamed form is what the user must actually pass: `route53
+        // get-traffic-policy` requires `--traffic-policy-version`, not `--version`.
+        .map(|(name, _)| flag_for_member(service, operation, name))
         .filter(|flag| !parsed.parameters.contains_key(flag))
         .collect()
 }
@@ -1156,9 +1181,38 @@ mod tests {
     /// Explicit `help` succeeds; no arguments at all is a usage error (252 upstream).
     #[test]
     fn distinguishes_help_from_bare_usage() {
+        use crate::help::Request;
         assert!(matches!(parse(&argv(&[])).unwrap(), Outcome::Usage));
-        assert!(matches!(parse(&argv(&["help"])).unwrap(), Outcome::Help));
-        assert!(matches!(parse(&argv(&["sts", "help"])).unwrap(), Outcome::Help));
+        assert!(matches!(parse(&argv(&["help"])).unwrap(), Outcome::Help(Request::TopLevel)));
+        assert!(matches!(
+            parse(&argv(&["sts", "help"])).unwrap(),
+            Outcome::Help(Request::Service(_))
+        ));
+    }
+
+    /// Which page each spelling asks for. The trailing-`help` case is the one that used
+    /// to fall through and make a real API call.
+    #[test]
+    fn help_names_the_page_it_wants() {
+        use crate::help::Request;
+        let page = |tokens: &[&str]| match parse(&argv(tokens)).unwrap() {
+            Outcome::Help(request) => request,
+            _ => panic!("{tokens:?} should ask for help"),
+        };
+        assert_eq!(page(&["ec2", "--help"]), Request::Service("ec2".into()));
+        assert_eq!(
+            page(&["ec2", "describe-instances", "help"]),
+            Request::Operation("ec2".into(), "describe-instances".into())
+        );
+        assert_eq!(
+            page(&["ec2", "describe-instances", "--help"]),
+            Request::Operation("ec2".into(), "describe-instances".into())
+        );
+        // A path that happens to be spelled `help` is a path, not a request for the page.
+        assert!(matches!(
+            parse(&argv(&["s3", "ls", "help"])).unwrap(),
+            Outcome::Run(_)
+        ));
     }
 
     #[test]

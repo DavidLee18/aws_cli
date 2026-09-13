@@ -12,11 +12,13 @@ use std::process::ExitCode;
 
 mod args;
 mod catalogue;
+mod cloudfront;
 mod color;
 mod client;
 mod configure;
 mod errorformat;
 mod custom;
+mod help;
 mod dispatch;
 mod logs_tail;
 mod paginate;
@@ -207,10 +209,7 @@ fn run() -> Result<ExitCode, Failure> {
         Ok(args::Outcome::Run(p)) => p,
         // `help`/`--version` succeed; bare `awsc` prints usage but is a usage error, at
         // 252, matching the reference.
-        Ok(args::Outcome::Help) => {
-            print!("{USAGE}");
-            return Ok(exit::code(exit::SUCCESS));
-        }
+        Ok(args::Outcome::Help(request)) => return help::show(request),
         Ok(args::Outcome::Version) => {
             println!("aws-cli-rs/{}", env!("CARGO_PKG_VERSION"));
             return Ok(exit::code(exit::SUCCESS));
@@ -245,11 +244,7 @@ fn run() -> Result<ExitCode, Failure> {
 
     // An unknown service is argparse's `argument command`, one level up from `argument
     // operation`; the wording differs only in that word.
-    let model = load_model(&parsed.service)
-        .map_err(|_| {
-            let services = known_services();
-            invalid_choice("command", &parsed.service, services.iter().map(String::as_str))
-        })?;
+    let model = load_model(&parsed.service).map_err(|_| unknown_service(&parsed.service))?;
 
     // The paginator overlay is keyed by CLI service name, which is not always the
     // name the user typed (aliases) nor the model filename.
@@ -268,11 +263,9 @@ fn run() -> Result<ExitCode, Failure> {
 
     // An unknown operation and a removed one are reported identically, since argparse
     // cannot tell the difference between a command that never existed and one v2 deleted.
-    let unknown_operation = || {
-        invalid_choice("operation", &parsed.operation, table.names.keys().map(String::as_str))
-    };
-    let wire_name = table.resolve(&parsed.operation).ok_or_else(unknown_operation)?;
-    let (op_id, op) = model.operation(wire_name).map_err(|_| unknown_operation())?;
+    let unknown = || unknown_operation(&parsed.operation, &table);
+    let wire_name = table.resolve(&parsed.operation).ok_or_else(unknown)?;
+    let (op_id, op) = model.operation(wire_name).map_err(|_| unknown())?;
     let input_shape =
         model.operation_input(op).map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
     let output_shape =
@@ -381,6 +374,15 @@ fn run() -> Result<ExitCode, Failure> {
     // validation failure.
     let missing =
         args::missing_required_flags(&model, input_shape, &parsed, &cli_service, &parsed.operation);
+    // Before blaming the user for a missing argument: if they passed a flag the AWS CLI
+    // adds by customization and we have not ported, *that* is what went wrong. Reporting
+    // "the following arguments are required: --invalidation-batch" to someone who passed
+    // `--paths` sends them to rewrite a command that was already correct.
+    if let Some(unported) =
+        unported_argument(&cli_service, &parsed.operation, input_shape, &parsed)
+    {
+        return Err(unported);
+    }
     if !missing.is_empty() {
         return Err(Failure::new(
             exit::PARAM_VALIDATION,
@@ -630,16 +632,152 @@ fn invalid_choice<'a>(
     )
 }
 
+/// `argument command: Found invalid choice`, with suggestions.
+pub fn unknown_service(service: &str) -> Failure {
+    let services = known_services();
+    invalid_choice("command", service, services.iter().map(String::as_str))
+}
+
+/// `argument operation: Found invalid choice`, with suggestions — unless the AWS CLI
+/// does have this command and we simply have not ported it, which is a different
+/// sentence entirely.
+pub fn unknown_operation(operation: &str, table: &awsc_model::command_table::Table) -> Failure {
+    if let Some(unported) = unported_command(&table.service, operation) {
+        return unported;
+    }
+    invalid_choice("operation", operation, table.names.keys().map(String::as_str))
+}
+
+/// The custom commands the reference has for this service, as the surface data records
+/// them. The key can be two words (`credential-helper get`).
+pub fn custom_commands_for(service: &str) -> Vec<&'static str> {
+    awsc_model::surface_overlays::custom_surface()
+        .custom_commands
+        .get(service)
+        .map(|commands| commands.keys().map(String::as_str).collect())
+        .unwrap_or_default()
+}
+
+/// The arguments the reference declares for one custom command.
+pub fn custom_command_flags(service: &str, command: &str) -> Vec<String> {
+    awsc_model::surface_overlays::custom_surface()
+        .custom_commands
+        .get(service)
+        .and_then(|commands| commands.get(command))
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Does this build implement that custom command? A two-word command (`credential-helper
+/// get`) is implemented by its first word, which is what `dispatch` matches on.
+pub fn is_implemented(service: &str, command: &str) -> bool {
+    let head = command.split_whitespace().next().unwrap_or(command);
+    custom::summary(service, head).is_some()
+}
+
+/// A command the AWS CLI provides and this build does not.
+///
+/// Reporting these as `Found invalid choice` was actively misleading: it says the command
+/// does not exist, so the reader goes looking for a typo in a name that is perfectly
+/// correct. This says what is actually true, and points at the two things that do work.
+fn unported_command(service: &str, operation: &str) -> Option<Failure> {
+    let known = custom_commands_for(service);
+    // `codecommit credential-helper get` is stored as two words; the user types the first
+    // as the operation.
+    let matched = known.iter().find(|name| {
+        *name == &operation || name.split_whitespace().next() == Some(operation)
+    })?;
+    if is_implemented(service, matched) {
+        return None;
+    }
+    Some(Failure::new(
+        exit::PARAM_VALIDATION,
+        awsc_runtime::RuntimeError::ParamValidation(format!(
+            "`{service} {operation}` is a command the AWS CLI provides that awsc {} does \
+             not implement yet.\n\n\
+             It is not a typo, and not an API operation: it is one of the AWS CLI's \
+             hand-written commands, so it has to be ported rather than derived from the \
+             service model. Every modelled operation of `{service}` does work — run \
+             `awsc {service} help` to see them.\n\n\
+             Please report it at https://github.com/DavidLee18/aws_cli/issues if you need it.",
+            env!("CARGO_PKG_VERSION"),
+        )),
+    ))
+}
+
+/// A flag the AWS CLI adds to a modelled operation by customization, which this build
+/// does not implement.
+///
+/// The surface data records these (`--paths` on `cloudfront create-invalidation`,
+/// `--origin-domain-name` on `create-distribution`, and 200-odd more). Every one of them
+/// is currently *inert* here: it parses, binds to no member, and the command then either
+/// demands the argument the customization exists to replace, or sends a request without
+/// it. Saying so is the only honest answer.
+fn unported_argument(
+    service: &str,
+    operation: &str,
+    input_shape: Option<&awsc_model::shape::StructureShape>,
+    parsed: &args::Parsed,
+) -> Option<Failure> {
+    let patch = awsc_model::surface_overlays::custom_surface()
+        .modeled_arg_patches
+        .get(service)?
+        .get(operation)?;
+    // A patch entry that happens to name a real member is already handled by the binder;
+    // only the ones that bind to nothing are inert, and only those are worth reporting.
+    let modelled: std::collections::BTreeSet<String> = input_shape
+        .map(|shape| {
+            shape
+                .members
+                .keys()
+                .map(|name| args::flag_for_member(service, operation, name))
+                .collect()
+        })
+        .unwrap_or_default();
+    let supplied: Vec<&str> = patch
+        .add
+        .iter()
+        .map(String::as_str)
+        .filter(|flag| parsed.parameters.contains_key(*flag) && !modelled.contains(*flag))
+        .collect();
+    if supplied.is_empty() {
+        return None;
+    }
+    Some(Failure::new(
+        exit::PARAM_VALIDATION,
+        awsc_runtime::RuntimeError::ParamValidation(format!(
+            "{} is a convenience argument the AWS CLI adds to `{service} {operation}`, and \
+             awsc {} does not implement it yet.\n\n\
+             It is not part of the service model, so it has to be ported by hand. The \
+             modelled parameters all work — run `awsc {service} {operation} help` to see \
+             them, and pass the underlying one instead.\n\n\
+             Please report it at https://github.com/DavidLee18/aws_cli/issues if you need it.",
+            supplied.join(", "),
+            env!("CARGO_PKG_VERSION"),
+        )),
+    ))
+}
+
 /// Every `aws <service>` name we can resolve, for the suggestion list.
-fn known_services() -> Vec<String> {
+pub fn known_services() -> Vec<String> {
     let dir = models_dir();
-    if let Ok(bytes) = std::fs::read(dir.join(".awsc-model-index.json")) {
-        if let Ok(map) = serde_json::from_slice::<std::collections::BTreeMap<String, String>>(&bytes)
-        {
-            return map.into_keys().collect();
+    // The compiled catalogue first: it is what a normal install has, and it knows every
+    // service. The JSON index is only a fallback cache of lookups that missed it, so on
+    // most installs it is absent — which used to leave both the suggestion list and the
+    // help page's COMMANDS section empty.
+    let mut names = Model::container_service_names(&dir);
+    if names.is_empty() {
+        if let Ok(bytes) = std::fs::read(dir.join(".awsc-model-index.json")) {
+            if let Ok(map) =
+                serde_json::from_slice::<std::collections::BTreeMap<String, String>>(&bytes)
+            {
+                names = map.into_keys().collect();
+            }
         }
     }
-    Vec::new()
+    names.sort_unstable();
+    names.dedup();
+    names
 }
 
 pub fn now_unix() -> i64 {

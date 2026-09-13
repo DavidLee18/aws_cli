@@ -31,6 +31,12 @@ md-5 = "0.10"
 ureq = { version = "2", default-features = false, features = ["tls"] }
 flate2 = "1"
 sha2 = "0.10"
+# `cloudfront sign` only. CloudFront requires RSA PKCS#1 v1.5 over **SHA-1**, which
+# aws-lc-rs (already here under rustls) can verify but cannot sign -- its signing
+# encodings stop at SHA-256. Signing is not exposed to attacker-chosen input, so the
+# Marvin timing advisory against this crate's PKCS#1 v1.5 *decryption* does not apply.
+rsa = { version = "0.9", features = ["sha1"] }
+sha1 = "0.10"
 base64ct = { version = "1", features = ["alloc"] }
 quick-xml = { workspace = true }
 serde = { workspace = true }
