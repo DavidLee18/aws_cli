@@ -54,7 +54,7 @@ dependencies = [
 
 [[package]]
 name = "awsc"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "awsc-model",
  "awsc-output",
@@ -76,7 +76,7 @@ dependencies = [
 
 [[package]]
 name = "awsc-conformance"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "awsc-model",
  "serde",
@@ -85,7 +85,7 @@ dependencies = [
 
 [[package]]
 name = "awsc-model"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "elsa",
  "indexmap",
@@ -98,7 +98,7 @@ dependencies = [
 
 [[package]]
 name = "awsc-output"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "jmespath",
  "serde",
@@ -108,7 +108,7 @@ dependencies = [
 
 [[package]]
 name = "awsc-protocol"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "awsc-model",
  "quick-xml",
@@ -118,7 +118,7 @@ dependencies = [
 
 [[package]]
 name = "awsc-runtime"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "awsc-model",
  "bytes",
