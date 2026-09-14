@@ -33,6 +33,7 @@ mod logs_tail;
 mod paginate;
 mod s3;
 mod servicecatalog;
+mod sshkey;
 mod sso;
 mod wait;
 mod websocket;

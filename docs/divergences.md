@@ -586,7 +586,7 @@ views of one service. Deferred to the customization phase.
 
 ## Custom commands (first tranche)
 
-Thirty-eight custom commands are now implemented, each verified by byte-diffing our stdout/stderr
+Thirty-nine custom commands are now implemented, each verified by byte-diffing our stdout/stderr
 and exit code against the reference. `scripts/compare-custom-commands.sh` reproduces the
 comparison; it pins our clock to the reference's via `AWSC_FIXED_TIME`, because presigned
 URLs embed a timestamp and would otherwise never compare equal.
@@ -620,6 +620,7 @@ URLs embed a timestamp and would otherwise never compare equal.
 | `deploy register` / `deregister` | both call sequences and the 0600 config file, against stand-ins |
 | `deploy push` | the uploaded bundle read back by Python's own `zipfile`, CRCs and all |
 | `ec2-instance-connect open-tunnel` | both modes end-to-end against an EC2 stand-in and a TLS WebSocket echo server; frame and handshake vectors from RFC 6455 |
+| `ec2-instance-connect ssh` | every connection-type branch and all eight refusals against stand-ins and a fake `ssh`; the generated key read back by `ssh-keygen -y` |
 | `gamelift upload-build` | three calls against a GameLift stand-in; the upload signed with GameLift's own credentials, bundle read back by `zipfile` |
 
 Facts worth recording, because each contradicts a reasonable assumption:
@@ -839,6 +840,35 @@ Facts worth recording, because each contradicts a reasonable assumption:
     sees `b''` at EOF, does not treat it as closed, and sends empty frames in a tight
     loop. Ours sends a close frame and keeps reading until the server closes, so the last
     reply of a session is not truncated.
+
+- **`ec2-instance-connect ssh` generates a throwaway Ed25519 key per invocation** and
+  needed OpenSSH's own key formats (`crates/awsc/src/sshkey.rs`): the
+  `ssh-ed25519 AAAA...` authorized-keys line and the `openssh-key-v1` private container,
+  both of which the reference gets from `awscrt`. The derivation is pinned to RFC 8032's
+  first test vector, and the container to **`ssh-keygen -y`**, which reads our private
+  file with OpenSSH's own parser and has to derive the public line we emit — nothing
+  about the framing can be wrong and still pass that. The key is written `0400` into a
+  directory of its own and removed whether `ssh` succeeded or not, because leaving it on
+  disk is the only way this command can leave a credential behind. The base64 is one
+  line rather than wrapped at 70 characters, which is what the reference produces and
+  what OpenSSH's reader accepts.
+
+  Two behaviours that are not guessable:
+
+  - **`--connection-type auto` decides between direct and tunnel by which addresses the
+    instance has**: public IPv4 means direct, a private IPv4 alone means a tunnel, IPv6
+    alone means direct. The three explicit types have three *different* preference
+    orders — under `direct` the IPv6 address is preferred over the private IPv4, under
+    `eice` the private IPv4 comes first and the public address is never used — and
+    `--eice-options` on its own is enough to ask for a tunnel. The reference's own
+    comment says `auto` may change, which is a reason to pass `--connection-type`.
+  - **The `ProxyCommand` re-invokes this binary by its own argv[0]**, not `aws` from the
+    PATH, so the tunnel is opened by the build that was actually run, and `--region` and
+    `--profile` are carried through into it.
+
+  **One asymmetry worth knowing, and it is the reference's:** `ssh` forwards
+  `--endpoint-url` to its EC2 calls and `open-tunnel` does not. Below the flag both fall
+  back to `AWS_ENDPOINT_URL_EC2`, as botocore does.
 
 - **`gamelift upload-build` uploads with credentials that are not the caller's.**
   `request-upload-credentials` returns temporary credentials *and* a bucket and key that

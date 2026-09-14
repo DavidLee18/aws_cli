@@ -47,6 +47,9 @@ base64ct = { version = "1", features = ["alloc"] }
 rustls = { workspace = true }
 rustls-native-certs = "0.8"
 rustls-pemfile = { workspace = true }
+# `ec2-instance-connect ssh` generates a throwaway Ed25519 key pair. aws-lc-rs is already
+# in the tree as rustls's crypto provider; this names it to reach Ed25519 directly.
+aws-lc-rs = "1"
 quick-xml = { workspace = true }
 serde = { workspace = true }
 

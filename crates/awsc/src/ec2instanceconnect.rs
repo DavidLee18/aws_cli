@@ -39,6 +39,7 @@ const USABLE_STATES: [&str; 4] =
 pub fn dispatch(parsed: &Parsed, globals: &Globals) -> Result<Option<ExitCode>, Failure> {
     match parsed.operation.as_str() {
         "open-tunnel" => open_tunnel(parsed, globals).map(Some),
+        "ssh" => ssh(parsed, globals).map(Some),
         _ => Ok(None),
     }
 }
@@ -634,5 +635,573 @@ mod tests {
             closure_reason(&payload).expect_err("reports"),
             "Websocket Closure Reason: Endpoint unavailable"
         );
+    }
+}
+
+/// `aws ec2-instance-connect ssh`: push a throwaway key, then hand over to OpenSSH.
+///
+/// Two things to know before reading the connection logic below:
+///
+/// - **A fresh Ed25519 key pair is generated per invocation** unless `--private-key-file`
+///   says otherwise. The public half goes to the instance through `send-ssh-public-key`,
+///   where it is valid for 60 seconds; the private half is written to a file this command
+///   creates `0400` and deletes on the way out.
+/// - **`--connection-type auto` decides between a direct connection and a tunnel by which
+///   addresses the instance has** — public IPv4 means direct, a private IPv4 alone means
+///   a tunnel, IPv6 alone means direct. The reference's own comment says this may change,
+///   which is a reason to pass `--connection-type` explicitly rather than a reason to
+///   simplify it here.
+fn ssh(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> {
+    let args = take_args(
+        parsed,
+        &[
+            "--instance-id",
+            "--instance-ip",
+            "--private-key-file",
+            "--os-user",
+            "--ssh-port",
+            "--local-forwarding",
+            "--connection-type",
+            "--eice-options",
+        ],
+    )?;
+    let value = |flag: &str| args.get(flag).copied().flatten();
+
+    let Some(instance_id) = value("--instance-id") else {
+        return Err(crate::custom::missing_required(&["--instance-id"]));
+    };
+    let os_user = value("--os-user").unwrap_or("ec2-user");
+    let ssh_port = value("--ssh-port").unwrap_or("22");
+    let connection_type = value("--connection-type").unwrap_or("auto");
+    let eice_options = match value("--eice-options") {
+        Some(token) => Some(crate::custom::parse_shorthand_token(token, "--eice-options")?),
+        None => None,
+    };
+    let option = |name: &str| -> Option<String> {
+        eice_options.as_ref().and_then(|options| options.get(name)).and_then(|value| match value {
+            Value::String(text) => Some(text.clone()),
+            Value::Number(number) => Some(number.to_string()),
+            _ => None,
+        })
+    };
+
+    validate_ssh_args(
+        instance_id,
+        value("--instance-ip"),
+        connection_type,
+        eice_options.as_ref(),
+        &option,
+    )?;
+
+    let region = resolve_region(globals)
+        .ok_or_else(|| Failure::new(exit::CONFIGURATION, awsc_runtime::RuntimeError::NoRegion))?;
+    // Unlike `open-tunnel`, this one *does* forward `--endpoint-url` to EC2: the
+    // reference passes it here and omits it there. Surprising, but it is the behaviour.
+    // Below the flag, botocore still applies `AWS_ENDPOINT_URL_EC2`, so that is the
+    // fallback rather than "no override at all".
+    let ec2_globals = Globals {
+        region: Some(region.clone()),
+        endpoint_url: globals
+            .endpoint_url
+            .clone()
+            .or_else(|| Globals::endpoint_from_environment("ec2")),
+        ..globals.clone()
+    };
+    let ec2_model = crate::load_model("ec2").map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
+    let ec2 = Client::new(&ec2_model, &ec2_globals)?;
+    let described =
+        ec2.call("describe-instances", Some(&json!({ "InstanceIds": [instance_id] })))?;
+    let instance = described
+        .get("Reservations")
+        .and_then(|r| r.get(0))
+        .and_then(|r| r.get("Instances"))
+        .and_then(|i| i.get(0))
+        .ok_or_else(|| Failure::new(exit::GENERAL_ERROR, "list index out of range"))?;
+    let address = |key: &str| instance.get(key).and_then(Value::as_str).map(str::to_string);
+
+    let (use_tunnel, ip_address) = choose_connection(
+        value("--instance-ip"),
+        connection_type,
+        eice_options.is_some(),
+        address("PublicIpAddress"),
+        address("PrivateIpAddress"),
+        address("Ipv6Address"),
+    );
+    let Some(ip_address) = ip_address else {
+        return Err(param_error("Unable to find any IP address on the instance to connect to."));
+    };
+
+    let mut endpoint_id = option("endpointId");
+    let mut dns_name = option("dnsName");
+    if use_tunnel && dns_name.is_none() {
+        let endpoint = find_endpoint(
+            &ec2,
+            instance.get("VpcId").and_then(Value::as_str),
+            instance.get("SubnetId").and_then(Value::as_str),
+            endpoint_id.as_deref(),
+        )?;
+        endpoint_id = endpoint
+            .get("InstanceConnectEndpointId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        dns_name = Some(eice_dns_name(&endpoint, use_fips_endpoint(globals))?);
+    }
+
+    // The generated key lives in its own directory so the file can be removed with it,
+    // and so a key never lands in a directory the user did not expect.
+    let mut generated: Option<std::path::PathBuf> = None;
+    let key_file = match value("--private-key-file") {
+        Some(path) => path.to_string(),
+        None => {
+            let key = crate::sshkey::generate()
+                .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
+            let eic_globals =
+                Globals { region: Some(region.clone()), ..globals.for_service("ec2-instance-connect") };
+            let eic_model = crate::load_model("ec2-instance-connect")
+                .map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
+            let eic = Client::new(&eic_model, &eic_globals)?;
+            eic.call(
+                "send-ssh-public-key",
+                Some(&json!({
+                    "InstanceId": instance_id,
+                    "InstanceOSUser": os_user,
+                    "SSHPublicKey": crate::sshkey::authorized_key(&key),
+                })),
+            )?;
+            let path = write_private_key(&key)?;
+            generated = Some(path.clone());
+            path.to_string_lossy().into_owned()
+        }
+    };
+
+    let outcome = run_ssh(
+        RunSsh {
+            use_tunnel,
+            instance_id,
+            ssh_port,
+            os_user,
+            local_forwarding: value("--local-forwarding"),
+            key_file: &key_file,
+            ip_address: &ip_address,
+            endpoint_id: endpoint_id.as_deref(),
+            dns_name: dns_name.as_deref(),
+            max_tunnel_duration: option("maxTunnelDuration"),
+        },
+        globals,
+    );
+    // Removed whether ssh succeeded or not: the key is good for one login and leaving it
+    // on disk is the only way this command can leave a credential behind.
+    if let Some(path) = generated {
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(path.parent().unwrap_or(&path));
+    }
+    outcome
+}
+
+/// The reference's validation, in its order and with its wording.
+fn validate_ssh_args(
+    instance_id: &str,
+    instance_ip: Option<&str>,
+    connection_type: &str,
+    eice_options: Option<&Value>,
+    option: &dyn Fn(&str) -> Option<String>,
+) -> Result<(), Failure> {
+    if !is_instance_id(instance_id) {
+        return Err(param_error(
+            "The specified instance ID is invalid. Provide the full instance ID in the form \
+             i-xxxxxxxxxxxxxxxxx.",
+        ));
+    }
+    if connection_type == "direct" && eice_options.is_some() {
+        return Err(param_error(
+            "eice-options can't be specified when connection type is direct.",
+        ));
+    }
+    if option("dnsName").is_some() && option("endpointId").is_none() {
+        return Err(param_error("When specifying dnsName, you must specify endpointId."));
+    }
+    if let Some(duration) = option("maxTunnelDuration") {
+        let duration: u32 = duration
+            .parse()
+            .map_err(|_| param_error("Invalid value specified for maxTunnelDuration."))?;
+        if !(1..=3_600).contains(&duration) {
+            return Err(param_error(
+                "Invalid value specified for maxTunnelDuration. Value must be greater than 1 \
+                 and less than 3600.",
+            ));
+        }
+    }
+    if let Some(endpoint_id) = option("endpointId") {
+        if !matches_pattern(&endpoint_id, "eice-", |c| c.is_ascii_alphanumeric() || c == '_') {
+            return Err(param_error(
+                "The specified endpointId is invalid. Provide the full EC2 Instance Connect \
+                 Endpoint ID in the form eice-xxxxxxxxxxxxxxxxx.",
+            ));
+        }
+    }
+    if let Some(dns_name) = option("dnsName") {
+        if dns_name.is_empty()
+            || !dns_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        {
+            return Err(param_error("The specified dnsName is invalid."));
+        }
+    }
+    // `auto` is the default, so this fires whenever `--instance-ip` is given without an
+    // explicit `--connection-type`: with an address supplied by hand, the command will
+    // not guess whether it is reachable directly.
+    if instance_ip.is_some() && connection_type == "auto" {
+        return Err(param_error(
+            "When specifying instance-ip, you must specify connection-type.",
+        ));
+    }
+    Ok(())
+}
+
+fn is_instance_id(value: &str) -> bool {
+    matches_pattern(value, "i-", |c| c.is_ascii_alphanumeric())
+}
+
+/// `^<prefix>[...]+$`: the prefix, then at least one character the predicate accepts.
+fn matches_pattern(value: &str, prefix: &str, allowed: impl Fn(char) -> bool) -> bool {
+    match value.strip_prefix(prefix) {
+        Some(rest) => !rest.is_empty() && rest.chars().all(allowed),
+        None => false,
+    }
+}
+
+/// Which address to connect to, and whether it needs a tunnel.
+///
+/// Split out because it is the whole of the command's behaviour that is worth testing
+/// without an instance: six branches, and the `auto` one has a documented preference
+/// order that a reader would otherwise have to reconstruct from the API calls.
+fn choose_connection(
+    instance_ip: Option<&str>,
+    connection_type: &str,
+    has_eice_options: bool,
+    public_ipv4: Option<String>,
+    private_ipv4: Option<String>,
+    ipv6: Option<String>,
+) -> (bool, Option<String>) {
+    if let Some(instance_ip) = instance_ip {
+        return (connection_type == "eice", Some(instance_ip.to_string()));
+    }
+    // `--eice-options` on its own asks for a tunnel, without `--connection-type eice`.
+    if connection_type == "eice" || has_eice_options {
+        return (true, private_ipv4.or(ipv6));
+    }
+    if connection_type == "direct" {
+        return (false, public_ipv4.or(ipv6).or(private_ipv4));
+    }
+    // auto: IPv4 before IPv6, because that is what most instances have today.
+    match (public_ipv4, private_ipv4, ipv6) {
+        (Some(public), _, _) => (false, Some(public)),
+        (None, Some(private), _) => (true, Some(private)),
+        (None, None, Some(ipv6)) => (false, Some(ipv6)),
+        (None, None, None) => (false, None),
+    }
+}
+
+/// Write the private key where only this user can read it.
+fn write_private_key(key: &crate::sshkey::Ed25519Key) -> Result<std::path::PathBuf, Failure> {
+    let directory = std::env::temp_dir().join(format!(
+        "awsc-eic-{}-{}",
+        std::process::id(),
+        crate::now_unix()
+    ));
+    std::fs::create_dir_all(&directory).map_err(|e| {
+        Failure::new(exit::GENERAL_ERROR, format!("{}: {e}", directory.display()))
+    })?;
+    let path = directory.join("private-key");
+    std::fs::write(&path, crate::sshkey::private_pem(key))
+        .map_err(|e| Failure::new(exit::GENERAL_ERROR, format!("{}: {e}", path.display())))?;
+    // `ssh` refuses a key file other users can read, so this is not merely hygiene.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))
+            .map_err(|e| Failure::new(exit::GENERAL_ERROR, format!("{}: {e}", path.display())))?;
+    }
+    Ok(path)
+}
+
+struct RunSsh<'a> {
+    use_tunnel: bool,
+    instance_id: &'a str,
+    ssh_port: &'a str,
+    os_user: &'a str,
+    local_forwarding: Option<&'a str>,
+    key_file: &'a str,
+    ip_address: &'a str,
+    endpoint_id: Option<&'a str>,
+    dns_name: Option<&'a str>,
+    max_tunnel_duration: Option<String>,
+}
+
+fn run_ssh(options: RunSsh<'_>, globals: &Globals) -> Result<ExitCode, Failure> {
+    // argv[0], as the reference uses `sys.argv[0]`: the ProxyCommand has to re-invoke
+    // the binary the user actually ran, not whatever `aws` is on PATH.
+    let argv0 = std::env::args().next().unwrap_or_else(|| "awsc".to_string());
+    let command = ssh_command(&options, globals, &argv0);
+    let status = std::process::Command::new(&command[0]).args(&command[1..]).status();
+    match status {
+        Ok(status) => Ok(exit::code(status.code().unwrap_or(1) as u8)),
+        // A ConfigurationError in the reference, so 253 — and the message points at the
+        // documentation rather than at a missing binary, because "install OpenSSH" is
+        // what the reader has to do.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(Failure::new(
+            exit::CONFIGURATION,
+            "SSH not available. Please refer to the documentation at \
+             https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/Connect-using-EC2-Instance-Connect-Endpoint.html.",
+        )),
+        Err(e) => Err(Failure::new(exit::GENERAL_ERROR, e)),
+    }
+}
+
+/// The `ssh` argument list. `argv0` is the path this binary was invoked as, which becomes
+/// the `ProxyCommand`'s first word — so a tunnel is opened by *this* build, not by
+/// whatever `aws` happens to be on PATH.
+fn ssh_command(options: &RunSsh<'_>, globals: &Globals, argv0: &str) -> Vec<String> {
+    let mut command: Vec<String> = vec![
+        "ssh".to_string(),
+        // Not configurable, and deliberately so in the reference: without it a tunnel
+        // that dies leaves the client sitting on a dead session with no indication.
+        "-o".to_string(),
+        "ServerAliveInterval=5".to_string(),
+        "-p".to_string(),
+        options.ssh_port.to_string(),
+        "-i".to_string(),
+        options.key_file.to_string(),
+    ];
+    if let Some(forwarding) = options.local_forwarding {
+        command.push("-L".to_string());
+        command.push(forwarding.to_string());
+    }
+    if globals.debug {
+        command.push("-v".to_string());
+    }
+    if options.use_tunnel {
+        let mut proxy = vec![
+            argv0.to_string(),
+            "ec2-instance-connect".to_string(),
+            "open-tunnel".to_string(),
+            "--instance-id".to_string(),
+            options.instance_id.to_string(),
+            "--private-ip-address".to_string(),
+            options.ip_address.to_string(),
+            "--remote-port".to_string(),
+            options.ssh_port.to_string(),
+        ];
+        if let Some(region) = &globals.region {
+            proxy.push("--region".to_string());
+            proxy.push(region.clone());
+        }
+        if let Some(profile) = &globals.profile {
+            proxy.push("--profile".to_string());
+            proxy.push(profile.clone());
+        }
+        if let Some(endpoint_id) = options.endpoint_id {
+            proxy.push("--instance-connect-endpoint-id".to_string());
+            proxy.push(endpoint_id.to_string());
+        }
+        if let Some(dns_name) = options.dns_name {
+            proxy.push("--instance-connect-endpoint-dns-name".to_string());
+            proxy.push(dns_name.to_string());
+        }
+        if let Some(duration) = &options.max_tunnel_duration {
+            proxy.push("--max-tunnel-duration".to_string());
+            proxy.push(duration.clone());
+        }
+        let quoted: Vec<String> = proxy.iter().map(|word| shell_quote(word)).collect();
+        command.push("-o".to_string());
+        command.push(format!("ProxyCommand={}", quoted.join(" ")));
+    }
+    command.push(format!("{}@{}", options.os_user, options.ip_address));
+    command
+}
+
+/// botocore's `compat_shell_quote` on POSIX, which is `shlex.quote`: leave a word alone
+/// when every character is safe, otherwise wrap it in single quotes and escape any
+/// single quote as `'"'"'`.
+fn shell_quote(word: &str) -> String {
+    if word.is_empty() {
+        return "''".to_string();
+    }
+    let safe = |c: char| {
+        c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c)
+    };
+    if word.chars().all(safe) {
+        return word.to_string();
+    }
+    format!("'{}'", word.replace('\'', "'\"'\"'"))
+}
+
+#[cfg(test)]
+mod ssh_tests {
+    use super::*;
+
+    fn globals() -> Globals {
+        Globals {
+            region: None,
+            profile: None,
+            endpoint_url: None,
+            debug: false,
+            no_sign_request: false,
+            verify_ssl: true,
+            ca_bundle: None,
+            read_timeout: None,
+            connect_timeout: None,
+        }
+    }
+
+    fn options<'a>(use_tunnel: bool) -> RunSsh<'a> {
+        RunSsh {
+            use_tunnel,
+            instance_id: "i-abc",
+            ssh_port: "22",
+            os_user: "ec2-user",
+            local_forwarding: None,
+            key_file: "/tmp/k",
+            ip_address: "10.0.0.5",
+            endpoint_id: None,
+            dns_name: None,
+            max_tunnel_duration: None,
+        }
+    }
+
+    /// The plain form: no tunnel, and `user@ip` stays last.
+    #[test]
+    fn a_direct_connection_is_a_bare_ssh_command() {
+        let command = ssh_command(&options(false), &globals(), "aws");
+        assert_eq!(
+            command,
+            vec![
+                "ssh",
+                "-o",
+                "ServerAliveInterval=5",
+                "-p",
+                "22",
+                "-i",
+                "/tmp/k",
+                "ec2-user@10.0.0.5",
+            ]
+        );
+    }
+
+    /// Every optional flag lands *before* `user@ip`, which OpenSSH requires: anything
+    /// after the destination is taken as a remote command.
+    #[test]
+    fn the_destination_stays_last_whatever_is_added() {
+        let mut globals = globals();
+        globals.debug = true;
+        globals.region = Some("us-east-1".to_string());
+        let mut options = options(true);
+        options.local_forwarding = Some("3336:remote.host:3306");
+        options.endpoint_id = Some("eice-1");
+        let command = ssh_command(&options, &globals, "/usr/local/bin/awsc");
+        assert_eq!(command.last().expect("has a destination"), "ec2-user@10.0.0.5");
+        assert_eq!(command[command.len() - 3], "-o");
+        assert!(command.contains(&"-v".to_string()));
+        assert_eq!(command[7], "-L");
+        assert_eq!(command[8], "3336:remote.host:3306");
+    }
+
+    /// The ProxyCommand re-invokes *this* binary, carries the region and profile through,
+    /// and is one shell-quoted word list.
+    #[test]
+    fn the_proxy_command_reinvokes_this_binary() {
+        let mut globals = globals();
+        globals.region = Some("us-east-1".to_string());
+        globals.profile = Some("my profile".to_string());
+        let mut options = options(true);
+        options.endpoint_id = Some("eice-1");
+        options.max_tunnel_duration = Some("120".to_string());
+        let command = ssh_command(&options, &globals, "/opt/my tools/awsc");
+        let proxy = command
+            .iter()
+            .find(|word| word.starts_with("ProxyCommand="))
+            .expect("has a ProxyCommand");
+        assert_eq!(
+            proxy,
+            "ProxyCommand='/opt/my tools/awsc' ec2-instance-connect open-tunnel \
+             --instance-id i-abc --private-ip-address 10.0.0.5 --remote-port 22 \
+             --region us-east-1 --profile 'my profile' \
+             --instance-connect-endpoint-id eice-1 --max-tunnel-duration 120"
+        );
+    }
+
+    /// A word with nothing unsafe in it is left alone; anything else is single-quoted,
+    /// and a single quote inside is closed, escaped and reopened.
+    #[test]
+    fn shell_quoting_follows_shlex() {
+        assert_eq!(shell_quote("plain-word_1.2/3"), "plain-word_1.2/3");
+        assert_eq!(shell_quote(""), "''");
+        assert_eq!(shell_quote("two words"), "'two words'");
+        assert_eq!(shell_quote("it's"), "'it'\"'\"'s'");
+        assert_eq!(shell_quote("a;rm -rf /"), "'a;rm -rf /'");
+    }
+
+    /// The `auto` preference order, which is the part a reader cannot guess.
+    #[test]
+    fn auto_prefers_public_ipv4_then_private_then_ipv6() {
+        let public = Some("1.2.3.4".to_string());
+        let private = Some("10.0.0.5".to_string());
+        let ipv6 = Some("2001:db8::1".to_string());
+        // A public address is reachable directly.
+        assert_eq!(
+            choose_connection(None, "auto", false, public.clone(), private.clone(), ipv6.clone()),
+            (false, public.clone())
+        );
+        // Private only: a tunnel.
+        assert_eq!(
+            choose_connection(None, "auto", false, None, private.clone(), ipv6.clone()),
+            (true, private.clone())
+        );
+        // IPv6 only: direct, not a tunnel.
+        assert_eq!(
+            choose_connection(None, "auto", false, None, None, ipv6.clone()),
+            (false, ipv6.clone())
+        );
+        assert_eq!(choose_connection(None, "auto", false, None, None, None), (false, None));
+    }
+
+    /// `direct` and `eice` have their own, different, preference orders — and
+    /// `--eice-options` alone is enough to ask for a tunnel.
+    #[test]
+    fn the_explicit_connection_types_have_their_own_orders() {
+        let public = Some("1.2.3.4".to_string());
+        let private = Some("10.0.0.5".to_string());
+        let ipv6 = Some("2001:db8::1".to_string());
+        // direct: public, then IPv6, then private — IPv6 comes *before* the private IPv4.
+        assert_eq!(
+            choose_connection(None, "direct", false, None, private.clone(), ipv6.clone()),
+            (false, ipv6.clone())
+        );
+        // eice: private IPv4, falling back to IPv6, and never the public address.
+        assert_eq!(
+            choose_connection(None, "eice", false, public.clone(), private.clone(), ipv6.clone()),
+            (true, private.clone())
+        );
+        assert_eq!(
+            choose_connection(None, "eice", false, public.clone(), None, ipv6.clone()),
+            (true, ipv6.clone())
+        );
+        // eice-options with no --connection-type still means a tunnel.
+        assert_eq!(
+            choose_connection(None, "auto", true, public.clone(), private.clone(), None),
+            (true, private.clone())
+        );
+        // An address given by hand is used as given; only the type decides the tunnel.
+        assert_eq!(
+            choose_connection(Some("192.0.2.7"), "eice", false, public, private, ipv6),
+            (true, Some("192.0.2.7".to_string()))
+        );
+    }
+
+    #[test]
+    fn an_instance_id_must_look_like_one() {
+        assert!(is_instance_id("i-0123456789abcdef0"));
+        assert!(!is_instance_id("i-"));
+        assert!(!is_instance_id("0123456789abcdef0"));
+        assert!(!is_instance_id("i-abc_def"));
     }
 }

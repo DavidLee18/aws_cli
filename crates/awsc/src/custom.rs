@@ -42,6 +42,7 @@ pub(crate) const IMPLEMENTED: &[(&str, &str, &str)] = &[
     ("dlm", "create-default-role", "Create the IAM role Data Lifecycle Manager uses, if it does not exist."),
     ("dsql", "generate-db-connect-admin-auth-token", "Print a signed token for connecting to a DSQL cluster as admin."),
     ("dsql", "generate-db-connect-auth-token", "Print a signed token for connecting to a DSQL cluster."),
+    ("ec2-instance-connect", "ssh", "Push a throwaway key and SSH in, directly or through an endpoint."),
     ("ec2-instance-connect", "open-tunnel", "Open a websocket tunnel to an instance through an EC2 Instance Connect Endpoint."),
     ("ecs", "deploy", "Register a task definition and roll it out through CodeDeploy."),
     ("emr", "get", "Copy a file off the master node with scp."),
