@@ -824,25 +824,7 @@ fn install_step(name: &str, on_failure: &str, region: &str, args: Vec<String>) -
 
 /// One shorthand-or-JSON token, named for the error message.
 fn parse_shorthand(token: &str, flag: &str) -> Result<Value, Failure> {
-    let trimmed = token.trim_start();
-    if trimmed.starts_with('{') || trimmed.starts_with('[') {
-        return serde_json::from_str(token).map_err(|e| {
-            Failure::new(
-                exit::PARAM_VALIDATION,
-                awsc_runtime::RuntimeError::ParamValidation(format!(
-                    "Error parsing parameter '{flag}': Invalid JSON: {e}\nJSON received: {token}"
-                )),
-            )
-        });
-    }
-    awsc_protocol::shorthand::parse(token).map_err(|e| {
-        Failure::new(
-            exit::PARAM_VALIDATION,
-            awsc_runtime::RuntimeError::ParamValidation(format!(
-                "Error parsing parameter '{flag}': {e}"
-            )),
-        )
-    })
+    crate::custom::parse_shorthand_token(token, flag)
 }
 
 /// One `--steps` token: JSON if it starts like JSON, shorthand otherwise.

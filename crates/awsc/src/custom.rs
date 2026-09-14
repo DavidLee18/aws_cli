@@ -36,6 +36,8 @@ pub(crate) const IMPLEMENTED: &[(&str, &str, &str)] = &[
     ("configservice", "get-status", "Print the status of the configuration recorders and delivery channels."),
     ("datapipeline", "create-default-roles", "Create the IAM roles and instance profile Data Pipeline uses."),
     ("datapipeline", "list-runs", "List a pipeline's runs, filtered by status or time window."),
+    ("deploy", "deregister", "Deregister an on-premises instance and clean up its IAM user."),
+    ("deploy", "register", "Create an IAM user for an on-premises instance and register it."),
     ("dlm", "create-default-role", "Create the IAM role Data Lifecycle Manager uses, if it does not exist."),
     ("dsql", "generate-db-connect-admin-auth-token", "Print a signed token for connecting to a DSQL cluster as admin."),
     ("dsql", "generate-db-connect-auth-token", "Print a signed token for connecting to a DSQL cluster."),
@@ -101,6 +103,10 @@ pub fn dispatch(parsed: &Parsed) -> Result<Option<ExitCode>, Failure> {
             Some(code) => code,
             None => return Ok(None),
         },
+        ("deploy", _) => match crate::codedeploy::dispatch(parsed, &globals)? {
+            Some(code) => code,
+            None => return Ok(None),
+        },
         ("cloudtrail", _) => match crate::cloudtrail::dispatch(parsed, &globals)? {
             Some(code) => code,
             None => return Ok(None),
@@ -151,6 +157,32 @@ pub fn dispatch(parsed: &Parsed) -> Result<Option<ExitCode>, Failure> {
         }
     };
     Ok(Some(outcome))
+}
+
+/// One shorthand-or-JSON token from a list-valued flag on a custom command.
+pub(crate) fn parse_shorthand_token(
+    token: &str,
+    flag: &str,
+) -> Result<serde_json::Value, Failure> {
+    let trimmed = token.trim_start();
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        return serde_json::from_str(token).map_err(|e| {
+            Failure::new(
+                exit::PARAM_VALIDATION,
+                awsc_runtime::RuntimeError::ParamValidation(format!(
+                    "Error parsing parameter '{flag}': Invalid JSON: {e}\nJSON received: {token}"
+                )),
+            )
+        });
+    }
+    awsc_protocol::shorthand::parse(token).map_err(|e| {
+        Failure::new(
+            exit::PARAM_VALIDATION,
+            awsc_runtime::RuntimeError::ParamValidation(format!(
+                "Error parsing parameter '{flag}': {e}"
+            )),
+        )
+    })
 }
 
 /// The individual value tokens a flag was given, in argv order.

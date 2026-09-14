@@ -15,6 +15,7 @@ mod catalogue;
 mod cloudfront;
 mod cloudtrail;
 mod codeartifact;
+mod codedeploy;
 mod color;
 mod client;
 mod configure;
