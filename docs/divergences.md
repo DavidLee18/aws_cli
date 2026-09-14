@@ -586,7 +586,7 @@ views of one service. Deferred to the customization phase.
 
 ## Custom commands (first tranche)
 
-Eighteen custom commands are now implemented, each verified by byte-diffing our stdout/stderr
+Nineteen custom commands are now implemented, each verified by byte-diffing our stdout/stderr
 and exit code against the reference. `scripts/compare-custom-commands.sh` reproduces the
 comparison; it pins our clock to the reference's via `AWSC_FIXED_TIME`, because presigned
 URLs embed a timestamp and would otherwise never compare equal.
@@ -609,6 +609,7 @@ URLs embed a timestamp and would otherwise never compare equal.
 | `emr-containers update-role-trust-policy` | dry-run, update and already-present paths against a stand-in |
 | `emr-containers create-role-associations` / `delete-role-associations` | every association type against a stand-in |
 | `ecs deploy` | six calls across ECS and CodeDeploy driven against a stand-in, appspec hash recomputed |
+| `codeartifact login` | all six tools dry-run against a stand-in; npm run for real against a fake `npm` |
 
 Facts worth recording, because each contradicts a reasonable assumption:
 
@@ -686,6 +687,21 @@ Facts worth recording, because each contradicts a reasonable assumption:
   `waitTimeInMinutes` plus its `terminationWaitTimeInMinutes` plus ten, clamped to
   [30, 360], passed as a `WaiterConfig` override — so a group configured to wait an hour
   is not cut off after the waiter's own default.
+- **`codeartifact login` handles a live credential on every path, and the file writes
+  matter more than the API calls.** Files are created `0600` *and* `chmod`ed afterwards,
+  because the reference does that for a file that already existed with looser permissions.
+  A failed subprocess has the token replaced with `******` in both the command line and
+  the captured stderr before anything is printed — the token is an argument to half these
+  tools. `--dry-run` prints it **unredacted** on purpose, which the flag's own help says.
+  Note `pip` puts the token *in the index URL*, so `pip config set` writes a live
+  credential into a plainly readable file; that is the reference's behaviour, not a
+  choice made here.
+- **`codeartifact login --tool nuget` lists before it configures.** The source name is
+  `domain/repository` unless a source already points at that URL, in which case its
+  existing name is kept and the command becomes `update` instead of `add`. `dotnet` also
+  swaps its positional between the two forms (`add source <url> --name <name>` versus
+  `update source <name> --source <url>`), and appends `--store-password-in-clear-text`
+  everywhere but Windows, where encryption is available.
 - **`codecommit credential-helper` is not SigV4.** The canonical request uses the literal
   method `GIT`, an empty canonical query, and an *empty payload-hash field* rather than a
   SHA-256; the timestamp inside the string-to-sign carries no trailing `Z`. The `Z` is
@@ -790,7 +806,7 @@ work as ordinary modelled operations, 50 were genuinely missing, and 4 belong to
 `agent-toolkit`, a service absent from our catalogue entirely.** Twelve more landed on 2026-09-14 — `dsql`'s two
 token commands, `dlm create-default-role`, `gamelift get-game-session-log`,
 `datapipeline`'s two, `servicecatalog generate`'s two, `emr-containers`' three and
-`ecs deploy` — leaving 42. So the help page filters its "not implemented" list
+`ecs deploy` and `codeartifact login` — leaving 41. So the help page filters its "not implemented" list
 by whether the name resolves in the command table — without that it told readers that 37
 working commands, every WhatsApp call among them, did not work. And the wording of both the
 error and the help section says "no service model describes it" rather than "hand-written",

@@ -13,6 +13,7 @@ use std::process::ExitCode;
 mod args;
 mod catalogue;
 mod cloudfront;
+mod codeartifact;
 mod color;
 mod client;
 mod configure;
