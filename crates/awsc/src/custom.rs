@@ -37,6 +37,9 @@ pub(crate) const IMPLEMENTED: &[(&str, &str, &str)] = &[
     ("dlm", "create-default-role", "Create the IAM role Data Lifecycle Manager uses, if it does not exist."),
     ("dsql", "generate-db-connect-admin-auth-token", "Print a signed token for connecting to a DSQL cluster as admin."),
     ("dsql", "generate-db-connect-auth-token", "Print a signed token for connecting to a DSQL cluster."),
+    ("emr-containers", "create-role-associations", "Associate an IAM role with the EKS service accounts EMR runs pods under."),
+    ("emr-containers", "delete-role-associations", "Remove the pod identity associations for an IAM role."),
+    ("emr-containers", "update-role-trust-policy", "Add the EMR on EKS web-identity statement to a role's trust policy."),
     ("gamelift", "get-game-session-log", "Download a game session's compressed log archive to a file."),
     ("configservice", "subscribe", "Create the S3 bucket and SNS topic if needed, then start recording."),
     ("ecr", "get-login-password", "Print the password for `docker login` against a private registry."),
@@ -79,6 +82,10 @@ pub fn dispatch(parsed: &Parsed) -> Result<Option<ExitCode>, Failure> {
         ("dlm", "create-default-role") => dlm_create_default_role(parsed, &globals)?,
         // Two commands each, so these get their own modules and their own matches.
         ("datapipeline", _) => match crate::datapipeline::dispatch(parsed, &globals)? {
+            Some(code) => code,
+            None => return Ok(None),
+        },
+        ("emr-containers", _) => match crate::emrcontainers::dispatch(parsed, &globals)? {
             Some(code) => code,
             None => return Ok(None),
         },
@@ -362,7 +369,7 @@ fn generate_db_auth_token(parsed: &Parsed, globals: &Globals) -> Result<ExitCode
 /// the partition table, so an unknown region falls into `aws` — and a managed policy ARN
 /// built for the wrong partition simply does not exist, which the caller reports as "the
 /// managed policy does not exist" rather than as a bad region.
-fn policy_partition(region: &str) -> &'static str {
+pub(crate) fn policy_partition(region: &str) -> &'static str {
     let region = region.to_ascii_lowercase();
     if region.starts_with("cn-") {
         "aws-cn"

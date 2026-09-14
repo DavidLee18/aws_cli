@@ -50,6 +50,27 @@ impl Globals {
         }
     }
 
+    /// The endpoint override for one service, from the environment.
+    ///
+    /// `AWS_ENDPOINT_URL_<SERVICE>` then `AWS_ENDPOINT_URL`, which is the reference's
+    /// precedence below `--endpoint-url` and above the resolved endpoint
+    /// (`botocore/configprovider.py`). The service key is the botocore service id
+    /// upper-cased with every non-alphanumeric character turned into `_`, so
+    /// `elastic-beanstalk` reads `AWS_ENDPOINT_URL_ELASTIC_BEANSTALK`.
+    ///
+    /// Only the environment half is implemented: the `services` section of the config
+    /// file, and `ignore_configured_endpoint_urls`, are not — see `docs/divergences.md`.
+    pub fn endpoint_from_environment(service: &str) -> Option<String> {
+        let key: String = service
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
+            .collect();
+        std::env::var(format!("AWS_ENDPOINT_URL_{key}"))
+            .ok()
+            .or_else(|| std::env::var("AWS_ENDPOINT_URL").ok())
+            .filter(|value| !value.is_empty())
+    }
+
     /// The same globals aimed at a different service.
     ///
     /// `--endpoint-url` is deliberately dropped: the reference's
@@ -58,6 +79,41 @@ impl Globals {
     /// redirect an unrelated call.
     pub fn for_other_service(&self) -> Self {
         Globals { endpoint_url: None, ..self.clone() }
+    }
+
+    /// The same globals aimed at `service`, honouring the environment override for it.
+    ///
+    /// This is what a custom command that calls a *second* service wants: the user's
+    /// `--endpoint-url` must not follow the call, but `AWS_ENDPOINT_URL_EKS` names that
+    /// service explicitly and should.
+    pub fn for_service(&self, service: &str) -> Self {
+        Globals {
+            endpoint_url: Self::endpoint_from_environment(service),
+            ..self.clone()
+        }
+    }
+}
+
+#[cfg(test)]
+mod endpoint_environment_tests {
+    use super::Globals;
+
+    /// The service key is upper-cased with every non-alphanumeric character turned into
+    /// `_`, so a hyphenated service id reads from an underscored variable.
+    #[test]
+    fn the_service_variable_wins_over_the_general_one() {
+        // These names are process-wide, so one test owns them rather than racing.
+        std::env::set_var("AWS_ENDPOINT_URL", "http://general");
+        std::env::set_var("AWS_ENDPOINT_URL_ELASTIC_BEANSTALK", "http://specific");
+        assert_eq!(
+            Globals::endpoint_from_environment("elastic-beanstalk").as_deref(),
+            Some("http://specific")
+        );
+        assert_eq!(Globals::endpoint_from_environment("eks").as_deref(), Some("http://general"));
+
+        std::env::remove_var("AWS_ENDPOINT_URL_ELASTIC_BEANSTALK");
+        std::env::remove_var("AWS_ENDPOINT_URL");
+        assert_eq!(Globals::endpoint_from_environment("eks"), None);
     }
 }
 

@@ -387,6 +387,20 @@ Measured against all 430 services:
 `data/service-names.json`). `serviceId` is unique across all 430 services and equals
 Smithy's `sdkId`, so the join is exact. This also captured the CLI-layer renames for free.
 
+### `AWS_ENDPOINT_URL` ✅ partly fixed
+
+`--endpoint-url` redirects only the service the user named, which is right — but it left
+no way at all to redirect the *second* service a custom command calls (`emr-containers`
+asking EKS for a cluster, `dlm` asking IAM). The reference resolves an endpoint from
+`AWS_ENDPOINT_URL_<SERVICE>` then `AWS_ENDPOINT_URL`, below `--endpoint-url` and above the
+ruleset, and that half is now implemented (`Globals::for_service`). The service key is the
+service id upper-cased with every non-alphanumeric character turned into `_`, so
+`elastic-beanstalk` reads `AWS_ENDPOINT_URL_ELASTIC_BEANSTALK`.
+
+**Not implemented**: the `services` section of the config file and
+`ignore_configured_endpoint_urls`. Those are config-file plumbing rather than a different
+answer, so a user who sets neither sees identical behaviour.
+
 ### Universal and pagination flags ✅ fixed
 
 `--cli-input-json` / `--cli-input-yaml` (`customizations/cliinput.py:23-41`) and
@@ -543,7 +557,7 @@ views of one service. Deferred to the customization phase.
 
 ## Custom commands (first tranche)
 
-Fourteen custom commands are now implemented, each verified by byte-diffing our stdout/stderr
+Seventeen custom commands are now implemented, each verified by byte-diffing our stdout/stderr
 and exit code against the reference. `scripts/compare-custom-commands.sh` reproduces the
 comparison; it pins our clock to the reference's via `AWSC_FIXED_TIME`, because presigned
 URLs embed a timestamp and would otherwise never compare equal.
@@ -563,6 +577,8 @@ URLs embed a timestamp and would otherwise never compare equal.
 | `datapipeline create-default-roles` | 13-call IAM sequence driven against a stand-in |
 | `datapipeline list-runs` | column widths and pagination driven against a stand-in |
 | `servicecatalog generate product` / `provisioning-artifact` | upload + create driven against a stand-in |
+| `emr-containers update-role-trust-policy` | dry-run, update and already-present paths against a stand-in |
+| `emr-containers create-role-associations` / `delete-role-associations` | every association type against a stand-in |
 
 Facts worth recording, because each contradicts a reasonable assumption:
 
@@ -616,6 +632,18 @@ Facts worth recording, because each contradicts a reasonable assumption:
   four. One divergence: the reference rejects a region absent from
   `get_available_regions('servicecatalog')`, which needs botocore's per-service endpoint
   lists; we let the call itself fail instead.
+- **`emr-containers` hangs on a base36 role name, and it is a bignum.** EMR names its
+  service accounts `emr-containers-sa-<framework>-<component>-<account>-<base36>`, where
+  the base36 is the role name read as one big-endian integer over its **bytes** and
+  re-expressed in base 36 — a 64-character role name is a 512-bit number, so this is long
+  division over a byte array rather than anything `u128` can hold. A wrong encoding names
+  service accounts that will never match the ones EMR presents, and nothing fails loudly.
+  The expected values came from running the reference's own `Base36().encode`; arithmetic
+  done by hand got the two-character case wrong.
+- **`emr-containers` prints JSON at two different indents.** `update-role-trust-policy
+  --dry-run` uses `indent=2` and the association commands use `indent=4`. Also note the
+  singular in `emr-container-sa-spark-livy`, which is spelled that way in the reference —
+  "correcting" it would name an account Livy does not present.
 - **`codecommit credential-helper` is not SigV4.** The canonical request uses the literal
   method `GIT`, an empty canonical query, and an *empty payload-hash field* rather than a
   SHA-256; the timestamp inside the string-to-sign carries no trailing `Z`. The `Z` is
@@ -717,9 +745,10 @@ socialmessaging's 30 `*whatsapp*` calls).
 
 Auditing all 103 against the binary (2026-09-13): **12 were implemented here, 37 already
 work as ordinary modelled operations, 50 were genuinely missing, and 4 belong to
-`agent-toolkit`, a service absent from our catalogue entirely.** Eight more landed on 2026-09-14 — `dsql`'s two token
-commands, `dlm create-default-role`, `gamelift get-game-session-log`,
-`datapipeline`'s two and `servicecatalog generate`'s two — leaving 46. So the help page filters its "not implemented" list
+`agent-toolkit`, a service absent from our catalogue entirely.** Eleven more landed on 2026-09-14 — `dsql`'s two
+token commands, `dlm create-default-role`, `gamelift get-game-session-log`,
+`datapipeline`'s two, `servicecatalog generate`'s two and `emr-containers`' three —
+leaving 43. So the help page filters its "not implemented" list
 by whether the name resolves in the command table — without that it told readers that 37
 working commands, every WhatsApp call among them, did not work. And the wording of both the
 error and the help section says "no service model describes it" rather than "hand-written",
