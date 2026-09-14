@@ -37,6 +37,7 @@ pub(crate) const IMPLEMENTED: &[(&str, &str, &str)] = &[
     ("datapipeline", "create-default-roles", "Create the IAM roles and instance profile Data Pipeline uses."),
     ("datapipeline", "list-runs", "List a pipeline's runs, filtered by status or time window."),
     ("deploy", "deregister", "Deregister an on-premises instance and clean up its IAM user."),
+    ("deploy", "push", "Bundle a directory, upload it to S3 and register it as a revision."),
     ("deploy", "register", "Create an IAM user for an on-premises instance and register it."),
     ("dlm", "create-default-role", "Create the IAM role Data Lifecycle Manager uses, if it does not exist."),
     ("dsql", "generate-db-connect-admin-auth-token", "Print a signed token for connecting to a DSQL cluster as admin."),

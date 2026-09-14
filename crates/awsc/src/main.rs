@@ -34,6 +34,7 @@ mod servicecatalog;
 mod sso;
 mod wait;
 mod yaml;
+mod zip;
 mod exit;
 
 const USAGE: &str = "\

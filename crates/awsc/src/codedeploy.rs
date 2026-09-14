@@ -38,6 +38,7 @@ pub fn dispatch(parsed: &Parsed, globals: &Globals) -> Result<Option<ExitCode>, 
     match parsed.operation.as_str() {
         "register" => Ok(Some(guarded(register(parsed, globals), "Register"))),
         "deregister" => Ok(Some(guarded(deregister(parsed, globals), "Deregister"))),
+        "push" => push(parsed, globals).map(Some),
         _ => Ok(None),
     }
 }
@@ -293,6 +294,278 @@ fn deregister(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> {
     Ok(exit::code(exit::SUCCESS))
 }
 
+/// S3 switches to a multipart upload at this size, as the reference does.
+const MULTIPART_LIMIT: usize = 6 << 20;
+
+/// `aws deploy push`: zip a source tree, upload it, register it as a revision.
+///
+/// Two rules decide what ends up in the bundle, and both are easy to get wrong:
+/// **paths inside the archive are relative to `--source`**, so the bundle has no leading
+/// directory; and **`appspec.yml` must be at the root of it**, which is checked while
+/// walking rather than after uploading — the reference fails before the upload too, and a
+/// bundle without an appspec is one CodeDeploy will reject much later.
+fn push(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> {
+    let args = crate::custom::take_args(
+        parsed,
+        &[
+            "--application-name",
+            "--s3-location",
+            "--ignore-hidden-files",
+            "--no-ignore-hidden-files",
+            "--source",
+            "--description",
+        ],
+    )?;
+    let value = |flag: &str| args.get(flag).copied().flatten();
+    let missing: Vec<&str> = ["--application-name", "--s3-location"]
+        .into_iter()
+        .filter(|flag| value(flag).is_none())
+        .collect();
+    if !missing.is_empty() {
+        return Err(crate::custom::missing_required(&missing));
+    }
+    if args.contains_key("--ignore-hidden-files") && args.contains_key("--no-ignore-hidden-files")
+    {
+        return Err(param_error(
+            "You cannot specify both --ignore-hidden-files and --no-ignore-hidden-files.",
+        ));
+    }
+    let ignore_hidden = args.contains_key("--ignore-hidden-files");
+    let application_name = value("--application-name").unwrap_or_default();
+    let (bucket, key) = parse_s3_location(value("--s3-location").unwrap_or_default())?;
+    // `.` when not given, which means "bundle the directory I am standing in".
+    let source = value("--source").unwrap_or(".");
+    let description = match value("--description") {
+        Some(text) => text.to_string(),
+        None => format!(
+            "Uploaded by AWS CLI {} UTC",
+            awsc_protocol::shapes::format_cli_output(crate::now_unix()).replace("+00:00", "")
+        ),
+    };
+
+    let bundle = compress(source, ignore_hidden)?;
+
+    let region = crate::custom::resolve_region(globals)
+        .ok_or_else(|| Failure::new(exit::CONFIGURATION, awsc_runtime::RuntimeError::NoRegion))?;
+    let s3_globals = Globals { region: Some(region.clone()), ..globals.for_service("s3") };
+    let s3_model = crate::load_model("s3api").map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
+    let s3 = Client::new(&s3_model, &s3_globals)?;
+
+    let uploaded = upload(&s3, &bucket, &key, &bundle).map_err(|e| {
+        Failure::new(
+            exit::GENERAL_ERROR,
+            format!(
+                "Failed to upload '{source}' to 's3://{bucket}/{key}': {}",
+                e.message()
+            ),
+        )
+    })?;
+    // The quotes around an ETag are part of the header, not part of the value.
+    let etag = uploaded
+        .get("ETag")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .replace('"', "");
+    let version = uploaded.get("VersionId").and_then(Value::as_str).map(str::to_string);
+
+    let mut s3_location = json!({
+        "bucket": bucket,
+        "key": key,
+        "bundleType": "zip",
+        "eTag": etag,
+    });
+    if let Some(version) = &version {
+        s3_location["version"] = Value::String(version.clone());
+    }
+    let cd_globals = Globals { region: Some(region), ..globals.clone() };
+    let cd_model =
+        crate::load_model("deploy").map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
+    let codedeploy = Client::new(&cd_model, &cd_globals)?;
+    codedeploy.call(
+        "register-application-revision",
+        Some(&json!({
+            "applicationName": application_name,
+            "revision": { "revisionType": "S3", "s3Location": s3_location },
+            "description": description,
+        })),
+    )?;
+
+    let version_string = match &version {
+        Some(version) => format!(",version={version}"),
+        None => String::new(),
+    };
+    // Assembled in pieces rather than as one continued literal: a `\`-continued string in
+    // Rust keeps the indentation of the line that follows it, which turned this into a
+    // command with runs of spaces in the middle — and the whole point of the line is that
+    // it can be pasted.
+    let s3_location_string = format!(
+        "--s3-location bucket={bucket},key={key},bundleType=zip,eTag={etag}{version_string}"
+    );
+    let command = format!(
+        "aws deploy create-deployment --application-name {application_name} \
+{s3_location_string} --deployment-group-name <deployment-group-name> \
+--deployment-config-name <deployment-config-name> --description <description>"
+    );
+    println!("To deploy with this revision, run:\n{command}");
+    Ok(exit::code(exit::SUCCESS))
+}
+
+/// `s3://bucket/key`, which is the only form this flag takes.
+fn parse_s3_location(location: &str) -> Result<(String, String), Failure> {
+    let rest = location.strip_prefix("s3://").ok_or_else(|| {
+        param_error("--s3-location must specify the format: s3://<bucket>/<key>")
+    })?;
+    match rest.split_once('/') {
+        Some((bucket, key)) if !bucket.is_empty() && !key.is_empty() => {
+            Ok((bucket.to_string(), key.to_string()))
+        }
+        _ => Err(param_error("--s3-location must specify the format: s3://<bucket>/<key>")),
+    }
+}
+
+/// Walk the source tree into a zip. Paths inside are relative to the source root.
+fn compress(source: &str, ignore_hidden: bool) -> Result<Vec<u8>, Failure> {
+    let root = std::path::Path::new(source).canonicalize().map_err(|e| {
+        Failure::new(exit::GENERAL_ERROR, format!("{source}: {e}"))
+    })?;
+    let mut archive = crate::zip::Archive::new();
+    let mut contains_appspec = false;
+    let mut stack = vec![root.clone()];
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    while let Some(directory) = stack.pop() {
+        let entries = std::fs::read_dir(&directory)
+            .map_err(|e| Failure::new(exit::GENERAL_ERROR, format!("{}: {e}", directory.display())))?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            // `--ignore-hidden-files` prunes hidden *directories* as well as files, so a
+            // `.git` tree is skipped whole rather than walked and discarded.
+            if ignore_hidden && name.starts_with('.') {
+                continue;
+            }
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    // Sorted, so a bundle of the same tree is the same bundle twice running — the walk
+    // order of a directory is not guaranteed.
+    files.sort();
+
+    for path in files {
+        let arcname = path
+            .strip_prefix(&root)
+            .map(|relative| relative.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| path.to_string_lossy().into_owned());
+        if arcname == "appspec.yml" {
+            contains_appspec = true;
+        }
+        let contents = std::fs::read(&path)
+            .map_err(|e| Failure::new(exit::GENERAL_ERROR, format!("{}: {e}", path.display())))?;
+        let modified = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or_else(crate::now_unix);
+        archive
+            .add(&arcname, &contents, modified)
+            .map_err(|e| Failure::new(exit::GENERAL_ERROR, e.to_string()))?;
+    }
+
+    if !contains_appspec {
+        return Err(Failure::new(
+            exit::GENERAL_ERROR,
+            format!("{} was not found", root.join("appspec.yml").display()),
+        ));
+    }
+    archive.finish().map_err(|e| Failure::new(exit::GENERAL_ERROR, e.to_string()))
+}
+
+/// One `PutObject`, or a multipart upload past 6 MiB.
+///
+/// The body is handed over as a file, because the request layer sends a streaming blob
+/// from a path rather than from memory — so the bundle is written to a temporary file
+/// (and each part to its own) and cleaned up afterwards.
+fn upload(s3: &Client<'_>, bucket: &str, key: &str, bundle: &[u8]) -> Result<Value, Failure> {
+    if bundle.len() < MULTIPART_LIMIT {
+        let path = temp_file("bundle", bundle)?;
+        let result =
+            s3.call("put-object", Some(&json!({ "Bucket": bucket, "Key": key, "Body": path })));
+        let _ = std::fs::remove_file(&path);
+        return result;
+    }
+
+    let created =
+        s3.call("create-multipart-upload", Some(&json!({ "Bucket": bucket, "Key": key })))?;
+    let upload_id = created.get("UploadId").and_then(Value::as_str).unwrap_or_default().to_string();
+
+    let mut parts = Vec::new();
+    let mut result = Ok(Value::Null);
+    for (index, chunk) in bundle.chunks(MULTIPART_LIMIT).enumerate() {
+        let part_number = index + 1;
+        let path = match temp_file(&format!("part{part_number}"), chunk) {
+            Ok(path) => path,
+            Err(e) => {
+                result = Err(e);
+                break;
+            }
+        };
+        let uploaded = s3.call(
+            "upload-part",
+            Some(&json!({
+                "Bucket": bucket,
+                "Key": key,
+                "UploadId": upload_id,
+                "PartNumber": part_number,
+                "Body": path,
+            })),
+        );
+        let _ = std::fs::remove_file(&path);
+        match uploaded {
+            Ok(uploaded) => parts.push(json!({
+                "PartNumber": part_number,
+                "ETag": uploaded.get("ETag").cloned().unwrap_or(Value::Null),
+            })),
+            Err(e) => {
+                result = Err(e);
+                break;
+            }
+        }
+    }
+    if let Err(e) = result {
+        // A failed part leaves the upload open and billable, so it is aborted before the
+        // error is reported.
+        let _ = s3.call(
+            "abort-multipart-upload",
+            Some(&json!({ "Bucket": bucket, "Key": key, "UploadId": upload_id })),
+        );
+        return Err(e);
+    }
+    s3.call(
+        "complete-multipart-upload",
+        Some(&json!({
+            "Bucket": bucket,
+            "Key": key,
+            "UploadId": upload_id,
+            "MultipartUpload": { "Parts": parts },
+        })),
+    )
+}
+
+fn temp_file(label: &str, contents: &[u8]) -> Result<String, Failure> {
+    let path = std::env::temp_dir().join(format!(
+        "awsc-deploy-{label}-{}-{}",
+        std::process::id(),
+        crate::now_unix()
+    ));
+    std::fs::write(&path, contents)
+        .map_err(|e| Failure::new(exit::GENERAL_ERROR, format!("{}: {e}", path.display())))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 /// `NoSuchEntity` is not a failure while cleaning up: it means the thing is already gone.
 fn absent_ok(outcome: Result<Value, Failure>) -> Result<Option<Value>, Failure> {
     match outcome {
@@ -433,6 +706,17 @@ mod tests {
         assert!(validate_tags(&vec![one; 11]).is_err());
         assert!(validate_tags(&[json!({"Key": "x".repeat(129), "Value": "v"})]).is_err());
         assert!(validate_tags(&[json!({"Key": "k", "Value": "x".repeat(257)})]).is_err());
+    }
+
+    #[test]
+    fn an_s3_location_must_name_a_bucket_and_a_key() {
+        assert_eq!(
+            parse_s3_location("s3://my-bucket/app/rev.zip").expect("parses"),
+            ("my-bucket".to_string(), "app/rev.zip".to_string())
+        );
+        assert!(parse_s3_location("s3://my-bucket").is_err());
+        assert!(parse_s3_location("s3://my-bucket/").is_err());
+        assert!(parse_s3_location("my-bucket/key").is_err());
     }
 
     /// The user name is the ARN's last segment, which need not be the instance name — a

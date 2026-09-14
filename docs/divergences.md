@@ -586,7 +586,7 @@ views of one service. Deferred to the customization phase.
 
 ## Custom commands (first tranche)
 
-Thirty-five custom commands are now implemented, each verified by byte-diffing our stdout/stderr
+Thirty-six custom commands are now implemented, each verified by byte-diffing our stdout/stderr
 and exit code against the reference. `scripts/compare-custom-commands.sh` reproduces the
 comparison; it pins our clock to the reference's via `AWSC_FIXED_TIME`, because presigned
 URLs embed a timestamp and would otherwise never compare equal.
@@ -618,6 +618,7 @@ URLs embed a timestamp and would otherwise never compare equal.
 | `emr ssh` / `socks` / `get` / `put` | every command line, against a stand-in cluster and fake `ssh`/`scp` |
 | `cloudtrail verify-query-results` | a real openssl-signed export, plus both tamper paths |
 | `deploy register` / `deregister` | both call sequences and the 0600 config file, against stand-ins |
+| `deploy push` | the uploaded bundle read back by Python's own `zipfile`, CRCs and all |
 
 Facts worth recording, because each contradicts a reasonable assumption:
 
@@ -788,6 +789,18 @@ Facts worth recording, because each contradicts a reasonable assumption:
   cleaned-up user finishes cleaning up rather than failing on the first thing already gone,
   and it reads the IAM user name from the **ARN's last segment** rather than assuming it
   matches the instance name.
+- **`deploy push` needed a ZIP writer** (`crates/awsc/src/zip.rs`), which
+  `gamelift upload-build` will reuse. It writes a deflate archive with the sizes in each
+  local header — what `zipfile.ZipFile(..., 'w')` produces — and the test that matters is
+  that Python's own `zipfile` reads the result back with `testzip()` clean. Two rules
+  decide the contents: paths inside the archive are **relative to `--source`**, so the
+  bundle has no leading directory, and `appspec.yml` must be at its root, which is checked
+  while walking rather than after uploading. Files are added in sorted order so the same
+  tree bundles identically twice running; the reference walks in directory order, which is
+  not guaranteed to repeat.
+  **One divergence**: Python passes `allowZip64=True` and would keep going past 4 GiB
+  where this refuses, explicitly and before the upload starts rather than at the far end
+  of one.
 - **`codecommit credential-helper` is not SigV4.** The canonical request uses the literal
   method `GIT`, an empty canonical query, and an *empty payload-hash field* rather than a
   SHA-256; the timestamp inside the string-to-sign carries no trailing `Z`. The `Z` is
@@ -900,7 +913,7 @@ work as ordinary modelled operations, 50 were genuinely missing, and 4 belong to
 `agent-toolkit`, a service absent from our catalogue entirely.** Twelve more landed on 2026-09-14 — `dsql`'s two
 token commands, `dlm create-default-role`, `gamelift get-game-session-log`,
 `datapipeline`'s two, `servicecatalog generate`'s two, `emr-containers`' three and
-`ecs deploy`, `codeartifact login` and thirteen of `emr`'s fourteen `cloudtrail verify-query-results` and `deploy register`/`deregister` — leaving 25. So the help page filters its "not implemented" list
+`ecs deploy`, `codeartifact login` and thirteen of `emr`'s fourteen `cloudtrail verify-query-results` and `deploy`'s `register`, `deregister` and `push` — leaving 24. So the help page filters its "not implemented" list
 by whether the name resolves in the command table — without that it told readers that 37
 working commands, every WhatsApp call among them, did not work. And the wording of both the
 error and the help section says "no service model describes it" rather than "hand-written",
