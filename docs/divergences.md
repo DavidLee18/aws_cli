@@ -543,7 +543,7 @@ views of one service. Deferred to the customization phase.
 
 ## Custom commands (first tranche)
 
-Thirteen custom commands are now implemented, each verified by byte-diffing our stdout/stderr
+Fourteen custom commands are now implemented, each verified by byte-diffing our stdout/stderr
 and exit code against the reference. `scripts/compare-custom-commands.sh` reproduces the
 comparison; it pins our clock to the reference's via `AWSC_FIXED_TIME`, because presigned
 URLs embed a timestamp and would otherwise never compare equal.
@@ -562,6 +562,7 @@ URLs embed a timestamp and would otherwise never compare equal.
 | `gamelift get-game-session-log` | driven against a GameLift stand-in (rpcv2Cbor) plus a file server |
 | `datapipeline create-default-roles` | 13-call IAM sequence driven against a stand-in |
 | `datapipeline list-runs` | column widths and pagination driven against a stand-in |
+| `servicecatalog generate product` / `provisioning-artifact` | upload + create driven against a stand-in |
 
 Facts worth recording, because each contradicts a reasonable assumption:
 
@@ -605,6 +606,16 @@ Facts worth recording, because each contradicts a reasonable assumption:
   nor `--schedule-interval`, the query window is `now-4d .. now`, so an old pipeline looks
   empty rather than erroring. Its `--status` validator also accepts `shutting_down`, which
   its own help text omits.
+- **`servicecatalog generate` builds an S3 URL by hand, and it is not the resolved
+  endpoint.** Path-style, `https://s3.amazonaws.com/<bucket>/<key>` in `us-east-1` and
+  `https://s3-<region>.amazonaws.com/...` elsewhere — the old hyphenated host, not
+  `s3.<region>`. The key is the file's **basename**, so two templates of the same name in
+  different directories overwrite each other. And the response is printed as
+  `json.dumps(indent=2)` with no trailing newline rather than through the formatter, so
+  `--output text` does nothing and the indent is two spaces where everything else uses
+  four. One divergence: the reference rejects a region absent from
+  `get_available_regions('servicecatalog')`, which needs botocore's per-service endpoint
+  lists; we let the call itself fail instead.
 - **`codecommit credential-helper` is not SigV4.** The canonical request uses the literal
   method `GIT`, an empty canonical query, and an *empty payload-hash field* rather than a
   SHA-256; the timestamp inside the string-to-sign carries no trailing `Z`. The `Z` is
@@ -706,9 +717,9 @@ socialmessaging's 30 `*whatsapp*` calls).
 
 Auditing all 103 against the binary (2026-09-13): **12 were implemented here, 37 already
 work as ordinary modelled operations, 50 were genuinely missing, and 4 belong to
-`agent-toolkit`, a service absent from our catalogue entirely.** Six more landed on 2026-09-14 — `dsql`'s two token
-commands, `dlm create-default-role`, `gamelift get-game-session-log` and
-`datapipeline`'s two — leaving 48. So the help page filters its "not implemented" list
+`agent-toolkit`, a service absent from our catalogue entirely.** Eight more landed on 2026-09-14 — `dsql`'s two token
+commands, `dlm create-default-role`, `gamelift get-game-session-log`,
+`datapipeline`'s two and `servicecatalog generate`'s two — leaving 46. So the help page filters its "not implemented" list
 by whether the name resolves in the command table — without that it told readers that 37
 working commands, every WhatsApp call among them, did not work. And the wording of both the
 error and the help section says "no service model describes it" rather than "hand-written",

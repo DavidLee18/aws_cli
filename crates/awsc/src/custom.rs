@@ -44,6 +44,7 @@ pub(crate) const IMPLEMENTED: &[(&str, &str, &str)] = &[
     ("eks", "get-token", "Print a presigned STS token as the ExecCredential kubectl expects."),
     ("logs", "tail", "Print log events, optionally following the group as they arrive."),
     ("rds", "generate-db-auth-token", "Print a signed token for IAM database authentication."),
+    ("servicecatalog", "generate", "Upload a template to S3 and create a product or provisioning artifact from it."),
     ("sso", "login", "Run the device-authorization flow and cache the SSO token."),
     ("sso", "logout", "Remove the cached SSO token and credentials."),
 ];
@@ -76,8 +77,12 @@ pub fn dispatch(parsed: &Parsed) -> Result<Option<ExitCode>, Failure> {
         ("cloudfront", "sign") => crate::cloudfront::sign(parsed)?,
         ("configservice", "subscribe") => configservice_subscribe(parsed, &globals)?,
         ("dlm", "create-default-role") => dlm_create_default_role(parsed, &globals)?,
-        // Two commands, so the service gets its own module and its own match.
+        // Two commands each, so these get their own modules and their own matches.
         ("datapipeline", _) => match crate::datapipeline::dispatch(parsed, &globals)? {
+            Some(code) => code,
+            None => return Ok(None),
+        },
+        ("servicecatalog", _) => match crate::servicecatalog::dispatch(parsed, &globals)? {
             Some(code) => code,
             None => return Ok(None),
         },

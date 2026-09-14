@@ -24,6 +24,7 @@ mod dispatch;
 mod logs_tail;
 mod paginate;
 mod s3;
+mod servicecatalog;
 mod sso;
 mod yaml;
 mod exit;
