@@ -586,7 +586,7 @@ views of one service. Deferred to the customization phase.
 
 ## Custom commands (first tranche)
 
-Thirty-nine custom commands are now implemented, each verified by byte-diffing our stdout/stderr
+Forty custom commands are now implemented, each verified by byte-diffing our stdout/stderr
 and exit code against the reference. `scripts/compare-custom-commands.sh` reproduces the
 comparison; it pins our clock to the reference's via `AWSC_FIXED_TIME`, because presigned
 URLs embed a timestamp and would otherwise never compare equal.
@@ -621,6 +621,7 @@ URLs embed a timestamp and would otherwise never compare equal.
 | `deploy push` | the uploaded bundle read back by Python's own `zipfile`, CRCs and all |
 | `ec2-instance-connect open-tunnel` | both modes end-to-end against an EC2 stand-in and a TLS WebSocket echo server; frame and handshake vectors from RFC 6455 |
 | `ec2-instance-connect ssh` | every connection-type branch and all eight refusals against stand-ins and a fake `ssh`; the generated key read back by `ssh-keygen -y` |
+| `lightsail push-container-image` | the plugin's document byte-for-byte, and all three failure paths, against a fake `lightsailctl` |
 | `gamelift upload-build` | three calls against a GameLift stand-in; the upload signed with GameLift's own credentials, bundle read back by `zipfile` |
 
 Facts worth recording, because each contradicts a reasonable assumption:
@@ -869,6 +870,33 @@ Facts worth recording, because each contradicts a reasonable assumption:
   **One asymmetry worth knowing, and it is the reference's:** `ssh` forwards
   `--endpoint-url` to its EC2 calls and `open-tunnel` does not. Below the flag both fall
   back to `AWS_ENDPOINT_URL_EC2`, as botocore does.
+
+- **`lightsail push-container-image` never calls Lightsail.** It builds a JSON document
+  and pipes it to `lightsailctl`, a separate plugin the user installs, which does the
+  pushing — so the entire behaviour is the shape of that document and how the process is
+  run. Two things about it are easy to get wrong:
+
+  - **The `configuration` block carries the argparse values, not the resolved ones.**
+    `output`, `readTimeout`, `connectTimeout` and `cliBinaryFormat` appear *only* when
+    their flag was actually passed; the config-file and environment fallbacks the rest of
+    the CLI applies do not reach the plugin. `profile`, `region` and `caBundle` are the
+    three exceptions, where the reference does fall back to the session — and `profile`
+    falls back to the environment only, never to the literal `default` the session would
+    otherwise supply. Key *order* matters too, since it is `json.dumps` of a dict built
+    in a fixed order.
+  - **SIGINT, SIGQUIT and SIGTSTP are ignored while the plugin runs.** Ctrl-C reaches the
+    whole foreground process group, so without this both processes die and the plugin
+    never gets to clean up the partial upload it is in the middle of.
+
+  A missing plugin and a plugin that exits non-zero both exit **255** with the
+  reference's own wording — the second one reports
+  `Command '['lightsailctl', '--plugin', '--input-stdin']' returned non-zero exit status
+  N.`, which is Python's `CalledProcessError` text rather than an exit-code passthrough.
+
+  **One divergence:** `cliVersion` reports this build's own version
+  (`aws-cli-rs/<version>`) rather than claiming to be an `awscli` 2.x. The field exists to
+  tell the plugin which CLI invoked it, and this is not that CLI; misreporting it would
+  hide a real incompatibility rather than avoid one.
 
 - **`gamelift upload-build` uploads with credentials that are not the caller's.**
   `request-upload-credentials` returns temporary credentials *and* a bucket and key that

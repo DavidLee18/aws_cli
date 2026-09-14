@@ -67,6 +67,7 @@ pub(crate) const IMPLEMENTED: &[(&str, &str, &str)] = &[
     ("ecr", "get-login-password", "Print the password for `docker login` against a private registry."),
     ("ecr-public", "get-login-password", "Print the password for `docker login` against the public registry."),
     ("eks", "get-token", "Print a presigned STS token as the ExecCredential kubectl expects."),
+    ("lightsail", "push-container-image", "Hand a container image to the lightsailctl plugin to push."),
     ("logs", "tail", "Print log events, optionally following the group as they arrive."),
     ("rds", "generate-db-auth-token", "Print a signed token for IAM database authentication."),
     ("servicecatalog", "generate", "Upload a template to S3 and create a product or provisioning artifact from it."),
@@ -143,6 +144,7 @@ pub fn dispatch(parsed: &Parsed) -> Result<Option<ExitCode>, Failure> {
             Some(code) => code,
             None => return Ok(None),
         },
+        ("lightsail", "push-container-image") => lightsail_push_container_image(parsed)?,
         ("logs", "tail") => crate::logs_tail::run(parsed, &globals)?,
         // `sso login`/`logout` are custom commands on a modelled service: neither is an
         // operation on it, so both are handled before the model lookup.
@@ -487,6 +489,217 @@ pub(crate) fn policy_partition(region: &str) -> &'static str {
         "aws-us-gov"
     } else {
         "aws"
+    }
+}
+
+/// `aws lightsail push-container-image`.
+///
+/// This command does not call Lightsail at all. It builds a JSON document and pipes it to
+/// **`lightsailctl`**, a separate plugin the user installs, which does the pushing. So
+/// the entire behaviour is the shape of that document and how the process is run — and
+/// the two things worth knowing are both about the document:
+///
+/// - **Its `configuration` block carries the argparse values, not the resolved ones.**
+///   `output`, `readTimeout`, `connectTimeout` and `cliBinaryFormat` appear only when
+///   their flag was actually passed; the config-file and environment fallbacks the rest
+///   of the CLI applies do not reach the plugin. `profile`, `region` and `caBundle` are
+///   the exceptions — the reference falls back to the session for those three.
+/// - **The interrupt signals are ignored while the plugin runs.** Ctrl-C reaches the
+///   whole foreground process group, so without this both processes die and the plugin
+///   never gets to clean up the partial upload it is in the middle of.
+fn lightsail_push_container_image(parsed: &Parsed) -> Result<ExitCode, Failure> {
+    let args = take_args(parsed, &["--service-name", "--image", "--label"])?;
+    let value = |flag: &str| args.get(flag).copied().flatten();
+    let missing: Vec<&str> = ["--service-name", "--image", "--label"]
+        .into_iter()
+        .filter(|flag| value(flag).is_none())
+        .collect();
+    if !missing.is_empty() {
+        return Err(missing_required(&missing));
+    }
+
+    let request = input_request(parsed, value("--service-name"), value("--image"), value("--label"));
+    let document = awsc_protocol::json::to_python_json(&request);
+
+    run_lightsailctl(document.as_bytes())
+}
+
+/// Pipe the document to `lightsailctl --plugin --input-stdin` and wait for it.
+fn run_lightsailctl(document: &[u8]) -> Result<ExitCode, Failure> {
+    use std::io::Write;
+    let ignored = IgnoredSignals::install();
+    let child = std::process::Command::new("lightsailctl")
+        .args(["--plugin", "--input-stdin"])
+        .stdin(std::process::Stdio::piped())
+        .spawn();
+    let mut child = match child {
+        Ok(child) => child,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            drop(ignored);
+            return Err(Failure::new(exit::GENERAL_ERROR, LIGHTSAILCTL_MISSING));
+        }
+        Err(e) => {
+            drop(ignored);
+            return Err(Failure::new(exit::GENERAL_ERROR, e));
+        }
+    };
+    if let Some(stdin) = child.stdin.as_mut() {
+        // A plugin that exits before reading everything closes the pipe; that is its
+        // answer, not an error of ours, so the status below is what gets reported.
+        let _ = stdin.write_all(document);
+    }
+    drop(child.stdin.take());
+    let status = child.wait().map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
+    drop(ignored);
+    if !status.success() {
+        // `subprocess.run(check=True)` raises, and an uncaught exception is 255 with the
+        // exception's own text — so this is the wording, not an exit code passthrough.
+        return Err(Failure::new(
+            exit::GENERAL_ERROR,
+            format!(
+                "Command '['lightsailctl', '--plugin', '--input-stdin']' returned non-zero \
+                 exit status {}.",
+                status.code().unwrap_or(1)
+            ),
+        ));
+    }
+    Ok(exit::code(exit::SUCCESS))
+}
+
+
+/// The document handed to the plugin, built separately so its exact shape can be tested
+/// without a plugin to hand it to.
+fn input_request(
+    parsed: &Parsed,
+    service: Option<&str>,
+    image: Option<&str>,
+    label: Option<&str>,
+) -> Value {
+    let mut configuration = serde_json::Map::new();
+    configuration.insert("debug".into(), Value::Bool(parsed.debug));
+    if let Some(endpoint) = &parsed.endpoint_url {
+        configuration.insert("endpoint".into(), Value::String(endpoint.clone()));
+    }
+    configuration.insert("doNotVerifySSL".into(), Value::Bool(!parsed.verify_ssl));
+    configuration.insert("paginate".into(), Value::Bool(!parsed.no_paginate));
+    if parsed.output_given {
+        configuration.insert("output".into(), Value::String(output_name(parsed.output).to_string()));
+    }
+    if let Some(query) = &parsed.query {
+        configuration.insert("query".into(), Value::String(query.clone()));
+    }
+    // `--profile`, then the environment — but never `default`, which is what the session
+    // falls back to and what the reference would *not* send.
+    let profile = parsed.profile.clone().or_else(|| {
+        std::env::var("AWS_PROFILE")
+            .or_else(|_| std::env::var("AWS_DEFAULT_PROFILE"))
+            .ok()
+            .filter(|name| !name.is_empty())
+    });
+    if let Some(profile) = profile {
+        configuration.insert("profile".into(), Value::String(profile));
+    }
+    if let Some(region) = resolve_region(&Globals::from_parsed(parsed)) {
+        configuration.insert("region".into(), Value::String(region));
+    }
+    configuration.insert("doNotSignRequest".into(), Value::Bool(parsed.no_sign_request));
+    let ca_bundle = parsed.ca_bundle.clone().or_else(|| {
+        std::env::var("AWS_CA_BUNDLE").ok().filter(|path| !path.is_empty()).or_else(|| {
+            awsc_runtime::credentials::profile_setting("ca_bundle", parsed.profile.as_deref())
+        })
+    });
+    if let Some(ca_bundle) = ca_bundle {
+        configuration.insert("caBundle".into(), Value::String(ca_bundle));
+    }
+    if let Some(timeout) = parsed.read_timeout {
+        configuration.insert("readTimeout".into(), Value::Number(timeout.into()));
+    }
+    if let Some(timeout) = parsed.connect_timeout {
+        configuration.insert("connectTimeout".into(), Value::Number(timeout.into()));
+    }
+    if parsed.binary_format_given {
+        configuration.insert(
+            "cliBinaryFormat".into(),
+            Value::String(binary_format_name(parsed.binary_format).to_string()),
+        );
+    }
+    // Our own version, not a claimed `2.x`: the plugin is being told which CLI invoked it
+    // and this is not that CLI. See `docs/divergences.md`.
+    configuration.insert("cliVersion".into(), Value::String(format!("aws-cli-rs/{}", env!("CARGO_PKG_VERSION"))));
+
+    serde_json::json!({
+        "inputVersion": "1",
+        "operation": "PushContainerImage",
+        "payload": {
+            "service": service,
+            "image": image,
+            "label": label,
+        },
+        "configuration": Value::Object(configuration),
+    })
+}
+    // Python's `json.dumps` separators, which is what the plugin has always been fed.
+
+/// The `--output` value as the plugin spells it, which is the CLI's own spelling.
+fn output_name(format: awsc_output::Format) -> &'static str {
+    match format {
+        awsc_output::Format::Json => "json",
+        awsc_output::Format::Text => "text",
+        awsc_output::Format::Table => "table",
+        awsc_output::Format::Yaml => "yaml",
+        awsc_output::Format::YamlStream => "yaml-stream",
+        awsc_output::Format::Off => "off",
+    }
+}
+
+fn binary_format_name(format: crate::args::BinaryFormat) -> &'static str {
+    match format {
+        crate::args::BinaryFormat::Base64 => "base64",
+        crate::args::BinaryFormat::RawInBase64Out => "raw-in-base64-out",
+    }
+}
+
+const LIGHTSAILCTL_MISSING: &str = "The Lightsail Control (lightsailctl) plugin was not found. \
+To download and install it, see \
+https://lightsail.aws.amazon.com/ls/docs/en_us/articles/amazon-lightsail-install-software";
+
+/// SIGINT, SIGQUIT and SIGTSTP ignored for as long as this value lives.
+///
+/// Ctrl-C is delivered to every process in the foreground group. Without ignoring it here
+/// the CLI would die alongside the plugin, and the plugin is the one holding a partial
+/// upload it needs to tidy up.
+struct IgnoredSignals {
+    #[cfg(unix)]
+    previous: [(libc::c_int, libc::sighandler_t); 3],
+}
+
+impl IgnoredSignals {
+    #[cfg(unix)]
+    fn install() -> IgnoredSignals {
+        let mut previous = [(0, 0); 3];
+        for (slot, signal) in
+            previous.iter_mut().zip([libc::SIGINT, libc::SIGQUIT, libc::SIGTSTP])
+        {
+            // SAFETY: `signal` only replaces this process's disposition for one signal,
+            // and the previous one is kept so it can be put back.
+            *slot = (signal, unsafe { libc::signal(signal, libc::SIG_IGN) });
+        }
+        IgnoredSignals { previous }
+    }
+
+    #[cfg(not(unix))]
+    fn install() -> IgnoredSignals {
+        IgnoredSignals {}
+    }
+}
+
+impl Drop for IgnoredSignals {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        for (signal, handler) in self.previous {
+            // SAFETY: restoring the disposition this type replaced.
+            unsafe { libc::signal(signal, handler) };
+        }
     }
 }
 
@@ -1313,6 +1526,96 @@ mod custom_command_tests {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// The plugin's document, key for key and in the reference's insertion order.
+    ///
+    /// `output`, the two timeouts and `cliBinaryFormat` are absent here on purpose: the
+    /// reference forwards the *argparse* values, which are unset unless the flag was
+    /// given, so a default must not leak into the document.
+    #[test]
+    fn the_lightsail_document_carries_only_the_flags_that_were_given() {
+        // Env-sourced fields are process-wide, so this test owns them.
+        std::env::set_var("AWS_DEFAULT_REGION", "us-west-2");
+        std::env::remove_var("AWS_PROFILE");
+        std::env::remove_var("AWS_DEFAULT_PROFILE");
+        std::env::remove_var("AWS_CA_BUNDLE");
+        let parsed = crate::args::Parsed {
+            service: "lightsail".to_string(),
+            operation: "push-container-image".to_string(),
+            ..crate::args::Parsed::blank()
+        };
+        let request = input_request(&parsed, Some("my-svc"), Some("app:1"), Some("web"));
+        let document = awsc_protocol::json::to_python_json(&request);
+        assert_eq!(
+            document,
+            "{\"inputVersion\": \"1\", \"operation\": \"PushContainerImage\", \
+             \"payload\": {\"service\": \"my-svc\", \"image\": \"app:1\", \"label\": \"web\"}, \
+             \"configuration\": {\"debug\": false, \"doNotVerifySSL\": false, \
+             \"paginate\": true, \"region\": \"us-west-2\", \"doNotSignRequest\": false, \
+             \"cliVersion\": \"aws-cli-rs/"
+                .to_string()
+                + env!("CARGO_PKG_VERSION")
+                + "\"}}"
+        );
+    }
+
+    /// Every optional field appears once its flag is given, and in its own place rather
+    /// than appended at the end.
+    #[test]
+    fn the_lightsail_document_places_the_optional_fields_in_order() {
+        std::env::set_var("AWS_DEFAULT_REGION", "us-west-2");
+        let parsed = crate::args::Parsed {
+            service: "lightsail".to_string(),
+            operation: "push-container-image".to_string(),
+            debug: true,
+            endpoint_url: Some("https://ls.example".to_string()),
+            verify_ssl: true,
+            no_paginate: true,
+            output: awsc_output::Format::Text,
+            output_given: true,
+            query: Some("a.b".to_string()),
+            region: Some("eu-west-1".to_string()),
+            no_sign_request: true,
+            ca_bundle: Some("/tmp/ca.pem".to_string()),
+            read_timeout: Some(30),
+            connect_timeout: Some(5),
+            binary_format: crate::args::BinaryFormat::RawInBase64Out,
+            binary_format_given: true,
+            ..crate::args::Parsed::blank()
+        };
+        let request = input_request(&parsed, Some("s"), Some("i"), Some("l"));
+        let keys: Vec<&str> = request["configuration"]
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                "debug",
+                "endpoint",
+                "doNotVerifySSL",
+                "paginate",
+                "output",
+                "query",
+                "region",
+                "doNotSignRequest",
+                "caBundle",
+                "readTimeout",
+                "connectTimeout",
+                "cliBinaryFormat",
+                "cliVersion",
+            ]
+        );
+        assert_eq!(request["configuration"]["doNotVerifySSL"], false);
+        assert_eq!(request["configuration"]["paginate"], false);
+        assert_eq!(request["configuration"]["region"], "eu-west-1");
+        assert_eq!(request["configuration"]["output"], "text");
+        assert_eq!(request["configuration"]["cliBinaryFormat"], "raw-in-base64-out");
+    }
+
     use super::*;
     use serde_json::json;
 

@@ -78,6 +78,10 @@ pub struct Parsed {
     pub color: Option<String>,
     /// `--cli-binary-format`, deciding how a blob argument's text is read.
     pub binary_format: BinaryFormat,
+    /// Was the flag itself passed? `lightsail push-container-image` forwards the
+    /// *argparse* value to its plugin, which is unset unless the flag was given — the
+    /// config-file fallback below does not reach it.
+    pub binary_format_given: bool,
     /// `--cli-error-format`, deciding how an error is rendered on stderr.
     pub error_format: Option<String>,
     /// Positional tokens after the operation name. Only custom commands use these
@@ -95,6 +99,47 @@ pub struct Parsed {
     /// distinction, and the reference reports unknown options by joining these raw tokens
     /// with `,` — so `--bogus=x` is one token but `--bogus x` is two.
     pub extras: Vec<String>,
+}
+
+impl Parsed {
+    /// A `Parsed` with nothing set, which is what parsing starts from.
+    ///
+    /// Not `Default`: `verify_ssl` is **true** when nothing was given, and a derived
+    /// `Default` would silently make it false — turning certificate verification off for
+    /// anything that built one this way.
+    pub fn blank() -> Parsed {
+        Parsed {
+            service: String::new(),
+            operation: String::new(),
+            parameters: BTreeMap::new(),
+            region: None,
+            profile: None,
+            endpoint_url: None,
+            output: Format::Json,
+            output_given: false,
+            debug: false,
+            no_paginate: false,
+            max_items: None,
+            page_size: None,
+            starting_token: None,
+            query: None,
+            no_sign_request: false,
+            verify_ssl: true,
+            ca_bundle: None,
+            read_timeout: None,
+            connect_timeout: None,
+            cli_input: None,
+            cli_input_yaml: false,
+            generate_skeleton: None,
+            color: None,
+            binary_format: BinaryFormat::default(),
+            binary_format_given: false,
+            error_format: None,
+            positionals: Vec::new(),
+            flag_extras: BTreeMap::new(),
+            extras: Vec::new(),
+        }
+    }
 }
 
 /// How many values a flag takes.
@@ -144,36 +189,7 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
         return Ok(Outcome::Help(crate::help::Request::Service(service)));
     }
 
-    let mut parsed = Parsed {
-        service,
-        operation,
-        parameters: BTreeMap::new(),
-        region: None,
-        profile: None,
-        endpoint_url: None,
-        output: Format::Json,
-        output_given: false,
-        debug: false,
-        no_paginate: false,
-        max_items: None,
-        page_size: None,
-        starting_token: None,
-        query: None,
-        no_sign_request: false,
-        verify_ssl: true,
-        ca_bundle: None,
-        read_timeout: None,
-        connect_timeout: None,
-        cli_input: None,
-        cli_input_yaml: false,
-        generate_skeleton: None,
-        color: None,
-        binary_format: BinaryFormat::default(),
-        error_format: None,
-        positionals: Vec::new(),
-        flag_extras: BTreeMap::new(),
-        extras: Vec::new(),
-    };
+    let mut parsed = Parsed { service, operation, ..Parsed::blank() };
 
     // Whether `--cli-binary-format` was given, so the profile is consulted only when it
     // was not. Unlike `cli_error_format` there is no environment variable in the chain
@@ -276,6 +292,7 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
             "--cli-binary-format" => {
                 let v = take_value()?;
                 binary_format_given = true;
+                parsed.binary_format_given = true;
                 parsed.binary_format = BinaryFormat::parse(&v).ok_or(
                     "argument --cli-binary-format: Invalid choice, valid choices are:\n\n\
                      base64 | raw-in-base64-out"
