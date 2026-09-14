@@ -586,7 +586,7 @@ views of one service. Deferred to the customization phase.
 
 ## Custom commands (first tranche)
 
-Twenty-seven custom commands are now implemented, each verified by byte-diffing our stdout/stderr
+Twenty-eight custom commands are now implemented, each verified by byte-diffing our stdout/stderr
 and exit code against the reference. `scripts/compare-custom-commands.sh` reproduces the
 comparison; it pins our clock to the reference's via `AWSC_FIXED_TIME`, because presigned
 URLs embed a timestamp and would otherwise never compare equal.
@@ -614,6 +614,7 @@ URLs embed a timestamp and would otherwise never compare equal.
 | `emr add-steps` | all six step types, both cluster generations, against a stand-in |
 | `emr install-applications` | both cluster generations and both rejection messages, against a stand-in |
 | `emr create-hbase-backup` / `restore-from-hbase-backup` / `schedule-hbase-backup` / `disable-hbase-backups` | all four argument lists against a stand-in |
+| `emr create-default-roles` | the 18-call sequence, three trust policies and the config write, against a stand-in |
 
 Facts worth recording, because each contradicts a reasonable assumption:
 
@@ -742,6 +743,17 @@ Facts worth recording, because each contradicts a reasonable assumption:
   `--incremental-backup-time-interval`; and an absent `--start-time` is the literal string
   `now` rather than an omitted argument. `disable-hbase-backups` shares the schedule
   command's step name, because both modify the same schedule.
+- **`emr create-default-roles` derives its service principal from the resolved endpoint.**
+  Not from the region name and not hardcoded: it reads the suffix off the EMR endpoint, so
+  the role trusts `elasticmapreduce.amazonaws.com` in the commercial regions and
+  `elasticmapreduce.amazonaws.com.cn` in China. A wrong suffix creates a role nothing can
+  assume, and nothing fails until a cluster refuses to start. Both host spellings are
+  accepted (`elasticmapreduce.<region>.<suffix>` and `<region>.elasticmapreduce.<suffix>`),
+  as the reference accepts both. Note the trust document also uses `2008-10-17`, and a
+  single principal is a bare string where several are a list.
+  It then writes `service_role` and `instance_profile` into the profile's `[emr]` block —
+  but **only if neither is already set**, so a second run cannot overwrite a deliberate
+  choice.
 - **`codecommit credential-helper` is not SigV4.** The canonical request uses the literal
   method `GIT`, an empty canonical query, and an *empty payload-hash field* rather than a
   SHA-256; the timestamp inside the string-to-sign carries no trailing `Z`. The `Z` is
@@ -854,7 +866,7 @@ work as ordinary modelled operations, 50 were genuinely missing, and 4 belong to
 `agent-toolkit`, a service absent from our catalogue entirely.** Twelve more landed on 2026-09-14 — `dsql`'s two
 token commands, `dlm create-default-role`, `gamelift get-game-session-log`,
 `datapipeline`'s two, `servicecatalog generate`'s two, `emr-containers`' three and
-`ecs deploy`, `codeartifact login` and eight of `emr`'s fourteen — leaving 33. So the help page filters its "not implemented" list
+`ecs deploy`, `codeartifact login` and nine of `emr`'s fourteen — leaving 32. So the help page filters its "not implemented" list
 by whether the name resolves in the command table — without that it told readers that 37
 working commands, every WhatsApp call among them, did not work. And the wording of both the
 error and the help section says "no service model describes it" rather than "hand-written",

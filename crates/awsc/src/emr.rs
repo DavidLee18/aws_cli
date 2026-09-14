@@ -23,6 +23,7 @@ pub fn dispatch(parsed: &Parsed, globals: &Globals) -> Result<Option<ExitCode>, 
         "modify-cluster-attributes" => modify_cluster_attributes(parsed, globals).map(Some),
         "add-steps" => add_steps(parsed, globals).map(Some),
         "install-applications" => install_applications(parsed, globals).map(Some),
+        "create-default-roles" => create_default_roles(parsed, globals).map(Some),
         "create-hbase-backup"
         | "restore-from-hbase-backup"
         | "schedule-hbase-backup"
@@ -75,6 +76,209 @@ fn add_steps(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> {
     }
     let response = client.call("add-job-flow-steps", Some(&input))?;
     render(&response, parsed)
+}
+
+/// `aws emr create-default-roles`.
+///
+/// Creates the three roles EMR needs — the EC2 instance role, the service role and the
+/// autoscaling role — plus the instance profile the first goes in, each only if absent.
+/// Then it writes `service_role` and `instance_profile` into the `[emr]` block of the
+/// profile, **unless either is already set**, so a second run does not overwrite a
+/// deliberate choice.
+///
+/// The trust policies name a *service principal* that is derived from the resolved EMR
+/// endpoint rather than hardcoded, because it differs by partition:
+/// `elasticmapreduce.amazonaws.com` in the commercial regions and
+/// `elasticmapreduce.amazonaws.com.cn` in China. Getting it wrong creates a role nothing
+/// can assume.
+fn create_default_roles(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> {
+    let args = crate::custom::take_args(parsed, &["--iam-endpoint"])?;
+    let (model, emr_globals) = load(globals)?;
+    let region = emr_globals.region.clone().unwrap_or_default();
+    // Resolving the EMR endpoint is the whole reason this client is built: the command
+    // makes no EMR call at all.
+    let emr = emr_client(&model, &emr_globals)?;
+    let suffix = endpoint_suffix(&emr.endpoint.url)?;
+
+    let mut iam_globals = Globals { region: Some(region.clone()), ..globals.for_service("iam") };
+    if let Some(endpoint) = args.get("--iam-endpoint").copied().flatten() {
+        iam_globals.endpoint_url = Some(endpoint.to_string());
+    }
+    let iam_model = crate::load_model("iam").map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
+    let iam = Client::new(&iam_model, &iam_globals)?;
+
+    let emr_principal = format!("elasticmapreduce.{suffix}");
+    // The autoscaling role trusts EMR *and* Application Auto Scaling; the second
+    // principal is `.amazonaws.com` outside China even when the first is not.
+    let autoscaling_principal = if region.starts_with("cn-") {
+        format!("application-autoscaling.{suffix}")
+    } else {
+        "application-autoscaling.amazonaws.com".to_string()
+    };
+
+    let mut result: Vec<Value> = Vec::new();
+    for (role, policy, principals) in [
+        (
+            "EMR_EC2_DefaultRole",
+            "AmazonElasticMapReduceforEC2Role",
+            vec!["ec2.amazonaws.com".to_string()],
+        ),
+        ("EMR_DefaultRole", "AmazonElasticMapReduceRole", vec![emr_principal.clone()]),
+        (
+            "EMR_AutoScaling_DefaultRole",
+            "AmazonElasticMapReduceforAutoScalingRole",
+            vec![emr_principal.clone(), autoscaling_principal.clone()],
+        ),
+    ] {
+        if let Some(entry) = create_emr_role(&iam, &region, role, policy, &principals)? {
+            result.push(entry);
+        }
+        // The instance profile is created straight after the EC2 role, before the other
+        // two roles — the order is visible in the calls a stand-in records.
+        if role == "EMR_EC2_DefaultRole" {
+            let profile = role;
+            if !exists(
+                iam.call("get-instance-profile", Some(&json!({ "InstanceProfileName": profile }))),
+            )? {
+                iam.call(
+                    "create-instance-profile",
+                    Some(&json!({ "InstanceProfileName": profile })),
+                )?;
+                iam.call(
+                    "add-role-to-instance-profile",
+                    Some(&json!({ "InstanceProfileName": profile, "RoleName": profile })),
+                )?;
+            }
+        }
+    }
+
+    update_roles_config(globals)?;
+    render_list(&Value::Array(result), parsed)
+}
+
+/// One role plus its managed policy, or `None` if the role was already there.
+fn create_emr_role(
+    iam: &Client<'_>,
+    region: &str,
+    role_name: &str,
+    policy_name: &str,
+    principals: &[String],
+) -> Result<Option<Value>, Failure> {
+    if exists(iam.call("get-role", Some(&json!({ "RoleName": role_name }))))? {
+        return Ok(None);
+    }
+    // `2008-10-17`, and a single principal is a bare string where several are a list —
+    // IAM accepts both, and matching the reference keeps the documents byte-identical.
+    let service = if principals.len() == 1 {
+        Value::String(principals[0].clone())
+    } else {
+        json!(principals)
+    };
+    let trust = json!({
+        "Version": "2008-10-17",
+        "Statement": [{
+            "Sid": "",
+            "Effect": "Allow",
+            "Principal": { "Service": service },
+            "Action": "sts:AssumeRole"
+        }]
+    });
+    let policy_arn = format!(
+        "arn:{}:iam::aws:policy/service-role/{policy_name}",
+        crate::custom::policy_partition(region)
+    );
+    let created = iam.call(
+        "create-role",
+        Some(&json!({
+            "RoleName": role_name,
+            "AssumeRolePolicyDocument": serde_json::to_string(&trust).expect("a document"),
+        })),
+    )?;
+    iam.call(
+        "attach-role-policy",
+        Some(&json!({ "PolicyArn": policy_arn, "RoleName": role_name })),
+    )?;
+    let version = iam
+        .call("get-policy", Some(&json!({ "PolicyArn": policy_arn })))?
+        .get("Policy")
+        .and_then(|p| p.get("DefaultVersionId"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let document = iam
+        .call(
+            "get-policy-version",
+            Some(&json!({ "PolicyArn": policy_arn, "VersionId": version })),
+        )?
+        .get("PolicyVersion")
+        .and_then(|v| v.get("Document"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    Ok(created.get("Role").map(|role| json!({ "Role": role, "RolePolicy": document })))
+}
+
+fn exists(outcome: Result<Value, Failure>) -> Result<bool, Failure> {
+    match outcome {
+        Ok(_) => Ok(true),
+        Err(failure) if failure.service_error_code.as_deref() == Some("NoSuchEntity") => Ok(false),
+        Err(failure) => Err(failure),
+    }
+}
+
+/// The DNS suffix of the resolved EMR endpoint: `amazonaws.com`, or `amazonaws.com.cn`.
+///
+/// Both spellings of the hostname are in use — `elasticmapreduce.<region>.<suffix>` and
+/// `<region>.elasticmapreduce.<suffix>` — and the reference tries them in that order.
+fn endpoint_suffix(url: &str) -> Result<String, Failure> {
+    let host = url.split("://").nth(1).unwrap_or(url).split('/').next().unwrap_or_default();
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.first() == Some(&"elasticmapreduce") && parts.len() > 2 {
+        // `elasticmapreduce.<region>.<suffix>`
+        return Ok(parts[2..].join("."));
+    }
+    if parts.get(1) == Some(&"elasticmapreduce") && parts.len() > 2 {
+        // `<region>.elasticmapreduce.<suffix>`
+        return Ok(parts[2..].join("."));
+    }
+    Err(Failure::new(
+        exit::GENERAL_ERROR,
+        "Failed to resolve the service principal for the role's trust policy.",
+    ))
+}
+
+/// Associate the default roles with the current profile, unless either is already set.
+fn update_roles_config(globals: &Globals) -> Result<(), Failure> {
+    let profile = globals.profile.clone().unwrap_or_else(|| {
+        std::env::var("AWS_PROFILE").unwrap_or_else(|_| "default".to_string())
+    });
+    // `is_any_role_configured`: if the user has chosen either one, leave both alone.
+    let configured = awsc_runtime::credentials::profile::Config::load()
+        .ok()
+        .and_then(|config| config.profile(&profile).map(|section| section.contains_key("emr")))
+        .unwrap_or(false);
+    if configured {
+        return Ok(());
+    }
+    let section =
+        if profile == "default" { "default".to_string() } else { format!("profile {profile}") };
+    let mut nested = std::collections::BTreeMap::new();
+    nested.insert("instance_profile".to_string(), "EMR_EC2_DefaultRole".to_string());
+    nested.insert("service_role".to_string(), "EMR_DefaultRole".to_string());
+    let update = crate::configure::writer::Update {
+        section,
+        values: vec![("emr".to_string(), crate::configure::writer::Setting::Nested(nested))],
+    };
+    crate::configure::writer::update_config(&update, &crate::configure::config_path())
+        .map_err(|e| Failure::new(exit::GENERAL_ERROR, e))
+}
+
+fn render_list(value: &Value, parsed: &Parsed) -> Result<ExitCode, Failure> {
+    match awsc_output::render_named("create_role", value, parsed.output) {
+        Ok(Some(text)) => print!("{text}"),
+        Ok(None) => {}
+        Err(e) => return Err(Failure::new(exit::GENERAL_ERROR, e)),
+    }
+    Ok(exit::code(exit::SUCCESS))
 }
 
 /// The four HBase commands.
@@ -1068,6 +1272,29 @@ mod tests {
         let both = disable_args(&flags(&[("--full", None), ("--incremental", None)]))
             .expect("builds");
         assert!(both.contains(&"--disable-incremental-backups".to_string()));
+    }
+
+    /// The service principal follows the *endpoint's* suffix, not the region name, and
+    /// both host spellings are in use. A wrong suffix creates a role nothing can assume.
+    #[test]
+    fn the_service_principal_follows_the_endpoint_suffix() {
+        assert_eq!(
+            endpoint_suffix("https://elasticmapreduce.eu-west-1.amazonaws.com").expect("parses"),
+            "amazonaws.com"
+        );
+        // The other spelling, which the reference also accepts.
+        assert_eq!(
+            endpoint_suffix("https://eu-west-1.elasticmapreduce.amazonaws.com").expect("parses"),
+            "amazonaws.com"
+        );
+        // China keeps its own suffix, and `elasticmapreduce.amazonaws.com` there would
+        // name a principal that does not exist.
+        assert_eq!(
+            endpoint_suffix("https://elasticmapreduce.cn-north-1.amazonaws.com.cn")
+                .expect("parses"),
+            "amazonaws.com.cn"
+        );
+        assert!(endpoint_suffix("https://example.com").is_err());
     }
 
     #[test]
