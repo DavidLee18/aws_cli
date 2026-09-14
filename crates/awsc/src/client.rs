@@ -321,6 +321,22 @@ impl<'a> Client<'a> {
         )
     }
 
+    /// As [`Client::call`], but handing back the response body's bytes unchanged.
+    ///
+    /// The modelled path decodes a body as UTF-8, which is right for every operation
+    /// whose output is a document and wrong for one that streams a file — `get-object`
+    /// on an installer would come back with every invalid byte replaced.
+    pub fn call_bytes(&self, operation: &str, input: Option<&Value>) -> Result<Vec<u8>, Failure> {
+        let (op_id, op) = self
+            .model
+            .operation(operation)
+            .map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
+        let input_shape =
+            self.model.operation_input(op).map_err(|e| Failure::new(exit::GENERAL_ERROR, e))?;
+        let response = self.call_operation_raw(op_id.name(), op, input_shape, input)?;
+        Ok(response.bytes().to_vec())
+    }
+
     /// A hand-built request, signed and retried but not routed through the protocol layer.
     ///
     /// The `s3` tree uses this rather than `call`: it moves arbitrary binary payloads, and

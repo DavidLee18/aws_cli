@@ -37,6 +37,8 @@ pub(crate) const IMPLEMENTED: &[(&str, &str, &str)] = &[
     ("datapipeline", "create-default-roles", "Create the IAM roles and instance profile Data Pipeline uses."),
     ("datapipeline", "list-runs", "List a pipeline's runs, filtered by status or time window."),
     ("deploy", "deregister", "Deregister an on-premises instance and clean up its IAM user."),
+    ("deploy", "install", "Install and configure the CodeDeploy agent on this machine."),
+    ("deploy", "uninstall", "Remove the CodeDeploy agent and its configuration from this machine."),
     ("deploy", "push", "Bundle a directory, upload it to S3 and register it as a revision."),
     ("deploy", "register", "Create an IAM user for an on-premises instance and register it."),
     ("dlm", "create-default-role", "Create the IAM role Data Lifecycle Manager uses, if it does not exist."),
@@ -1286,7 +1288,7 @@ pub(crate) fn resolve_region(globals: &Globals) -> Option<String> {
     awsc_runtime::endpoint::resolve_region(globals.region.as_deref(), profile_region.as_deref())
 }
 
-fn resolve_credentials(
+pub(crate) fn resolve_credentials(
     globals: &Globals,
     region: &str,
 ) -> Result<awsc_runtime::credentials::Credentials, Failure> {

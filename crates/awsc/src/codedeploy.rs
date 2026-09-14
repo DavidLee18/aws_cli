@@ -39,6 +39,8 @@ pub fn dispatch(parsed: &Parsed, globals: &Globals) -> Result<Option<ExitCode>, 
         "register" => Ok(Some(guarded(register(parsed, globals), "Register"))),
         "deregister" => Ok(Some(guarded(deregister(parsed, globals), "Deregister"))),
         "push" => push(parsed, globals).map(Some),
+        "install" => install(parsed, globals).map(Some),
+        "uninstall" => uninstall(parsed, globals).map(Some),
         _ => Ok(None),
     }
 }
@@ -585,6 +587,70 @@ fn param_error(message: &str) -> Failure {
 
 #[cfg(test)]
 mod tests {
+    /// The reference matches `(\w+)[-_](release|version)` against every name in `/etc`.
+    #[test]
+    fn release_file_names_split_the_way_the_reference_matches_them() {
+        assert_eq!(split_release_filename("redhat-release"), Some(("redhat", "release")));
+        assert_eq!(split_release_filename("os_version"), Some(("os", "version")));
+        // No separator, so no match at all.
+        assert_eq!(split_release_filename("hostname"), None);
+        // A leading separator leaves an empty name.
+        assert_eq!(split_release_filename("-release"), None);
+    }
+
+    /// `<name> release <version> (<codename>)` is where "Red Hat Enterprise Linux Server"
+    /// comes from — the check the reference makes is against the part before " release ".
+    #[test]
+    fn the_distribution_name_comes_from_before_the_word_release() {
+        assert_eq!(
+            parse_release_line("Red Hat Enterprise Linux Server release 7.9 (Maipo)"),
+            "Red Hat Enterprise Linux Server"
+        );
+        assert_eq!(parse_release_line("CentOS Linux release 7 (Core)"), "CentOS Linux");
+        // RHEL 8 and later dropped "Server", which is why they are not recognised.
+        assert_eq!(
+            parse_release_line("Red Hat Enterprise Linux release 9.3 (Plow)"),
+            "Red Hat Enterprise Linux"
+        );
+        assert_eq!(parse_release_line("Slackware 14.2"), "Slackware");
+        assert_eq!(parse_release_line(""), "");
+    }
+
+    /// Each system keeps its config somewhere different, and the installer is named
+    /// differently — getting either wrong installs an agent that cannot find its identity.
+    #[test]
+    fn each_system_knows_where_its_configuration_lives() {
+        assert_eq!(
+            System::Ubuntu.config_path(),
+            "/etc/codedeploy-agent/conf/codedeploy.onpremises.yml"
+        );
+        assert_eq!(System::Rhel.config_path(), System::Ubuntu.config_path());
+        assert_eq!(
+            System::Windows.config_path(),
+            r"C:\ProgramData\Amazon\CodeDeploy\conf.onpremises.yml"
+        );
+        assert_eq!(System::Ubuntu.installer(), "install");
+        assert_eq!(System::Windows.installer(), "codedeploy-agent.msi");
+        // The two Linux systems differ only in what "not installed" looks like.
+        assert_ne!(System::Ubuntu.not_found_message(), System::Rhel.not_found_message());
+    }
+
+    #[test]
+    fn the_agent_installer_must_be_an_s3_url() {
+        assert_eq!(
+            parse_installer_location("s3://my-bucket/releases/install-1.2").expect("parses"),
+            ("my-bucket".to_string(), "releases/install-1.2".to_string())
+        );
+        for bad in ["https://example/install", "s3://only-a-bucket", "s3:///key", ""] {
+            let failure = parse_installer_location(bad).expect_err("refuses");
+            assert!(
+                failure.message().contains("s3://<bucket>/<key>"),
+                "{bad}: {}",
+                failure.message()
+            );
+        }
+    }
+
     use super::*;
 
     /// An on-premises instance must not be named like an EC2 one.
@@ -641,4 +707,506 @@ mod tests {
         let arn = "arn:aws:iam::123456789012:user/AWS/CodeDeploy/my-instance";
         assert_eq!(arn.rsplit('/').next(), Some("my-instance"));
     }
+}
+
+/// The operating systems the agent can be installed on, and where each keeps its config.
+///
+/// The list is the reference's and it is short on purpose: these are the systems the
+/// CodeDeploy agent ships packages for.
+///
+/// Constructed only on the platforms that have one, so a macOS build sees every variant
+/// as unused — which is correct: `local_system()` there returns `None` and both commands
+/// report the unsupported-system error.
+#[derive(Clone, Copy, PartialEq, Debug)]
+#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
+pub enum System {
+    Ubuntu,
+    Rhel,
+    Windows,
+}
+
+const UNSUPPORTED_SYSTEM: &str = "Only Ubuntu Server, Red Hat Enterprise Linux Server and \
+                                  Windows Server operating systems are supported.";
+
+impl System {
+    fn config_dir(self) -> &'static str {
+        match self {
+            System::Windows => r"C:\ProgramData\Amazon\CodeDeploy",
+            _ => "/etc/codedeploy-agent/conf",
+        }
+    }
+
+    fn config_path(self) -> String {
+        match self {
+            System::Windows => format!(r"{}\conf.onpremises.yml", self.config_dir()),
+            _ => format!("{}/{DEFAULT_CONFIG_FILE}", self.config_dir()),
+        }
+    }
+
+    /// The file name the installer is saved as, and the default key under `latest/`.
+    fn installer(self) -> &'static str {
+        match self {
+            System::Windows => "codedeploy-agent.msi",
+            _ => "install",
+        }
+    }
+
+    /// The message `service codedeploy-agent stop` prints when the agent is not installed
+    /// at all, which is not a failure — there is simply nothing to stop.
+    fn not_found_message(self) -> &'static str {
+        match self {
+            System::Ubuntu => "codedeploy-agent: unrecognized service",
+            System::Rhel => "Redirecting to /bin/systemctl stop  codedeploy-agent.service",
+            System::Windows => "Cannot find any service with service name 'codedeployagent'",
+        }
+    }
+}
+
+/// `aws deploy install`: put the agent on the machine this is running on.
+///
+/// Unlike every other command here it acts on the *local* system: it writes
+/// `/etc/codedeploy-agent/conf/codedeploy.onpremises.yml`, installs Ruby through the
+/// distribution's package manager, downloads the installer from S3 and runs it. So it
+/// requires root, and it **refuses to run on an EC2 instance** — detected by the instance
+/// metadata endpoint answering — because an EC2 instance uses the agent differently.
+fn install(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> {
+    let args = crate::custom::take_args(
+        parsed,
+        &["--config-file", "--override-config", "--no-override-config", "--agent-installer"],
+    )?;
+    let value = |flag: &str| args.get(flag).copied().flatten();
+    let Some(config_file) = value("--config-file") else {
+        return Err(crate::custom::missing_required(&["--config-file"]));
+    };
+
+    let region = crate::custom::resolve_region(globals)
+        .ok_or_else(|| Failure::new(exit::CONFIGURATION, "Region not specified."))?;
+    let system = detect_system()?;
+    validate_administrator(system)?;
+
+    // Checked before anything is downloaded: overwriting a working instance's config is
+    // how an instance loses its identity.
+    if std::path::Path::new(&system.config_path()).is_file()
+        && !args.contains_key("--override-config")
+    {
+        return Err(Failure::new(
+            exit::GENERAL_ERROR,
+            "The on-premises instance configuration file already exists. Specify \
+             --override-config to update the existing on-premises instance configuration \
+             file.",
+        ));
+    }
+
+    let (bucket, key) = match value("--agent-installer") {
+        None => (
+            format!("aws-codedeploy-{region}"),
+            format!("latest/{}", system.installer()),
+        ),
+        Some(location) => parse_installer_location(location)?,
+    };
+    // The name the downloaded file is saved as comes from the key, not from the system's
+    // default: `--agent-installer s3://b/releases/install-1.2` runs `./install-1.2`.
+    let installer = key.rsplit('/').next().unwrap_or(system.installer()).to_string();
+
+    let outcome = (|| -> Result<(), Failure> {
+        create_config(system, config_file)?;
+        print!("Installing the AWS CodeDeploy Agent... ");
+        let _ = std::io::stdout().flush();
+        install_agent(system, globals, &region, &bucket, &key, &installer)?;
+        println!("DONE");
+        Ok(())
+    })();
+    Ok(guarded_local(outcome, "Install"))
+}
+
+/// `aws deploy uninstall`: take the agent off this machine and forget its identity.
+fn uninstall(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> {
+    crate::custom::take_args(parsed, &[])?;
+    let _region = crate::custom::resolve_region(globals)
+        .ok_or_else(|| Failure::new(exit::CONFIGURATION, "Region not specified."))?;
+    let system = detect_system()?;
+    validate_administrator(system)?;
+
+    let outcome = (|| -> Result<(), Failure> {
+        print!("Uninstalling the AWS CodeDeploy Agent... ");
+        let _ = std::io::stdout().flush();
+        // Only remove the package if the agent actually stopped: a stop that failed for
+        // any reason other than "not installed" means something is still running.
+        if stop_agent(system)? {
+            remove_agent(system)?;
+        }
+        println!("DONE");
+
+        print!("Deleting the on-premises instance configuration... ");
+        let _ = std::io::stdout().flush();
+        match std::fs::remove_file(system.config_path()) {
+            Ok(()) => {}
+            // Already gone is the goal, not a failure.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(Failure::new(
+                    exit::GENERAL_ERROR,
+                    format!("{}: {e}", system.config_path()),
+                ))
+            }
+        }
+        println!("DONE");
+        Ok(())
+    })();
+    Ok(guarded_local(outcome, "Uninstall"))
+}
+
+/// The wrapper both commands put around the part that touches the machine.
+///
+/// Distinct from [`guarded`], which register/deregister use: the wording differs, and so
+/// does the *scope* — validation happens outside this, so a bad argument is reported as a
+/// plain CLI error rather than as a half-finished install.
+fn guarded_local(outcome: Result<(), Failure>, verb: &str) -> ExitCode {
+    match outcome {
+        Ok(()) => exit::code(exit::SUCCESS),
+        Err(failure) => {
+            let _ = std::io::stdout().flush();
+            eprintln!(
+                "ERROR\n{}\n{verb} the AWS CodeDeploy Agent on the on-premises instance by \
+                 following the instructions in \"Configure Existing On-Premises Instances by \
+                 Using AWS CodeDeploy\" in the AWS CodeDeploy User Guide.",
+                failure.message()
+            );
+            exit::code(exit::GENERAL_ERROR)
+        }
+    }
+}
+
+fn create_config(system: System, config_file: &str) -> Result<(), Failure> {
+    print!("Creating the on-premises instance configuration file... ");
+    let _ = std::io::stdout().flush();
+    std::fs::create_dir_all(system.config_dir()).map_err(|e| {
+        Failure::new(exit::GENERAL_ERROR, format!("{}: {e}", system.config_dir()))
+    })?;
+    // Copying a file onto itself would truncate it, so the case where the user already
+    // put the config where it belongs is skipped rather than handled.
+    if config_file != system.config_path() {
+        std::fs::copy(config_file, system.config_path()).map_err(|e| {
+            Failure::new(exit::GENERAL_ERROR, format!("{config_file}: {e}"))
+        })?;
+    }
+    println!("DONE");
+    Ok(())
+}
+
+fn install_agent(
+    system: System,
+    globals: &Globals,
+    region: &str,
+    bucket: &str,
+    key: &str,
+    installer: &str,
+) -> Result<(), Failure> {
+    // Ruby first: the installer is a Ruby program, so a machine without it cannot run
+    // what is about to be downloaded.
+    match system {
+        System::Ubuntu => {
+            run(&["apt-get", "-y", "update"])?;
+            run(&["apt-get", "-y", "install", "ruby2.0"])?;
+        }
+        System::Rhel => run(&["yum", "-y", "install", "ruby"])?,
+        System::Windows => {}
+    }
+    stop_agent(system)?;
+
+    let s3_globals =
+        Globals { region: Some(region.to_string()), ..globals.for_service("s3") };
+    let model = crate::load_model("s3api").map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
+    let s3 = Client::new(&model, &s3_globals)?;
+    let body = s3.call_bytes("get-object", Some(&json!({ "Bucket": bucket, "Key": key })))?;
+    std::fs::write(installer, &body)
+        .map_err(|e| Failure::new(exit::GENERAL_ERROR, format!("{installer}: {e}")))?;
+
+    match system {
+        System::Windows => {
+            run(&[&format!(r".\{installer}"), "/quiet", "/l", r".\codedeploy-agent-install-log.txt"])?;
+            run(&["powershell.exe", "-Command", "Restart-Service", "-Name", "codedeployagent"])?;
+            let status = capture(&[
+                "powershell.exe",
+                "-Command",
+                "Get-Service",
+                "-Name",
+                "codedeployagent",
+            ])?;
+            if !status.0.contains("Running") {
+                return Err(Failure::new(
+                    exit::GENERAL_ERROR,
+                    "The AWS CodeDeploy Agent did not start after installation.",
+                ));
+            }
+        }
+        _ => {
+            run(&["chmod", "+x", &format!("./{installer}")])?;
+            // The installer signs its own AWS calls, so it is handed credentials through
+            // the environment rather than expecting a profile to exist for root.
+            let credentials = crate::custom::resolve_credentials(globals, region)?;
+            let mut command = std::process::Command::new(format!("./{installer}"));
+            command.arg("auto");
+            command.env("AWS_REGION", region);
+            command.env("AWS_ACCESS_KEY_ID", &credentials.access_key_id);
+            command.env("AWS_SECRET_ACCESS_KEY", &credentials.secret_access_key);
+            if let Some(token) = &credentials.session_token {
+                command.env("AWS_SESSION_TOKEN", token);
+            }
+            let status = command
+                .status()
+                .map_err(|e| Failure::new(exit::GENERAL_ERROR, format!("./{installer}: {e}")))?;
+            if !status.success() {
+                return Err(Failure::new(
+                    exit::GENERAL_ERROR,
+                    format!(
+                        "Command '['./{installer}', 'auto']' returned non-zero exit status {}.",
+                        status.code().unwrap_or(1)
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Stop the agent. `Ok(true)` means it stopped, `Ok(false)` that it was not installed.
+fn stop_agent(system: System) -> Result<bool, Failure> {
+    let command: &[&str] = match system {
+        System::Windows => {
+            &["powershell.exe", "-Command", "Stop-Service", "-Name", "codedeployagent"]
+        }
+        _ => &["service", "codedeploy-agent", "stop"],
+    };
+    let (_, stderr, success) = capture_status(command)?;
+    if success {
+        return Ok(true);
+    }
+    if stderr.contains(system.not_found_message()) {
+        return Ok(false);
+    }
+    Err(Failure::new(
+        exit::GENERAL_ERROR,
+        format!("Failed to stop the AWS CodeDeploy Agent:\n{stderr}"),
+    ))
+}
+
+fn remove_agent(system: System) -> Result<(), Failure> {
+    match system {
+        System::Ubuntu => run(&["dpkg", "-r", "codedeploy-agent"]),
+        System::Rhel => run(&["yum", "-y", "erase", "codedeploy-agent"]),
+        System::Windows => {
+            let (_, stderr, success) = capture_status(&[
+                "wmic",
+                "product",
+                "where",
+                r#"name="CodeDeploy Host Agent""#,
+                "call",
+                "uninstall",
+                "/nointeractive",
+            ])?;
+            if success {
+                Ok(())
+            } else {
+                Err(Failure::new(
+                    exit::GENERAL_ERROR,
+                    format!("Failed to uninstall the AWS CodeDeploy Agent:\n{stderr}"),
+                ))
+            }
+        }
+    }
+}
+
+/// Run a command, failing if it does.
+fn run(command: &[&str]) -> Result<(), Failure> {
+    let status = std::process::Command::new(command[0])
+        .args(&command[1..])
+        .status()
+        .map_err(|e| Failure::new(exit::GENERAL_ERROR, format!("{}: {e}", command[0])))?;
+    if status.success() {
+        return Ok(());
+    }
+    Err(Failure::new(
+        exit::GENERAL_ERROR,
+        format!(
+            "Command '{:?}' returned non-zero exit status {}.",
+            command,
+            status.code().unwrap_or(1)
+        ),
+    ))
+}
+
+fn capture(command: &[&str]) -> Result<(String, String), Failure> {
+    let (stdout, stderr, _) = capture_status(command)?;
+    Ok((stdout, stderr))
+}
+
+fn capture_status(command: &[&str]) -> Result<(String, String, bool), Failure> {
+    let output = std::process::Command::new(command[0])
+        .args(&command[1..])
+        .output()
+        .map_err(|e| Failure::new(exit::GENERAL_ERROR, format!("{}: {e}", command[0])))?;
+    Ok((
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+        output.status.success(),
+    ))
+}
+
+/// `s3://bucket/key`, with the same message the reference gives.
+fn parse_installer_location(location: &str) -> Result<(String, String), Failure> {
+    let rest = location.strip_prefix("s3://").unwrap_or("");
+    match rest.split_once('/') {
+        Some((bucket, key)) if !bucket.is_empty() && !key.is_empty() => {
+            Ok((bucket.to_string(), key.to_string()))
+        }
+        _ => Err(param_error(
+            "--agent-installer must specify the Amazon S3 URL format as s3://<bucket>/<key>.",
+        )),
+    }
+}
+
+/// Which system this is, refusing anything the agent has no package for — and refusing
+/// EC2, where the agent is installed a different way.
+fn detect_system() -> Result<System, Failure> {
+    let system = local_system()
+        .ok_or_else(|| Failure::new(exit::GENERAL_ERROR, UNSUPPORTED_SYSTEM))?;
+    if is_ec2_instance() {
+        return Err(Failure::new(
+            exit::GENERAL_ERROR,
+            "Amazon EC2 instances are not supported.",
+        ));
+    }
+    Ok(system)
+}
+
+#[cfg(target_os = "windows")]
+fn local_system() -> Option<System> {
+    Some(System::Windows)
+}
+
+#[cfg(target_os = "linux")]
+fn local_system() -> Option<System> {
+    let distribution = linux_distribution();
+    if distribution.contains("Ubuntu") {
+        return Some(System::Ubuntu);
+    }
+    if distribution.contains("Red Hat Enterprise Linux Server") {
+        return Some(System::Rhel);
+    }
+    None
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+fn local_system() -> Option<System> {
+    None
+}
+
+/// The distribution name, the way Python's removed `platform.linux_distribution` found it.
+///
+/// `/etc/lsb-release` first — on Ubuntu it names `Ubuntu` outright, and checking it first
+/// is what stops Ubuntu being identified as Debian. Otherwise the first `<name>-release`
+/// or `<name>_version` file in `/etc` whose name is a distribution we know, parsed as
+/// `<name> release <version> (<codename>)`.
+///
+/// Worth knowing: on RHEL 8 and later `/etc/redhat-release` says "Red Hat Enterprise Linux
+/// release 9.3", without "Server" — so the reference does not recognise it, and neither
+/// does this. See `docs/divergences.md`.
+#[cfg(target_os = "linux")]
+fn linux_distribution() -> String {
+    const SUPPORTED: [&str; 15] = [
+        "SuSE", "debian", "fedora", "redhat", "centos", "mandrake", "mandriva", "rocks",
+        "slackware", "yellowdog", "gentoo", "UnitedLinux", "turbolinux", "arch", "mageia",
+    ];
+    if let Ok(text) = std::fs::read_to_string("/etc/lsb-release") {
+        let id = text.lines().find_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            key.trim().eq_ignore_ascii_case("DISTRIB_ID").then(|| value.trim().to_string())
+        });
+        let release = text.lines().find_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            key.trim().eq_ignore_ascii_case("DISTRIB_RELEASE").then(|| value.trim().to_string())
+        });
+        if let (Some(id), Some(release)) = (id, release) {
+            if !id.is_empty() && !release.is_empty() {
+                return id;
+            }
+        }
+    }
+
+    let Ok(entries) = std::fs::read_dir("/etc") else { return String::new() };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    for name in names {
+        let Some((distribution, suffix)) = split_release_filename(&name) else { continue };
+        if !(suffix == "release" || suffix == "version") || !SUPPORTED.contains(&distribution) {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(format!("/etc/{name}")) else { continue };
+        return parse_release_line(text.lines().next().unwrap_or_default());
+    }
+    String::new()
+}
+
+/// `(\w+)[-_](release|version)` — the name, then the separator, then the kind.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn split_release_filename(name: &str) -> Option<(&str, &str)> {
+    let index = name.find(['-', '_'])?;
+    let (distribution, rest) = name.split_at(index);
+    if distribution.is_empty() || !distribution.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+    Some((distribution, &rest[1..]))
+}
+
+/// `<name> release <version> (<codename>)`, falling back to the first word.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_release_line(line: &str) -> String {
+    match line.find(" release ") {
+        Some(index) => line[..index].to_string(),
+        None => line.split_whitespace().next().unwrap_or_default().to_string(),
+    }
+}
+
+/// Is the instance metadata service answering?
+///
+/// One second, and *any* failure means "not EC2" — including an HTTP error, which is what
+/// an IMDSv2-only instance returns to an unauthenticated GET. The reference catches
+/// `URLError`, and `HTTPError` is a subclass of it, so it reaches the same conclusion.
+fn is_ec2_instance() -> bool {
+    ureq::get("http://169.254.169.254/latest/meta-data/")
+        .timeout(std::time::Duration::from_secs(1))
+        .call()
+        .is_ok()
+}
+
+#[cfg(unix)]
+fn validate_administrator(_system: System) -> Result<(), Failure> {
+    // SAFETY: `geteuid` reads the calling process's effective user id.
+    if unsafe { libc::geteuid() } != 0 {
+        return Err(Failure::new(exit::GENERAL_ERROR, "You must run this command as sudo."));
+    }
+    Ok(())
+}
+
+/// **Divergence:** the reference asks Windows directly with `IsUserAnAdmin()`. There is no
+/// equivalent without a Win32 binding, so this asks `net session`, which only an
+/// administrator can run. See `docs/divergences.md`.
+#[cfg(not(unix))]
+fn validate_administrator(_system: System) -> Result<(), Failure> {
+    let elevated = std::process::Command::new("net")
+        .arg("session")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+    if !elevated {
+        return Err(Failure::new(
+            exit::GENERAL_ERROR,
+            "You must run this command as an Administrator.",
+        ));
+    }
+    Ok(())
 }

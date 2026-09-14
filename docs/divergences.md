@@ -586,7 +586,7 @@ views of one service. Deferred to the customization phase.
 
 ## Custom commands (first tranche)
 
-Forty-one custom commands are now implemented, each verified by byte-diffing our stdout/stderr
+Forty-three custom commands are now implemented, each verified by byte-diffing our stdout/stderr
 and exit code against the reference. `scripts/compare-custom-commands.sh` reproduces the
 comparison; it pins our clock to the reference's via `AWSC_FIXED_TIME`, because presigned
 URLs embed a timestamp and would otherwise never compare equal.
@@ -618,6 +618,7 @@ URLs embed a timestamp and would otherwise never compare equal.
 | `emr ssh` / `socks` / `get` / `put` | every command line, against a stand-in cluster and fake `ssh`/`scp` |
 | `cloudtrail verify-query-results` | a real openssl-signed export, plus both tamper paths |
 | `deploy register` / `deregister` | both call sequences and the 0600 config file, against stand-ins |
+| `deploy install` / `uninstall` | pure logic unit-tested; the unsupported-system and argument paths driven for real. **Not driven end to end** — see below |
 | `deploy push` | the uploaded bundle read back by Python's own `zipfile`, CRCs and all |
 | `ec2-instance-connect open-tunnel` | both modes end-to-end against an EC2 stand-in and a TLS WebSocket echo server; frame and handshake vectors from RFC 6455 |
 | `ec2-instance-connect ssh` | every connection-type branch and all eight refusals against stand-ins and a fake `ssh`; the generated key read back by `ssh-keygen -y` |
@@ -940,6 +941,42 @@ Facts worth recording, because each contradicts a reasonable assumption:
 
   Worth knowing: **monitoring failures exit 1**, not 254 or 255 — the reference *returns*
   1 from `_run_main` for both a bad display mode and a monitoring error.
+
+- **`deploy install` and `uninstall` act on the machine they are running on**, which is
+  the one thing that makes them different from every other command here. They write
+  `/etc/codedeploy-agent/conf/codedeploy.onpremises.yml`, install Ruby through the
+  distribution's package manager, download the installer from S3 and run it — so they
+  require root, and they **refuse to run on an EC2 instance**, detected by the instance
+  metadata endpoint answering within one second.
+
+  **These two were not driven end to end.** Doing so means an Ubuntu or RHEL host, as
+  root, with the CodeDeploy agent actually installed and removed; there is no stand-in for
+  that. What *is* verified: the distribution detection, the per-system config paths and
+  installer names, and the `--agent-installer` S3 parsing are unit-tested, and the
+  unsupported-system and argument-validation paths were run for real. The command
+  sequencing is a direct port of `systems.py`. Stated here rather than left implied.
+
+  Three things worth knowing:
+
+  - **A reference bug is fixed rather than reproduced.** `Linux._stop_agent` tests
+    `params.not_found_msg not in error` where `error` is `bytes` and the message is a
+    `str` — which raises `TypeError` in Python 3. So in the reference, stopping an agent
+    that is *not installed* crashes rather than being tolerated, and Windows'
+    `"Running" not in output` check raises every time. Reproducing a `TypeError` would be
+    absurd, so the comparison is done on decoded text, which is what the code means.
+  - **RHEL 8 and later are not recognised**, by the reference or by this. The check is for
+    the literal `Red Hat Enterprise Linux Server`, and `/etc/redhat-release` dropped
+    `Server` after RHEL 7 — so a modern RHEL host gets the unsupported-system error.
+    Reproduced, because changing it would install an agent on a system the reference
+    refuses.
+  - **EC2 detection is one unauthenticated GET.** Any failure means "not EC2", including
+    the HTTP error an IMDSv2-only instance returns, so such an instance is not detected.
+    That is the reference's behaviour: it catches `URLError`, and `HTTPError` is a
+    subclass of it.
+
+  **One divergence:** the Windows administrator check. The reference calls
+  `ctypes.windll.shell32.IsUserAnAdmin()`; there is no equivalent without a Win32 binding,
+  so this runs `net session`, which only an administrator can run.
 
 - **`gamelift upload-build` uploads with credentials that are not the caller's.**
   `request-upload-credentials` returns temporary credentials *and* a bucket and key that
