@@ -42,11 +42,9 @@ sha1 = "0.10"
 base64ct = { version = "1", features = ["alloc"] }
 # `ec2-instance-connect open-tunnel` only. The tunnel is a WebSocket over TLS, which is
 # neither HTTP request/response nor async, so it cannot go through the runtime's hyper
-# client -- it needs a plain synchronous TLS stream it can frame itself. Both crates are
-# already in the tree under `hyper-rustls`; naming them here adds no new download.
+# client -- it needs a plain synchronous TLS stream it can frame itself. The trust store
+# it verifies against comes from `awsc_runtime::roots`, the same one the HTTP client uses.
 rustls = { workspace = true }
-rustls-native-certs = "0.8"
-rustls-pemfile = { workspace = true }
 # `ec2-instance-connect ssh` generates a throwaway Ed25519 key pair. aws-lc-rs is already
 # in the tree as rustls's crypto provider; this names it to reach Ed25519 directly.
 aws-lc-rs = "1"

@@ -35,6 +35,11 @@ http-body-util = "0.1"
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "native-tokio", "tls12", "aws-lc-rs"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "aws-lc-rs"] }
 rustls-pemfile = "2"
+# The fallback trust store. Mozilla's root program compiled in as Rust constants -- the
+# same roots `certifi` ships, which is what the reference trusts by default. Without it a
+# host with no system certificate store cannot make a single HTTPS call.
+webpki-roots = "1"
+rustls-native-certs = "0.8"
 bytes = "1"
 http = "1"
 tracing = "0.1"

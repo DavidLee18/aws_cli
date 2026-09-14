@@ -27,6 +27,8 @@ hyper-util = { workspace = true }
 http-body-util = { workspace = true }
 hyper-rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
+webpki-roots = { workspace = true }
+rustls-native-certs = { workspace = true }
 rustls = { workspace = true }
 bytes = { workspace = true }
 http = { workspace = true }

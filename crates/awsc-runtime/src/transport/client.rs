@@ -186,22 +186,14 @@ fn build_client(transport: &Transport) -> Result<HttpsClient, String> {
     http.set_nodelay(true);
     http.enforce_http(false);
 
-    // The common case keeps hyper-rustls's own native-root loading. `--ca-bundle` and
-    // `--no-verify-ssl` both need a hand-built config, so they take the other branch.
-    let tls = if transport.verify_ssl && transport.ca_bundle.is_none() {
-        hyper_rustls::HttpsConnectorBuilder::new()
-            .with_native_roots()
-            .map_err(|e| format!("could not load the system certificate store: {e}"))?
-            .https_or_http()
-            .enable_all_versions()
-            .wrap_connector(http)
-    } else {
-        hyper_rustls::HttpsConnectorBuilder::new()
-            .with_tls_config(tls_config(transport)?)
-            .https_or_http()
-            .enable_all_versions()
-            .wrap_connector(http)
-    };
+    // One path for every case: `tls_config` resolves the trust store, including the
+    // compiled-in fallback for a host with no system store. hyper-rustls's own
+    // `with_native_roots()` used to serve the common case and had no such fallback.
+    let tls = hyper_rustls::HttpsConnectorBuilder::new()
+        .with_tls_config(tls_config(transport)?)
+        .https_or_http()
+        .enable_all_versions()
+        .wrap_connector(http);
 
     Ok(Client::builder(TokioExecutor::new())
         .pool_max_idle_per_host(POOL_MAX_IDLE_PER_HOST)
@@ -209,27 +201,18 @@ fn build_client(transport: &Transport) -> Result<HttpsClient, String> {
         .build(tls))
 }
 
-/// The TLS configuration for `--ca-bundle` and `--no-verify-ssl`.
+/// The TLS configuration: which authorities are trusted, and whether they are checked.
 fn tls_config(transport: &Transport) -> Result<rustls::ClientConfig, String> {
-    let mut roots = rustls::RootCertStore::empty();
-    // With no bundle the store stays empty, which is only reachable under
-    // `--no-verify-ssl`, where the verifier never consults it.
-    if let Some(path) = &transport.ca_bundle {
-        let file = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
-        let mut reader = std::io::BufReader::new(file);
-        let mut added = 0usize;
-        for cert in rustls_pemfile::certs(&mut reader) {
-            let cert = cert.map_err(|e| format!("{path}: {e}"))?;
-            roots.add(cert).map_err(|e| format!("{path}: {e}"))?;
-            added += 1;
+    // `--no-verify-ssl` never consults the store, so an unreadable `--ca-bundle` beside
+    // it is still reported: the flag turns verification off, not argument checking.
+    let roots = match crate::roots::load(transport.ca_bundle.as_deref()) {
+        Ok((roots, _source)) => roots,
+        Err(e) if !transport.verify_ssl => {
+            let _ = e;
+            rustls::RootCertStore::empty()
         }
-        // An empty or non-PEM file would otherwise produce a store that trusts nothing,
-        // and every request would fail with an opaque certificate error rather than
-        // naming the real problem.
-        if added == 0 {
-            return Err(format!("{path}: no PEM certificates found"));
-        }
-    }
+        Err(e) => return Err(e),
+    };
 
     // Named explicitly rather than relying on the process-wide default having been
     // installed already: that only holds because `build_client` installs it a few lines

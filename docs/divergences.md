@@ -584,6 +584,47 @@ views of one service. Deferred to the customization phase.
 
 ---
 
+## The trust store
+
+`--ca-bundle` / `AWS_CA_BUNDLE` first, then the system certificate store, then a
+**compiled-in copy of the Mozilla root program** (`webpki-roots`, the same roots
+`certifi` ships).
+
+The third step exists because without it a host with no `ca-certificates` package cannot
+make a single HTTPS call: every request failed with `no native root CA certificates
+found`, and because the TLS configuration is built before the scheme is looked at, that
+included requests to a plain `http://` endpoint. Minimal Linux containers are the obvious
+case. The reference never had this problem — botocore trusts `certifi`, a bundle shipped
+inside the package, and does not consult the system store at all.
+
+**The order is a deliberate difference.** Preferring the system store means a corporate
+root installed system-wide is trusted here, where the real `aws` would need
+`AWS_CA_BUNDLE` pointed at it. That is a difference in the user's favour, and it keeps
+existing behaviour unchanged on hosts that do have a store — only the failing case moved.
+
+Two things follow from having one resolution path (`awsc_runtime::roots`):
+
+- `hyper-rustls`'s own `with_native_roots()` shortcut is gone. It served the common case
+  and had no fallback, so there were two code paths and a fix could only reach one.
+- The WebSocket client for `ec2-instance-connect open-tunnel` resolves its trust store the
+  same way as every HTTP request, rather than loading native certificates itself.
+
+Verified on Ubuntu 22.04 with no `ca-certificates` installed: `sts get-caller-identity`
+reaches AWS and fails with `InvalidClientTokenId` — the handshake completed and only the
+credentials were wrong. Before the change the same call failed on the trust store.
+
+**A second bug came out of checking `--no-verify-ssl` afterwards**, and is worth recording
+because it looks harmless: `WebSocket::close` was shutting down the socket's *write* half
+after sending its close frame. TLS is duplex, so a later read can need to write — to
+finish a handshake message or answer a key update — and on a write-shutdown socket that
+fails with `EINVAL`. Closing the tunnel and then waiting for the peer's close frame is
+exactly that pattern, so `open-tunnel` would round-trip its data correctly and then report
+`Invalid argument (os error 22)` and exit 255. It is a race, which is why the command's
+original verification passed. The shutdown is gone: the close frame is the protocol's
+signal and the socket closes when the value is dropped.
+
+---
+
 ## Custom commands (first tranche)
 
 Forty-five custom commands are now implemented, each verified by byte-diffing our stdout/stderr

@@ -156,7 +156,15 @@ impl WebSocket {
         Ok(())
     }
 
-    /// Send a close frame with code 1000 and stop writing.
+    /// Send a close frame with code 1000.
+    ///
+    /// The socket's write half is deliberately *not* shut down. A half-close looks
+    /// harmless and is not: TLS is a duplex protocol, so a later read can need to write
+    /// (to complete a handshake message or answer a key update), and on a socket whose
+    /// write side is gone that fails with `EINVAL`. Closing the tunnel and then waiting
+    /// for the peer's own close frame is exactly that pattern, and it reported a spurious
+    /// error at the end of a session that had worked. The close frame is the protocol's
+    /// signal; the socket closes when this value is dropped.
     ///
     /// Errors are swallowed: this runs while shutting down, and a peer that has already
     /// gone away is the ordinary case rather than a failure to report.
@@ -164,7 +172,6 @@ impl WebSocket {
         if !self.closed {
             self.closed = true;
             let _ = self.send(OPCODE_CLOSE, &1000u16.to_be_bytes());
-            let _ = self.stream.sock.shutdown(std::net::Shutdown::Write);
         }
     }
 
@@ -225,39 +232,13 @@ fn client_config(
     provider: &std::sync::Arc<rustls::crypto::CryptoProvider>,
     tls: &TlsOptions<'_>,
 ) -> Result<rustls::ClientConfig, WebSocketError> {
-    let mut roots = rustls::RootCertStore::empty();
-    match tls.ca_bundle {
-        Some(path) => {
-            let file = std::fs::File::open(path)
-                .map_err(|e| WebSocketError::Tls(format!("{path}: {e}")))?;
-            let mut reader = std::io::BufReader::new(file);
-            let mut added = 0usize;
-            for cert in rustls_pemfile::certs(&mut reader) {
-                let cert = cert.map_err(|e| WebSocketError::Tls(format!("{path}: {e}")))?;
-                roots.add(cert).map_err(|e| WebSocketError::Tls(format!("{path}: {e}")))?;
-                added += 1;
-            }
-            if added == 0 {
-                return Err(WebSocketError::Tls(format!("{path}: no PEM certificates found")));
-            }
-        }
-        None => {
-            let loaded = rustls_native_certs::load_native_certs();
-            if loaded.certs.is_empty() && tls.verify_ssl {
-                let reason = loaded
-                    .errors
-                    .first()
-                    .map(|e| e.to_string())
-                    .unwrap_or_else(|| "no certificates found".to_string());
-                return Err(WebSocketError::Tls(format!(
-                    "could not load the system certificate store: {reason}"
-                )));
-            }
-            for cert in loaded.certs {
-                let _ = roots.add(cert);
-            }
-        }
-    }
+    // The same resolution the HTTP client uses, including the compiled-in fallback for a
+    // host with no system certificate store.
+    let roots = match awsc_runtime::roots::load(tls.ca_bundle) {
+        Ok((roots, _source)) => roots,
+        Err(_) if !tls.verify_ssl => rustls::RootCertStore::empty(),
+        Err(e) => return Err(WebSocketError::Tls(e)),
+    };
 
     let mut config = rustls::ClientConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()

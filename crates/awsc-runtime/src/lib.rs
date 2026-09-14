@@ -6,6 +6,7 @@ pub mod http;
 pub mod localtime;
 pub mod presign;
 pub mod retry;
+pub mod roots;
 pub mod rules;
 pub mod sigv4;
 pub mod transport;
