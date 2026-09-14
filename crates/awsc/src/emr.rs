@@ -24,6 +24,7 @@ pub fn dispatch(parsed: &Parsed, globals: &Globals) -> Result<Option<ExitCode>, 
         "add-steps" => add_steps(parsed, globals).map(Some),
         "install-applications" => install_applications(parsed, globals).map(Some),
         "create-default-roles" => create_default_roles(parsed, globals).map(Some),
+        "ssh" | "socks" | "get" | "put" => remote(parsed, globals).map(Some),
         "create-hbase-backup"
         | "restore-from-hbase-backup"
         | "schedule-hbase-backup"
@@ -76,6 +77,210 @@ fn add_steps(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> {
     }
     let response = client.call("add-job-flow-steps", Some(&input))?;
     render(&response, parsed)
+}
+
+/// `hadoop`, the user EMR's master node runs as.
+const SSH_USER: &str = "hadoop";
+/// A cluster in one of these is never going to answer.
+const TERMINATED_STATES: &[&str] = &["TERMINATED", "TERMINATING", "TERMINATED_WITH_ERRORS"];
+const STARTING_STATES: &[&str] = &["STARTING", "BOOTSTRAPPING"];
+
+/// `emr ssh`, `socks`, `get` and `put`: the four commands that hand off to `ssh`/`scp`.
+///
+/// Each resolves the master node's public DNS the same way — and **waits for the cluster
+/// to be running** if it is still starting, which is why this needed waiters. Then it
+/// prints the command line it is about to run and runs it, exiting with *that* process's
+/// status rather than one of its own.
+///
+/// The printed line includes the key-pair path but no credential, which is why printing
+/// it is safe and useful: it is exactly what you would type by hand.
+fn remote(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> {
+    let flags = [
+        "--cluster-id",
+        "--key-pair-file",
+        "--command",
+        "--src",
+        "--dest",
+        "--ssh-options",
+    ];
+    let args = crate::custom::take_args(parsed, &flags)?;
+    let value = |flag: &str| args.get(flag).copied().flatten();
+    let mut missing: Vec<&str> = ["--cluster-id", "--key-pair-file"]
+        .into_iter()
+        .filter(|flag| value(flag).is_none())
+        .collect();
+    let operation = parsed.operation.clone();
+    if matches!(operation.as_str(), "get" | "put") && value("--src").is_none() {
+        missing.push("--src");
+    }
+    if !missing.is_empty() {
+        return Err(crate::custom::missing_required(&missing));
+    }
+    let cluster_id = value("--cluster-id").unwrap_or_default();
+    let key_file = value("--key-pair-file").unwrap_or_default();
+    let ssh_options = crate::custom::take_list(parsed, "--ssh-options");
+
+    let (model, globals) = load(globals)?;
+    let client = emr_client(&model, &globals)?;
+    let master_dns = master_dns(&client, cluster_id)?;
+    let target = format!("{SSH_USER}@{master_dns}");
+
+    let options = build_ssh_options(&ssh_options);
+    let command: Vec<String> = match operation.as_str() {
+        "socks" => {
+            let mut command = vec!["ssh".to_string()];
+            command.extend(options);
+            command.extend(
+                ["-o", "ServerAliveInterval=10", "-ND", "8157", "-i", key_file, &target]
+                    .iter()
+                    .map(|s| s.to_string()),
+            );
+            command
+        }
+        "ssh" => {
+            let mut command = vec!["ssh".to_string()];
+            command.extend(options);
+            command.extend(
+                ["-o", "ServerAliveInterval=10", "-i", key_file, &target, "-t"]
+                    .iter()
+                    .map(|s| s.to_string()),
+            );
+            if let Some(remote_command) = value("--command") {
+                command.push(remote_command.to_string());
+            }
+            command
+        }
+        "put" => {
+            let src = value("--src").unwrap_or_default();
+            // The destination defaults to the *basename* of the source, so
+            // `put --src /a/b/c.txt` lands at `~/c.txt` on the master.
+            let dest = value("--dest").unwrap_or_else(|| src.rsplit('/').next().unwrap_or(src));
+            let mut command = vec!["scp".to_string(), "-r".to_string()];
+            command.extend(options);
+            command.extend(
+                ["-i", key_file, src, &format!("{target}:{dest}")]
+                    .iter()
+                    .map(|s| s.to_string()),
+            );
+            command
+        }
+        // `get`
+        _ => {
+            let src = value("--src").unwrap_or_default();
+            let dest = value("--dest").unwrap_or_else(|| src.rsplit('/').next().unwrap_or(src));
+            let mut command = vec!["scp".to_string(), "-r".to_string()];
+            command.extend(options);
+            command.extend(
+                ["-i", key_file, &format!("{target}:{src}"), dest]
+                    .iter()
+                    .map(|s| s.to_string()),
+            );
+            command
+        }
+    };
+
+    println!("{}", command.join(" "));
+    let status = std::process::Command::new(&command[0]).args(&command[1..]).status();
+    match status {
+        Ok(status) => Ok(exit::code(status.code().unwrap_or(1) as u8)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(Failure::new(
+            exit::GENERAL_ERROR,
+            if command[0] == "scp" {
+                "SCP or PSCP not found. Please install it and try again."
+            } else {
+                "SSH or Putty not found. Please install it and try again."
+            },
+        )),
+        Err(e) => Err(Failure::new(exit::GENERAL_ERROR, e)),
+    }
+}
+
+/// The `-o` flags to pass through.
+///
+/// `StrictHostKeyChecking=accept-new` is the default, which trusts a host the first time
+/// and pins it after — but it needs OpenSSH 7.6+, so an older `ssh` falls back to `=no`
+/// with a warning. A user-supplied `StrictHostKeyChecking=` replaces the default entirely
+/// rather than being appended after it, since the last one would not win reliably.
+fn build_ssh_options(extra: &[&str]) -> Vec<String> {
+    let overridden =
+        extra.iter().any(|option| option.to_lowercase().starts_with("stricthostkeychecking="));
+    let mut options = Vec::new();
+    if overridden {
+        for option in extra {
+            options.push("-o".to_string());
+            options.push((*option).to_string());
+        }
+        return options;
+    }
+    options.push("-o".to_string());
+    if supports_accept_new() {
+        options.push("StrictHostKeyChecking=accept-new".to_string());
+    } else {
+        eprintln!(
+            "WARNING: Your OpenSSH version does not support \
+             StrictHostKeyChecking=accept-new (requires OpenSSH 7.6+). Falling back to \
+             StrictHostKeyChecking=no. Upgrade to OpenSSH 7.6+ for improved security."
+        );
+        options.push("StrictHostKeyChecking=no".to_string());
+    }
+    for option in extra {
+        options.push("-o".to_string());
+        options.push((*option).to_string());
+    }
+    options
+}
+
+/// Does the local `ssh` understand `accept-new`? Asked by running it, as the reference
+/// does, rather than by parsing a version string.
+fn supports_accept_new() -> bool {
+    std::process::Command::new("ssh")
+        .args(["-G", "-o", "StrictHostKeyChecking=accept-new", "localhost"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+/// The master node's public DNS, once the cluster is running.
+fn master_dns(client: &Client<'_>, cluster_id: &str) -> Result<String, Failure> {
+    let described = client.call("describe-cluster", Some(&json!({ "ClusterId": cluster_id })))?;
+    let state = described
+        .get("Cluster")
+        .and_then(|cluster| cluster.get("Status"))
+        .and_then(|status| status.get("State"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+
+    if TERMINATED_STATES.contains(&state.as_str()) {
+        return Err(Failure::new(
+            exit::PARAM_VALIDATION,
+            awsc_runtime::RuntimeError::ParamValidation(
+                "The cluster is terminated or terminating.".to_string(),
+            ),
+        ));
+    }
+    if STARTING_STATES.contains(&state.as_str()) {
+        println!("Waiting for the cluster to start.");
+        let waiter = awsc_model::waiters::get("emr", "cluster-running").ok_or_else(|| {
+            Failure::new(exit::GENERAL_ERROR, "the emr cluster-running waiter is missing")
+        })?;
+        crate::wait::run(client, waiter, "cluster-running", Some(&json!({ "ClusterId": cluster_id })))
+            .map_err(|_| {
+                Failure::new(
+                    exit::GENERAL_ERROR,
+                    "The master node DNS is not available. The cluster is not running.",
+                )
+            })?;
+    }
+
+    // Re-read: the DNS is not populated until the cluster is up.
+    Ok(client
+        .call("describe-cluster", Some(&json!({ "ClusterId": cluster_id })))?
+        .get("Cluster")
+        .and_then(|cluster| cluster.get("MasterPublicDnsName"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string())
 }
 
 /// `aws emr create-default-roles`.
@@ -1295,6 +1500,27 @@ mod tests {
             "amazonaws.com.cn"
         );
         assert!(endpoint_suffix("https://example.com").is_err());
+    }
+
+    /// A user-supplied `StrictHostKeyChecking=` replaces the default rather than being
+    /// appended after it — two `-o` flags for the same option is not reliably last-wins.
+    #[test]
+    fn a_host_key_override_replaces_the_default() {
+        let options = build_ssh_options(&["StrictHostKeyChecking=no", "ConnectTimeout=30"]);
+        assert_eq!(
+            options,
+            vec!["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=30"]
+        );
+        assert_eq!(options.iter().filter(|o| o.starts_with("StrictHostKeyChecking")).count(), 1);
+    }
+
+    /// Any other option is appended *after* the default, which stays first.
+    #[test]
+    fn other_options_are_appended_after_the_default() {
+        let options = build_ssh_options(&["ConnectTimeout=30"]);
+        assert_eq!(options[0], "-o");
+        assert!(options[1].starts_with("StrictHostKeyChecking="));
+        assert_eq!(options[2..], ["-o", "ConnectTimeout=30"]);
     }
 
     #[test]
