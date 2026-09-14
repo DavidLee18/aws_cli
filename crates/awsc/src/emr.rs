@@ -23,6 +23,10 @@ pub fn dispatch(parsed: &Parsed, globals: &Globals) -> Result<Option<ExitCode>, 
         "modify-cluster-attributes" => modify_cluster_attributes(parsed, globals).map(Some),
         "add-steps" => add_steps(parsed, globals).map(Some),
         "install-applications" => install_applications(parsed, globals).map(Some),
+        "create-hbase-backup"
+        | "restore-from-hbase-backup"
+        | "schedule-hbase-backup"
+        | "disable-hbase-backups" => hbase(parsed, globals).map(Some),
         _ => Ok(None),
     }
 }
@@ -71,6 +75,186 @@ fn add_steps(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> {
     }
     let response = client.call("add-job-flow-steps", Some(&input))?;
     render(&response, parsed)
+}
+
+/// The four HBase commands.
+///
+/// All of them are the same shape: build an argument list for `emr.hbase.backup.Main`,
+/// wrap it in one step against `/home/hadoop/lib/hbase.jar`, and add it to the cluster.
+/// The step is always `CANCEL_AND_WAIT` — a backup that cannot start should leave the
+/// cluster alone rather than terminate it.
+///
+/// Like `install-applications`, these are AMI-era commands and are refused on a
+/// release-based cluster.
+fn hbase(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> {
+    let flags = [
+        "--cluster-id",
+        "--dir",
+        "--backup-version",
+        "--type",
+        "--interval",
+        "--unit",
+        "--start-time",
+        "--consistent",
+        "--full",
+        "--incremental",
+    ];
+    let args = crate::custom::take_args(parsed, &flags)?;
+    let Some(Some(cluster_id)) = args.get("--cluster-id").copied() else {
+        return Err(crate::custom::missing_required(&["--cluster-id"]));
+    };
+    let value = |flag: &str| args.get(flag).copied().flatten();
+    let given = |flag: &str| args.contains_key(flag);
+
+    let (step_name, step_args) = match parsed.operation.as_str() {
+        "create-hbase-backup" => {
+            let Some(dir) = value("--dir") else {
+                return Err(crate::custom::missing_required(&["--dir"]));
+            };
+            let mut built = vec![
+                "emr.hbase.backup.Main".to_string(),
+                "--backup".to_string(),
+                "--backup-dir".to_string(),
+                dir.to_string(),
+            ];
+            if given("--consistent") {
+                built.push("--consistent".to_string());
+            }
+            ("Backup HBase", built)
+        }
+        "restore-from-hbase-backup" => {
+            let Some(dir) = value("--dir") else {
+                return Err(crate::custom::missing_required(&["--dir"]));
+            };
+            let mut built = vec![
+                "emr.hbase.backup.Main".to_string(),
+                "--restore".to_string(),
+                // Note `--backup-dir`, not the `--backup-dir-to-restore` the constants
+                // also define: the restore path uses the same flag as a backup.
+                "--backup-dir".to_string(),
+                dir.to_string(),
+            ];
+            if let Some(version) = value("--backup-version") {
+                built.push("--backup-version".to_string());
+                built.push(version.to_string());
+            }
+            ("Restore HBase", built)
+        }
+        "schedule-hbase-backup" => ("Modify Backup Schedule", schedule_args(&args)?),
+        // `disable-hbase-backups` shares the *schedule* step name, since both modify the
+        // same schedule.
+        _ => ("Modify Backup Schedule", disable_args(&args)?),
+    };
+
+    let (model, globals) = load(globals)?;
+    let client = emr_client(&model, &globals)?;
+    if let Some(release) = client
+        .call("describe-cluster", Some(&json!({ "ClusterId": cluster_id })))?
+        .get("Cluster")
+        .and_then(|cluster| cluster.get("ReleaseLabel"))
+        .and_then(Value::as_str)
+    {
+        return Err(Failure::new(
+            exit::PARAM_VALIDATION,
+            awsc_runtime::RuntimeError::ParamValidation(format!(
+                "{} is not supported with '{release}' release.",
+                parsed.operation
+            )),
+        ));
+    }
+
+    let step = json!({
+        "Name": step_name,
+        "ActionOnFailure": "CANCEL_AND_WAIT",
+        "HadoopJarStep": { "Jar": "/home/hadoop/lib/hbase.jar", "Args": step_args },
+    });
+    let response = client.call(
+        "add-job-flow-steps",
+        Some(&json!({ "JobFlowId": cluster_id, "Steps": [step] })),
+    )?;
+    render(&response, parsed)
+}
+
+/// `schedule-hbase-backup`: the interval flags are named after the backup *type*, so a
+/// full backup and an incremental one write different flags with the same values.
+fn schedule_args(
+    args: &std::collections::BTreeMap<&str, Option<&str>>,
+) -> Result<Vec<String>, Failure> {
+    let value = |flag: &str| args.get(flag).copied().flatten();
+    let missing: Vec<&str> = ["--type", "--dir", "--interval", "--unit"]
+        .into_iter()
+        .filter(|flag| value(flag).is_none())
+        .collect();
+    if !missing.is_empty() {
+        return Err(crate::custom::missing_required(&missing));
+    }
+    let kind = value("--type").unwrap_or_default().to_lowercase();
+    if kind != "full" && kind != "incremental" {
+        return Err(param_error("invalid type. type should be either full or incremental."));
+    }
+    let unit = value("--unit").unwrap_or_default().to_lowercase();
+    if !["minutes", "hours", "days"].contains(&unit.as_str()) {
+        return Err(param_error(
+            "invalid unit. unit should be one of the following values: minutes, hours or days.",
+        ));
+    }
+
+    let mut built = vec![
+        "emr.hbase.backup.Main".to_string(),
+        "--set-scheduled-backup".to_string(),
+        "true".to_string(),
+        "--backup-dir".to_string(),
+        value("--dir").unwrap_or_default().to_string(),
+    ];
+    if args.contains_key("--consistent") {
+        built.push("--consistent".to_string());
+    }
+    let full = kind == "full";
+    built.push(
+        if full { "--full-backup-time-interval" } else { "--incremental-backup-time-interval" }
+            .to_string(),
+    );
+    built.push(value("--interval").unwrap_or_default().to_string());
+    built.push(
+        if full { "--full-backup-time-unit" } else { "--incremental-backup-time-unit" }
+            .to_string(),
+    );
+    built.push(unit);
+    built.push("--start-time".to_string());
+    // No `--start-time` means the literal string `now`, not an absent argument.
+    built.push(value("--start-time").unwrap_or("now").to_string());
+    Ok(built)
+}
+
+/// `disable-hbase-backups`: at least one of the two must be named, since disabling
+/// neither would be a no-op the user did not ask for.
+fn disable_args(
+    args: &std::collections::BTreeMap<&str, Option<&str>>,
+) -> Result<Vec<String>, Failure> {
+    let full = args.contains_key("--full");
+    let incremental = args.contains_key("--incremental");
+    if !full && !incremental {
+        return Err(param_error("Should specify at least one of --full and --incremental."));
+    }
+    let mut built = vec![
+        "emr.hbase.backup.Main".to_string(),
+        "--set-scheduled-backup".to_string(),
+        "false".to_string(),
+    ];
+    if full {
+        built.push("--disable-full-backups".to_string());
+    }
+    if incremental {
+        built.push("--disable-incremental-backups".to_string());
+    }
+    Ok(built)
+}
+
+fn param_error(message: &str) -> Failure {
+    Failure::new(
+        exit::PARAM_VALIDATION,
+        awsc_runtime::RuntimeError::ParamValidation(message.to_string()),
+    )
 }
 
 /// Applications the reference knows about at all.
@@ -801,6 +985,89 @@ mod tests {
         assert!(nope.message().contains("Unknown application: Nope"), "{}", nope.message());
 
         assert!(check_installable(&[json!({"Name": "hive"}), json!({"Name": "PIG"})]).is_ok());
+    }
+
+    fn flags(pairs: &[(&str, Option<&str>)]) -> std::collections::BTreeMap<&'static str, Option<&'static str>> {
+        // Leaked so the map can hold `&'static str` the way `take_args` produces.
+        pairs
+            .iter()
+            .map(|(flag, value)| {
+                let flag: &'static str = Box::leak(flag.to_string().into_boxed_str());
+                let value = value.map(|v| -> &'static str { Box::leak(v.to_string().into_boxed_str()) });
+                (flag, value)
+            })
+            .collect()
+    }
+
+    /// The interval flags are named after the backup *type*, so the same numbers go out
+    /// under different flags for a full and an incremental backup.
+    #[test]
+    fn the_schedule_flags_are_named_after_the_backup_type() {
+        let full = schedule_args(&flags(&[
+            ("--type", Some("full")),
+            ("--dir", Some("s3://b/")),
+            ("--interval", Some("2")),
+            ("--unit", Some("days")),
+        ]))
+        .expect("builds");
+        assert!(full.contains(&"--full-backup-time-interval".to_string()));
+        assert!(full.contains(&"--full-backup-time-unit".to_string()));
+
+        let incremental = schedule_args(&flags(&[
+            ("--type", Some("incremental")),
+            ("--dir", Some("s3://b/")),
+            ("--interval", Some("2")),
+            ("--unit", Some("days")),
+        ]))
+        .expect("builds");
+        assert!(incremental.contains(&"--incremental-backup-time-interval".to_string()));
+    }
+
+    /// An absent `--start-time` is the literal string `now`, not an omitted argument.
+    #[test]
+    fn no_start_time_means_the_word_now() {
+        let built = schedule_args(&flags(&[
+            ("--type", Some("full")),
+            ("--dir", Some("s3://b/")),
+            ("--interval", Some("1")),
+            ("--unit", Some("hours")),
+        ]))
+        .expect("builds");
+        let at = built.iter().position(|a| a == "--start-time").expect("has start-time");
+        assert_eq!(built[at + 1], "now");
+    }
+
+    #[test]
+    fn the_schedule_type_and_unit_are_validated() {
+        let bad_type = schedule_args(&flags(&[
+            ("--type", Some("sideways")),
+            ("--dir", Some("d")),
+            ("--interval", Some("1")),
+            ("--unit", Some("days")),
+        ]));
+        assert!(bad_type.expect_err("refuses").message().contains("invalid type"));
+
+        let bad_unit = schedule_args(&flags(&[
+            ("--type", Some("full")),
+            ("--dir", Some("d")),
+            ("--interval", Some("1")),
+            ("--unit", Some("fortnights")),
+        ]));
+        assert!(bad_unit.expect_err("refuses").message().contains("invalid unit"));
+    }
+
+    /// Disabling neither backup would be a no-op nobody asked for.
+    #[test]
+    fn disabling_requires_naming_at_least_one() {
+        assert!(disable_args(&flags(&[])).is_err());
+        let full = disable_args(&flags(&[("--full", None)])).expect("builds");
+        assert_eq!(full[2], "false");
+        assert!(full.contains(&"--disable-full-backups".to_string()));
+        assert!(!full.contains(&"--disable-incremental-backups".to_string()));
+
+        let both = disable_args(&flags(&[("--full", None), ("--incremental", None)]))
+            .expect("builds");
+        assert!(both.contains(&"--disable-incremental-backups".to_string()));
     }
 
     #[test]

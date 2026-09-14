@@ -586,7 +586,7 @@ views of one service. Deferred to the customization phase.
 
 ## Custom commands (first tranche)
 
-Twenty-three custom commands are now implemented, each verified by byte-diffing our stdout/stderr
+Twenty-seven custom commands are now implemented, each verified by byte-diffing our stdout/stderr
 and exit code against the reference. `scripts/compare-custom-commands.sh` reproduces the
 comparison; it pins our clock to the reference's via `AWSC_FIXED_TIME`, because presigned
 URLs embed a timestamp and would otherwise never compare equal.
@@ -613,6 +613,7 @@ URLs embed a timestamp and would otherwise never compare equal.
 | `emr terminate-clusters` / `modify-cluster-attributes` | call order and the inverted member against a stand-in |
 | `emr add-steps` | all six step types, both cluster generations, against a stand-in |
 | `emr install-applications` | both cluster generations and both rejection messages, against a stand-in |
+| `emr create-hbase-backup` / `restore-from-hbase-backup` / `schedule-hbase-backup` / `disable-hbase-backups` | all four argument lists against a stand-in |
 
 Facts worth recording, because each contradicts a reasonable assumption:
 
@@ -733,6 +734,14 @@ Facts worth recording, because each contradicts a reasonable assumption:
   not. **And its `--base-path` is built with no region**, so it points at `us-east-1` even
   on a `eu-west-1` cluster; that is the reference's bug and it is reproduced rather than
   corrected, because a "fixed" path would fetch something the reference never fetches.
+- **The four HBase commands are one step each, always `CANCEL_AND_WAIT`.** A backup that
+  cannot start should leave the cluster alone rather than terminate it. Three details:
+  `restore-from-hbase-backup` sends `--backup-dir`, *not* the `--backup-dir-to-restore`
+  the constants also define; `schedule-hbase-backup` names its interval flags after the
+  backup **type**, so the same numbers go out as `--full-backup-time-interval` or
+  `--incremental-backup-time-interval`; and an absent `--start-time` is the literal string
+  `now` rather than an omitted argument. `disable-hbase-backups` shares the schedule
+  command's step name, because both modify the same schedule.
 - **`codecommit credential-helper` is not SigV4.** The canonical request uses the literal
   method `GIT`, an empty canonical query, and an *empty payload-hash field* rather than a
   SHA-256; the timestamp inside the string-to-sign carries no trailing `Z`. The `Z` is
@@ -845,7 +854,7 @@ work as ordinary modelled operations, 50 were genuinely missing, and 4 belong to
 `agent-toolkit`, a service absent from our catalogue entirely.** Twelve more landed on 2026-09-14 — `dsql`'s two
 token commands, `dlm create-default-role`, `gamelift get-game-session-log`,
 `datapipeline`'s two, `servicecatalog generate`'s two, `emr-containers`' three and
-`ecs deploy`, `codeartifact login` and four of `emr`'s fourteen — leaving 37. So the help page filters its "not implemented" list
+`ecs deploy`, `codeartifact login` and eight of `emr`'s fourteen — leaving 33. So the help page filters its "not implemented" list
 by whether the name resolves in the command table — without that it told readers that 37
 working commands, every WhatsApp call among them, did not work. And the wording of both the
 error and the help section says "no service model describes it" rather than "hand-written",
