@@ -586,7 +586,7 @@ views of one service. Deferred to the customization phase.
 
 ## Custom commands (first tranche)
 
-Thirty-six custom commands are now implemented, each verified by byte-diffing our stdout/stderr
+Thirty-seven custom commands are now implemented, each verified by byte-diffing our stdout/stderr
 and exit code against the reference. `scripts/compare-custom-commands.sh` reproduces the
 comparison; it pins our clock to the reference's via `AWSC_FIXED_TIME`, because presigned
 URLs embed a timestamp and would otherwise never compare equal.
@@ -619,6 +619,7 @@ URLs embed a timestamp and would otherwise never compare equal.
 | `cloudtrail verify-query-results` | a real openssl-signed export, plus both tamper paths |
 | `deploy register` / `deregister` | both call sequences and the 0600 config file, against stand-ins |
 | `deploy push` | the uploaded bundle read back by Python's own `zipfile`, CRCs and all |
+| `gamelift upload-build` | three calls against a GameLift stand-in; the upload signed with GameLift's own credentials, bundle read back by `zipfile` |
 
 Facts worth recording, because each contradicts a reasonable assumption:
 
@@ -801,6 +802,22 @@ Facts worth recording, because each contradicts a reasonable assumption:
   **One divergence**: Python passes `allowZip64=True` and would keep going past 4 GiB
   where this refuses, explicitly and before the upload starts rather than at the far end
   of one.
+- **`gamelift upload-build` uploads with credentials that are not the caller's.**
+  `request-upload-credentials` returns temporary credentials *and* a bucket and key that
+  belong to GameLift, so the S3 client is built normally and then has its credentials
+  replaced — the caller's own credentials have no access to that bucket at all, and the
+  signed PUT carries GameLift's `x-amz-security-token`. Two consequences worth knowing:
+  `--endpoint-url` reaches the GameLift calls only, never the upload (the reference passes
+  it to the GameLift client alone); and a build id exists from the *first* call onward, so
+  a failure during the upload leaves an `INITIALIZED` build in the account. The reference
+  leaves it too, and deleting it would throw away the id a retry can reuse. The empty or
+  missing `--build-root` check therefore runs before anything is created, and it walks the
+  tree — a directory of empty directories is as useless as a missing one. Unlike
+  `deploy push` nothing is excluded from the bundle: hidden files are part of a build.
+  **One divergence**: the reference reports upload progress per chunk from an s3transfer
+  callback and never terminates the line, so its success message lands on the same one.
+  We have no per-chunk callback, so only the finished `(100.00%)` line is printed — on the
+  same line as the success message, as the reference leaves it.
 - **`codecommit credential-helper` is not SigV4.** The canonical request uses the literal
   method `GIT`, an empty canonical query, and an *empty payload-hash field* rather than a
   SHA-256; the timestamp inside the string-to-sign carries no trailing `Z`. The `Z` is

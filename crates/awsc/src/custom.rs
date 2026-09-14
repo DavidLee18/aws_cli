@@ -15,7 +15,7 @@ use crate::args::Parsed;
 use crate::client::{Client, Globals};
 use crate::exit;
 use crate::Failure;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::process::ExitCode;
 
@@ -60,6 +60,7 @@ pub(crate) const IMPLEMENTED: &[(&str, &str, &str)] = &[
     ("emr-containers", "delete-role-associations", "Remove the pod identity associations for an IAM role."),
     ("emr-containers", "update-role-trust-policy", "Add the EMR on EKS web-identity statement to a role's trust policy."),
     ("gamelift", "get-game-session-log", "Download a game session's compressed log archive to a file."),
+    ("gamelift", "upload-build", "Zip a build directory and upload it to GameLift's own bucket."),
     ("configservice", "subscribe", "Create the S3 bucket and SNS topic if needed, then start recording."),
     ("ecr", "get-login-password", "Print the password for `docker login` against a private registry."),
     ("ecr-public", "get-login-password", "Print the password for `docker login` against the public registry."),
@@ -132,7 +133,10 @@ pub fn dispatch(parsed: &Parsed) -> Result<Option<ExitCode>, Failure> {
             Some(code) => code,
             None => return Ok(None),
         },
-        ("gamelift", "get-game-session-log") => gamelift_get_log(parsed, &globals)?,
+        ("gamelift", _) => match crate::gamelift::dispatch(parsed, &globals)? {
+            Some(code) => code,
+            None => return Ok(None),
+        },
         ("logs", "tail") => crate::logs_tail::run(parsed, &globals)?,
         // `sso login`/`logout` are custom commands on a modelled service: neither is an
         // operation on it, so both are handled before the model lookup.
@@ -478,61 +482,6 @@ pub(crate) fn policy_partition(region: &str) -> &'static str {
     } else {
         "aws"
     }
-}
-
-/// `aws gamelift get-game-session-log`.
-///
-/// Asks GameLift for a presigned URL and downloads it to `--save-as`. The download is a
-/// plain unsigned GET: the URL already carries its own signature, so sending credentials
-/// with it would be both pointless and a leak.
-fn gamelift_get_log(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> {
-    let args = take_args(parsed, &["--game-session-id", "--save-as"])?;
-    let missing: Vec<&str> = ["--game-session-id", "--save-as"]
-        .into_iter()
-        .filter(|flag| !args.contains_key(flag))
-        .collect();
-    if !missing.is_empty() {
-        return Err(missing_required(&missing));
-    }
-    let value = |flag: &str| args.get(flag).copied().flatten().unwrap_or_default();
-    let session_id = value("--game-session-id");
-    let save_as = value("--save-as");
-
-    let region = resolve_region(globals)
-        .ok_or_else(|| Failure::new(exit::CONFIGURATION, awsc_runtime::RuntimeError::NoRegion))?;
-    // `globals` itself, not `for_other_service`: gamelift IS the service the user named,
-    // so a `--endpoint-url` they passed is meant for this call.
-    let other = Globals { region: Some(region), ..globals.clone() };
-    let model =
-        crate::load_model("gamelift").map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
-    let client = Client::new(&model, &other)?;
-    let response = client.call(
-        "get-game-session-log-url",
-        Some(&serde_json::json!({ "GameSessionId": session_id })),
-    )?;
-    let url = response
-        .get("PreSignedUrl")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| Failure::new(exit::GENERAL_ERROR, "'PreSignedUrl'"))?;
-
-    // `\r`, not `\n`: the success line that follows overwrites it.
-    print!("Downloading log archive for game session {session_id}...\r");
-    use std::io::Write;
-    let _ = std::io::stdout().flush();
-
-    let response = ureq::get(url)
-        .call()
-        .map_err(|e| Failure::new(exit::GENERAL_ERROR, format!("<urlopen error {e}>")))?;
-    let mut body = response.into_reader();
-    let mut file = std::fs::File::create(save_as)
-        .map_err(|e| Failure::new(exit::GENERAL_ERROR, format!("{save_as}: {e}")))?;
-    std::io::copy(&mut body, &mut file)
-        .map_err(|e| Failure::new(exit::GENERAL_ERROR, format!("{save_as}: {e}")))?;
-
-    println!(
-        "Successfully downloaded log archive for game session {session_id} to {save_as}"
-    );
-    Ok(exit::code(exit::SUCCESS))
 }
 
 /// `aws dlm create-default-role`.
@@ -1015,6 +964,99 @@ fn codecommit_region(host: &str) -> Option<&str> {
 }
 
 /// The region, honouring the profile's `region` key as botocore's precedence does.
+/// S3 switches to a multipart upload at this size, as the reference does.
+const MULTIPART_LIMIT: usize = 6 << 20;
+
+/// One `PutObject`, or a multipart upload past 6 MiB.
+///
+/// Shared by `deploy push` and `gamelift upload-build`, which both hand S3 a directory
+/// they have just zipped into memory.
+///
+/// The body is handed over as a file, because the request layer sends a streaming blob
+/// from a path rather than from memory — so the bundle is written to a temporary file
+/// (and each part to its own) and cleaned up afterwards.
+pub(crate) fn upload_to_s3(
+    s3: &Client<'_>,
+    bucket: &str,
+    key: &str,
+    bundle: &[u8],
+) -> Result<Value, Failure> {
+    if bundle.len() < MULTIPART_LIMIT {
+        let path = temp_file("bundle", bundle)?;
+        let result =
+            s3.call("put-object", Some(&json!({ "Bucket": bucket, "Key": key, "Body": path })));
+        let _ = std::fs::remove_file(&path);
+        return result;
+    }
+
+    let created =
+        s3.call("create-multipart-upload", Some(&json!({ "Bucket": bucket, "Key": key })))?;
+    let upload_id = created.get("UploadId").and_then(Value::as_str).unwrap_or_default().to_string();
+
+    let mut parts = Vec::new();
+    let mut result = Ok(Value::Null);
+    for (index, chunk) in bundle.chunks(MULTIPART_LIMIT).enumerate() {
+        let part_number = index + 1;
+        let path = match temp_file(&format!("part{part_number}"), chunk) {
+            Ok(path) => path,
+            Err(e) => {
+                result = Err(e);
+                break;
+            }
+        };
+        let uploaded = s3.call(
+            "upload-part",
+            Some(&json!({
+                "Bucket": bucket,
+                "Key": key,
+                "UploadId": upload_id,
+                "PartNumber": part_number,
+                "Body": path,
+            })),
+        );
+        let _ = std::fs::remove_file(&path);
+        match uploaded {
+            Ok(uploaded) => parts.push(json!({
+                "PartNumber": part_number,
+                "ETag": uploaded.get("ETag").cloned().unwrap_or(Value::Null),
+            })),
+            Err(e) => {
+                result = Err(e);
+                break;
+            }
+        }
+    }
+    if let Err(e) = result {
+        // A failed part leaves the upload open and billable, so it is aborted before the
+        // error is reported.
+        let _ = s3.call(
+            "abort-multipart-upload",
+            Some(&json!({ "Bucket": bucket, "Key": key, "UploadId": upload_id })),
+        );
+        return Err(e);
+    }
+    s3.call(
+        "complete-multipart-upload",
+        Some(&json!({
+            "Bucket": bucket,
+            "Key": key,
+            "UploadId": upload_id,
+            "MultipartUpload": { "Parts": parts },
+        })),
+    )
+}
+
+pub(crate) fn temp_file(label: &str, contents: &[u8]) -> Result<String, Failure> {
+    let path = std::env::temp_dir().join(format!(
+        "awsc-upload-{label}-{}-{}",
+        std::process::id(),
+        crate::now_unix()
+    ));
+    std::fs::write(&path, contents)
+        .map_err(|e| Failure::new(exit::GENERAL_ERROR, format!("{}: {e}", path.display())))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 pub(crate) fn resolve_region(globals: &Globals) -> Option<String> {
     let profile_region =
         awsc_runtime::credentials::profile::profile_region(globals.profile.as_deref());

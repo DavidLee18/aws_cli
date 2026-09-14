@@ -26,6 +26,7 @@ mod help;
 mod ecs;
 mod emr;
 mod emrcontainers;
+mod gamelift;
 mod dispatch;
 mod logs_tail;
 mod paginate;

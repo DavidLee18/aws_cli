@@ -294,9 +294,6 @@ fn deregister(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> {
     Ok(exit::code(exit::SUCCESS))
 }
 
-/// S3 switches to a multipart upload at this size, as the reference does.
-const MULTIPART_LIMIT: usize = 6 << 20;
-
 /// `aws deploy push`: zip a source tree, upload it, register it as a revision.
 ///
 /// Two rules decide what ends up in the bundle, and both are easy to get wrong:
@@ -351,7 +348,7 @@ fn push(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> {
     let s3_model = crate::load_model("s3api").map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
     let s3 = Client::new(&s3_model, &s3_globals)?;
 
-    let uploaded = upload(&s3, &bucket, &key, &bundle).map_err(|e| {
+    let uploaded = crate::custom::upload_to_s3(&s3, &bucket, &key, &bundle).map_err(|e| {
         Failure::new(
             exit::GENERAL_ERROR,
             format!(
@@ -482,88 +479,6 @@ fn compress(source: &str, ignore_hidden: bool) -> Result<Vec<u8>, Failure> {
         ));
     }
     archive.finish().map_err(|e| Failure::new(exit::GENERAL_ERROR, e.to_string()))
-}
-
-/// One `PutObject`, or a multipart upload past 6 MiB.
-///
-/// The body is handed over as a file, because the request layer sends a streaming blob
-/// from a path rather than from memory — so the bundle is written to a temporary file
-/// (and each part to its own) and cleaned up afterwards.
-fn upload(s3: &Client<'_>, bucket: &str, key: &str, bundle: &[u8]) -> Result<Value, Failure> {
-    if bundle.len() < MULTIPART_LIMIT {
-        let path = temp_file("bundle", bundle)?;
-        let result =
-            s3.call("put-object", Some(&json!({ "Bucket": bucket, "Key": key, "Body": path })));
-        let _ = std::fs::remove_file(&path);
-        return result;
-    }
-
-    let created =
-        s3.call("create-multipart-upload", Some(&json!({ "Bucket": bucket, "Key": key })))?;
-    let upload_id = created.get("UploadId").and_then(Value::as_str).unwrap_or_default().to_string();
-
-    let mut parts = Vec::new();
-    let mut result = Ok(Value::Null);
-    for (index, chunk) in bundle.chunks(MULTIPART_LIMIT).enumerate() {
-        let part_number = index + 1;
-        let path = match temp_file(&format!("part{part_number}"), chunk) {
-            Ok(path) => path,
-            Err(e) => {
-                result = Err(e);
-                break;
-            }
-        };
-        let uploaded = s3.call(
-            "upload-part",
-            Some(&json!({
-                "Bucket": bucket,
-                "Key": key,
-                "UploadId": upload_id,
-                "PartNumber": part_number,
-                "Body": path,
-            })),
-        );
-        let _ = std::fs::remove_file(&path);
-        match uploaded {
-            Ok(uploaded) => parts.push(json!({
-                "PartNumber": part_number,
-                "ETag": uploaded.get("ETag").cloned().unwrap_or(Value::Null),
-            })),
-            Err(e) => {
-                result = Err(e);
-                break;
-            }
-        }
-    }
-    if let Err(e) = result {
-        // A failed part leaves the upload open and billable, so it is aborted before the
-        // error is reported.
-        let _ = s3.call(
-            "abort-multipart-upload",
-            Some(&json!({ "Bucket": bucket, "Key": key, "UploadId": upload_id })),
-        );
-        return Err(e);
-    }
-    s3.call(
-        "complete-multipart-upload",
-        Some(&json!({
-            "Bucket": bucket,
-            "Key": key,
-            "UploadId": upload_id,
-            "MultipartUpload": { "Parts": parts },
-        })),
-    )
-}
-
-fn temp_file(label: &str, contents: &[u8]) -> Result<String, Failure> {
-    let path = std::env::temp_dir().join(format!(
-        "awsc-deploy-{label}-{}-{}",
-        std::process::id(),
-        crate::now_unix()
-    ));
-    std::fs::write(&path, contents)
-        .map_err(|e| Failure::new(exit::GENERAL_ERROR, format!("{}: {e}", path.display())))?;
-    Ok(path.to_string_lossy().into_owned())
 }
 
 /// `NoSuchEntity` is not a failure while cleaning up: it means the thing is already gone.
