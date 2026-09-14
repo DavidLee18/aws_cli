@@ -28,6 +28,7 @@ mod ec2instanceconnect;
 mod ecs;
 mod ecs_express;
 mod emr;
+mod emr_create;
 mod emrcontainers;
 mod gamelift;
 mod dispatch;

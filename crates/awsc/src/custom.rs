@@ -53,6 +53,7 @@ pub(crate) const IMPLEMENTED: &[(&str, &str, &str)] = &[
     ("emr", "put", "Copy a file onto the master node with scp."),
     ("emr", "socks", "Open a SOCKS tunnel on port 8157 to the master node."),
     ("emr", "ssh", "SSH into the master node, optionally running one command."),
+    ("emr", "create-cluster", "Launch a cluster, assembling one RunJobFlow request from fifty flags."),
     ("emr", "create-default-roles", "Create the IAM roles and instance profile EMR clusters need."),
     ("emr", "create-hbase-backup", "Add a step that backs HBase up to S3."),
     ("emr", "disable-hbase-backups", "Add a step that turns scheduled HBase backups off."),

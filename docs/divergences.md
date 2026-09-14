@@ -586,7 +586,7 @@ views of one service. Deferred to the customization phase.
 
 ## Custom commands (first tranche)
 
-Forty-four custom commands are now implemented, each verified by byte-diffing our stdout/stderr
+Forty-five custom commands are now implemented, each verified by byte-diffing our stdout/stderr
 and exit code against the reference. `scripts/compare-custom-commands.sh` reproduces the
 comparison; it pins our clock to the reference's via `AWSC_FIXED_TIME`, because presigned
 URLs embed a timestamp and would otherwise never compare equal.
@@ -610,6 +610,7 @@ URLs embed a timestamp and would otherwise never compare equal.
 | `emr-containers create-role-associations` / `delete-role-associations` | every association type against a stand-in |
 | `ecs deploy` | six calls across ECS and CodeDeploy driven against a stand-in, appspec hash recomputed |
 | `codeartifact login` | all six tools dry-run against a stand-in; npm run for real against a fake `npm` |
+| `emr create-cluster` | 18 cases covering both EMR eras and every validation; the assembled request checked on the wire against a stand-in |
 | `emr terminate-clusters` / `modify-cluster-attributes` | call order and the inverted member against a stand-in |
 | `emr add-steps` | all six step types, both cluster generations, against a stand-in |
 | `emr install-applications` | both cluster generations and both rejection messages, against a stand-in |
@@ -1031,6 +1032,41 @@ Facts worth recording, because each contradicts a reasonable assumption:
   `YYYYMMDDTHHMMSSZ` form that digest keys carry, and reports anything else as
   `Unable to parse date value` rather than guessing — the safer direction for a command
   whose answer is "these logs were not tampered with".
+
+- **`emr create-cluster` serves two eras of EMR, and which flag you give changes what the
+  others mean.** `--release-label` (emr-5.x and later) puts applications, EMRFS settings
+  and step jars into the request as structured fields, run by `command-runner.jar`;
+  `--ami-version` (the 2.x/3.x line) has none of that — applications become bootstrap
+  actions and install *steps*, EMRFS becomes a bootstrap action, and steps run through a
+  `script-runner.jar` fetched from a regional S3 bucket. Exactly one of the two is
+  required. That branch is why the command is 900 lines in the reference.
+
+  Behaviours worth knowing, each of which would otherwise build a different cluster than
+  asked for:
+
+  - **`--instance-count 3` is one master and two core**, not three of each: the shortcut
+    reserves one node for the master and gives the *remainder* to core.
+  - **`BidPrice=OnDemandPrice` is not a price.** It means "spot, at the on-demand rate",
+    which the API expresses by making the group `SPOT` and omitting `BidPrice` entirely.
+  - **`Tags` is always sent**, even when empty — the reference assigns it unconditionally
+    while every other optional field is only set when truthy.
+  - **Giving neither `--auto-terminate` nor `--no-auto-terminate` means the latter.** A
+    cluster that shuts down the moment its steps finish is not what silence implies.
+  - **A switch and its negation together are an error**, not a last-one-wins.
+  - **`--emrfs` and `--configurations` cannot both configure `emrfs-site`**, and a child
+    EMRFS key without its parent feature (`RetryCount` with no `Consistent`) is refused
+    rather than ignored.
+
+  **Shorthand is untyped, and that mattered.** `TargetOnDemandCapacity=1` parses as the
+  string `"1"`, which EMR rejects. The reference coerces each argument against its
+  declared schema; here the whole assembled request is coerced against the **model's**
+  input shape instead, which covers every numeric and boolean field in every structured
+  flag at once. Verified on the wire against a stand-in, not just in the assembled
+  document.
+
+  **One divergence:** the reference collects missing-application names in a `set` and
+  joins it, so their order in the error is arbitrary; ours sorts them, which at least
+  makes the message repeatable.
 
 - **`gamelift upload-build` uploads with credentials that are not the caller's.**
   `request-upload-credentials` returns temporary credentials *and* a bucket and key that

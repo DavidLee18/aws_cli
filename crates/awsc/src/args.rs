@@ -895,7 +895,7 @@ fn bind_value(
 
 /// Apply the model to a shorthand-parsed value: coerce scalars and wrap a bare value
 /// where the shape wants a list.
-fn coerce(model: &Model, target: &ShapeId, value: Value) -> Value {
+pub(crate) fn coerce(model: &Model, target: &ShapeId, value: Value) -> Value {
     match model.shape(target) {
         Some(Shape::Structure(s) | Shape::Union(s)) => match value {
             Value::Object(map) => Value::Object(

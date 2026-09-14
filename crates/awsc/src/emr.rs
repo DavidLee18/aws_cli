@@ -19,6 +19,7 @@ use std::process::ExitCode;
 
 pub fn dispatch(parsed: &Parsed, globals: &Globals) -> Result<Option<ExitCode>, Failure> {
     match parsed.operation.as_str() {
+        "create-cluster" => crate::emr_create::run(parsed, globals).map(Some),
         "terminate-clusters" => terminate_clusters(parsed, globals).map(Some),
         "modify-cluster-attributes" => modify_cluster_attributes(parsed, globals).map(Some),
         "add-steps" => add_steps(parsed, globals).map(Some),
@@ -833,12 +834,12 @@ fn parse_step(token: &str) -> Result<Value, Failure> {
 }
 
 /// The regional bucket an AMI-based cluster fetches its jars from.
-fn s3_link(region: &str, relative_path: &str) -> String {
+pub(crate) fn s3_link(region: &str, relative_path: &str) -> String {
     let region = if region.is_empty() { "us-east-1" } else { region };
     format!("s3://{region}.elasticmapreduce{relative_path}")
 }
 
-fn script_runner(region: &str) -> String {
+pub(crate) fn script_runner(region: &str) -> String {
     s3_link(region, "/libs/script-runner/script-runner.jar")
 }
 
@@ -852,7 +853,7 @@ fn key_value_list(raw: &str) -> Vec<Value> {
         .collect()
 }
 
-fn string_list(value: Option<&Value>) -> Vec<String> {
+pub(crate) fn string_list(value: Option<&Value>) -> Vec<String> {
     match value {
         Some(Value::Array(items)) => items
             .iter()
@@ -873,7 +874,7 @@ fn missing(structure: &str, field: &str) -> Failure {
 }
 
 /// Turn one parsed step into the `StepConfig` the API takes.
-fn build_step(
+pub(crate) fn build_step(
     step: &Value,
     release_label: Option<&str>,
     region: &str,
@@ -1020,7 +1021,7 @@ fn emr_client<'a>(
     Client::new(model, globals)
 }
 
-fn load(globals: &Globals) -> Result<(awsc_model::Model, Globals), Failure> {
+pub(crate) fn load(globals: &Globals) -> Result<(awsc_model::Model, Globals), Failure> {
     let region = crate::custom::resolve_region(globals)
         .ok_or_else(|| Failure::new(exit::CONFIGURATION, awsc_runtime::RuntimeError::NoRegion))?;
     let model = crate::load_model("emr").map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
@@ -1164,7 +1165,7 @@ fn attribute_calls(cluster_id: &str, given: &dyn Fn(&str) -> bool) -> Vec<(Strin
 }
 
 /// These responses go through the ordinary formatter, unlike most custom commands.
-fn render(value: &Value, parsed: &Parsed) -> Result<ExitCode, Failure> {
+pub(crate) fn render(value: &Value, parsed: &Parsed) -> Result<ExitCode, Failure> {
     // An empty response prints nothing at all, which is what these Set* calls return.
     if value.as_object().is_some_and(serde_json::Map::is_empty) {
         return Ok(exit::code(exit::SUCCESS));
