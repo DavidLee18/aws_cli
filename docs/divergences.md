@@ -586,7 +586,7 @@ views of one service. Deferred to the customization phase.
 
 ## Custom commands (first tranche)
 
-Twenty-one custom commands are now implemented, each verified by byte-diffing our stdout/stderr
+Twenty-two custom commands are now implemented, each verified by byte-diffing our stdout/stderr
 and exit code against the reference. `scripts/compare-custom-commands.sh` reproduces the
 comparison; it pins our clock to the reference's via `AWSC_FIXED_TIME`, because presigned
 URLs embed a timestamp and would otherwise never compare equal.
@@ -611,6 +611,7 @@ URLs embed a timestamp and would otherwise never compare equal.
 | `ecs deploy` | six calls across ECS and CodeDeploy driven against a stand-in, appspec hash recomputed |
 | `codeartifact login` | all six tools dry-run against a stand-in; npm run for real against a fake `npm` |
 | `emr terminate-clusters` / `modify-cluster-attributes` | call order and the inverted member against a stand-in |
+| `emr add-steps` | all six step types, both cluster generations, against a stand-in |
 
 Facts worth recording, because each contradicts a reasonable assumption:
 
@@ -709,6 +710,17 @@ Facts worth recording, because each contradicts a reasonable assumption:
   flag and the member are **opposites**: it sets `KeepJobFlowAliveWhenNoSteps` to *false*,
   because the flag says "shut down when idle" and the member says "stay alive". Getting
   that backwards keeps a cluster running and costs money quietly.
+- **An EMR step is built differently depending on the cluster's generation, so `add-steps`
+  has to ask first.** A *release-based* cluster (EMR 4.x+, which has a `ReleaseLabel`) runs
+  `command-runner.jar` with a command name — `spark-submit`, `hive-script`; an *AMI-based*
+  one (3.x and 2.x) runs a jar fetched from `s3://<region>.elasticmapreduce/...` and has to
+  be told `--hive-versions latest` as well. So the command issues a `DescribeCluster`
+  before it can build anything. `Impala` is not a missing type on a release-based cluster,
+  it genuinely never existed there, and is refused rather than translated.
+- **A `--steps` token is one shorthand document, and the tokens must stay apart.**
+  `--steps Type=Hive,Args=[a] Type=Pig,Args=[b]` is two documents; joining them with a
+  space makes one malformed one, which is why `custom::take_list` reads the values back out
+  of `extras` rather than from the space-joined `parameters`.
 - **`codecommit credential-helper` is not SigV4.** The canonical request uses the literal
   method `GIT`, an empty canonical query, and an *empty payload-hash field* rather than a
   SHA-256; the timestamp inside the string-to-sign carries no trailing `Z`. The `Z` is
@@ -821,7 +833,7 @@ work as ordinary modelled operations, 50 were genuinely missing, and 4 belong to
 `agent-toolkit`, a service absent from our catalogue entirely.** Twelve more landed on 2026-09-14 — `dsql`'s two
 token commands, `dlm create-default-role`, `gamelift get-game-session-log`,
 `datapipeline`'s two, `servicecatalog generate`'s two, `emr-containers`' three and
-`ecs deploy`, `codeartifact login` and two of `emr`'s fourteen — leaving 39. So the help page filters its "not implemented" list
+`ecs deploy`, `codeartifact login` and three of `emr`'s fourteen — leaving 38. So the help page filters its "not implemented" list
 by whether the name resolves in the command table — without that it told readers that 37
 working commands, every WhatsApp call among them, did not work. And the wording of both the
 error and the help section says "no service model describes it" rather than "hand-written",

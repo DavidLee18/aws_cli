@@ -137,6 +137,35 @@ pub fn dispatch(parsed: &Parsed) -> Result<Option<ExitCode>, Failure> {
     Ok(Some(outcome))
 }
 
+/// The individual value tokens a flag was given, in argv order.
+///
+/// `parameters` joins them with spaces, which is right for a list of scalars and wrong
+/// for a list of *structures*: `--steps Type=Hive,Args=[a,b] Type=Pig,Args=[c]` is two
+/// shorthand documents, and joining them makes one malformed one. `extras` keeps them
+/// apart, so they are read back from there.
+pub(crate) fn take_list<'a>(parsed: &'a Parsed, flag: &str) -> Vec<&'a str> {
+    let mut values = Vec::new();
+    let mut collecting = false;
+    for token in &parsed.extras {
+        if token.starts_with("--") {
+            // `--flag=value` carries its single value with it.
+            if let Some((name, inline)) = token.split_once('=') {
+                if name == flag {
+                    values.push(inline);
+                }
+                collecting = false;
+                continue;
+            }
+            collecting = token == flag;
+            continue;
+        }
+        if collecting {
+            values.push(token.as_str());
+        }
+    }
+    values
+}
+
 /// `An error occurred (ParamValidation): Unknown options: --a,1,--b`
 ///
 /// The reference joins the *raw argv tokens* with a comma, so `--flag value` contributes
