@@ -586,7 +586,7 @@ views of one service. Deferred to the customization phase.
 
 ## Custom commands (first tranche)
 
-Thirty-two custom commands are now implemented, each verified by byte-diffing our stdout/stderr
+Thirty-three custom commands are now implemented, each verified by byte-diffing our stdout/stderr
 and exit code against the reference. `scripts/compare-custom-commands.sh` reproduces the
 comparison; it pins our clock to the reference's via `AWSC_FIXED_TIME`, because presigned
 URLs embed a timestamp and would otherwise never compare equal.
@@ -616,6 +616,7 @@ URLs embed a timestamp and would otherwise never compare equal.
 | `emr create-hbase-backup` / `restore-from-hbase-backup` / `schedule-hbase-backup` / `disable-hbase-backups` | all four argument lists against a stand-in |
 | `emr create-default-roles` | the 18-call sequence, three trust policies and the config write, against a stand-in |
 | `emr ssh` / `socks` / `get` / `put` | every command line, against a stand-in cluster and fake `ssh`/`scp` |
+| `cloudtrail verify-query-results` | a real openssl-signed export, plus both tamper paths |
 
 Facts worth recording, because each contradicts a reasonable assumption:
 
@@ -765,6 +766,16 @@ Facts worth recording, because each contradicts a reasonable assumption:
   than being appended after it, because two `-o` flags for one option are not reliably
   last-wins. A cluster that is still starting is waited for with the `cluster-running`
   waiter, which is the second thing the waiter work paid for.
+- **`cloudtrail verify-query-results` is two independent checks, and the order is the
+  point.** First every exported file is hashed against `result_sign.json`; only then is the
+  sign file's own signature verified. A tampered export is caught by the first with a
+  message naming the file; only a tampered *sign file* reaches the second. Reversed, a
+  changed data file would be reported as "invalid signature", which sends the reader
+  looking in the wrong place. The signed document is the file hashes joined by **single
+  spaces in the sign file's order** — not sorted, not the order on disk. The key is matched
+  by fingerprint among the keys CloudTrail was using in the **twenty days after** the query
+  completed, and a key that does not turn up is a hard failure: an unverifiable export is
+  not a verified one.
 - **`codecommit credential-helper` is not SigV4.** The canonical request uses the literal
   method `GIT`, an empty canonical query, and an *empty payload-hash field* rather than a
   SHA-256; the timestamp inside the string-to-sign carries no trailing `Z`. The `Z` is
@@ -877,7 +888,7 @@ work as ordinary modelled operations, 50 were genuinely missing, and 4 belong to
 `agent-toolkit`, a service absent from our catalogue entirely.** Twelve more landed on 2026-09-14 — `dsql`'s two
 token commands, `dlm create-default-role`, `gamelift get-game-session-log`,
 `datapipeline`'s two, `servicecatalog generate`'s two, `emr-containers`' three and
-`ecs deploy`, `codeartifact login` and thirteen of `emr`'s fourteen — leaving 28. So the help page filters its "not implemented" list
+`ecs deploy`, `codeartifact login` and thirteen of `emr`'s fourteen and `cloudtrail verify-query-results` — leaving 27. So the help page filters its "not implemented" list
 by whether the name resolves in the command table — without that it told readers that 37
 working commands, every WhatsApp call among them, did not work. And the wording of both the
 error and the help section says "no service model describes it" rather than "hand-written",

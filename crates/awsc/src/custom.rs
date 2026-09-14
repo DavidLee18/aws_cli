@@ -30,6 +30,7 @@ use std::process::ExitCode;
 /// catches a new arm that forgets to add its entry.
 pub(crate) const IMPLEMENTED: &[(&str, &str, &str)] = &[
     ("cloudfront", "sign", "Sign a URL for CloudFront private content, with a canned or a custom policy."),
+    ("cloudtrail", "verify-query-results", "Check exported query results against CloudTrail's signature."),
     ("codeartifact", "login", "Point npm, pip, twine, nuget, dotnet or swift at a CodeArtifact repository."),
     ("codecommit", "credential-helper", "Answer git's credential protocol on stdin with a SigV4-derived password."),
     ("configservice", "get-status", "Print the status of the configuration recorders and delivery channels."),
@@ -97,6 +98,10 @@ pub fn dispatch(parsed: &Parsed) -> Result<Option<ExitCode>, Failure> {
         ("dlm", "create-default-role") => dlm_create_default_role(parsed, &globals)?,
         // Two commands each, so these get their own modules and their own matches.
         ("datapipeline", _) => match crate::datapipeline::dispatch(parsed, &globals)? {
+            Some(code) => code,
+            None => return Ok(None),
+        },
+        ("cloudtrail", _) => match crate::cloudtrail::dispatch(parsed, &globals)? {
             Some(code) => code,
             None => return Ok(None),
         },

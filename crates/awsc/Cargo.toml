@@ -30,7 +30,9 @@ md-5 = "0.10"
 # dependency is the wrong trade.
 ureq = { version = "2", default-features = false, features = ["tls"] }
 flate2 = "1"
-sha2 = "0.10"
+# `oid` so `rsa::Pkcs1v15Sign::new::<Sha256>` can name the digest in the padding, which
+# `cloudtrail verify-query-results` needs to verify a signature.
+sha2 = { version = "0.10", features = ["oid"] }
 # `cloudfront sign` only. CloudFront requires RSA PKCS#1 v1.5 over **SHA-1**, which
 # aws-lc-rs (already here under rustls) can verify but cannot sign -- its signing
 # encodings stop at SHA-256. Signing is not exposed to attacker-chosen input, so the
