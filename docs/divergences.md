@@ -586,7 +586,7 @@ views of one service. Deferred to the customization phase.
 
 ## Custom commands (first tranche)
 
-Forty-three custom commands are now implemented, each verified by byte-diffing our stdout/stderr
+Forty-four custom commands are now implemented, each verified by byte-diffing our stdout/stderr
 and exit code against the reference. `scripts/compare-custom-commands.sh` reproduces the
 comparison; it pins our clock to the reference's via `AWSC_FIXED_TIME`, because presigned
 URLs embed a timestamp and would otherwise never compare equal.
@@ -616,6 +616,7 @@ URLs embed a timestamp and would otherwise never compare equal.
 | `emr create-hbase-backup` / `restore-from-hbase-backup` / `schedule-hbase-backup` / `disable-hbase-backups` | all four argument lists against a stand-in |
 | `emr create-default-roles` | the 18-call sequence, three trust policies and the config write, against a stand-in |
 | `emr ssh` / `socks` / `get` / `put` | every command line, against a stand-in cluster and fake `ssh`/`scp` |
+| `cloudtrail validate-logs` | a genuine openssl-signed three-digest chain validated end to end, plus four tamper cases each caught |
 | `cloudtrail verify-query-results` | a real openssl-signed export, plus both tamper paths |
 | `deploy register` / `deregister` | both call sequences and the 0600 config file, against stand-ins |
 | `deploy install` / `uninstall` | both driven end to end on Ubuntu 22.04 as root, in an `ubuntu:22.04` container against an S3 stand-in |
@@ -990,6 +991,46 @@ Facts worth recording, because each contradicts a reasonable assumption:
   **One divergence:** the Windows administrator check. The reference calls
   `ctypes.windll.shell32.IsUserAnAdmin()`; there is no equivalent without a Win32 binding,
   so this runs `net session`, which only an administrator can run.
+
+- **`cloudtrail validate-logs` walks a backwards-linked chain, and the link is inside the
+  signature.** CloudTrail writes an hourly digest listing the log files it delivered with
+  their SHA-256s; each digest is RSA-signed, and the signed string's **last line is the
+  previous digest's signature**. So re-signing one digest in the middle is not enough —
+  every digest after it would have to be re-signed too. The command walks from the newest
+  digest in range backwards via `previousDigestS3Object`.
+
+  Three consequences that shape the code:
+
+  - **A broken link is not the end of the walk.** A digest with no previous means the
+    trail was switched off for a while; the traversal drops to the next-oldest digest S3
+    still has and reports the gap rather than stopping. Verified: deleting a digest from
+    the middle of a chain leaves the walk reporting `INVALID: not found` and then
+    continuing to check the remaining logs.
+  - **The log hash is of the *inflated* contents**, so re-compressing a log at a different
+    level does not look like tampering — but bytes appended *after* the gzip member do,
+    and are reported as `unexpected data after end of compressed stream`.
+  - **A digest names its own location**, so a copy of it elsewhere in the bucket is caught
+    even though its signature would still verify.
+
+  Verified against a stand-in serving a real, **openssl-signed** three-digest chain: the
+  chain validates (`3/3 digest files valid`, `3/3 log files valid`, exit 0), and each of
+  four tampering attempts is caught with the reference's wording and exit 1 — a changed
+  log (`hash value doesn't match`), a changed digest (`signature verification failed`), a
+  deleted digest (`not found`), and bytes appended to a log. `tests/golden/cloudtrail-digest-signature.json`
+  keeps an openssl signature so the verification path is covered without a server.
+
+  Two notes on scope: the public key is a base64 **PKCS#1** `RSAPublicKey`, not the
+  `SubjectPublicKeyInfo` most tools emit, which is why a bad key is reported as "Unable to
+  load PKCS #1 key" rather than as a bad signature; and **organization trails are
+  implemented but untested** — the `--account-id` requirement and the
+  `describe-organization` lookup are ported, but there was no organization to run them
+  against.
+
+  **One divergence:** date parsing. The reference uses `dateutil.parser.parse`, which
+  accepts a very wide range of formats. This accepts ISO-8601 timestamps and the compact
+  `YYYYMMDDTHHMMSSZ` form that digest keys carry, and reports anything else as
+  `Unable to parse date value` rather than guessing — the safer direction for a command
+  whose answer is "these logs were not tampered with".
 
 - **`gamelift upload-build` uploads with credentials that are not the caller's.**
   `request-upload-credentials` returns temporary credentials *and* a bucket and key that

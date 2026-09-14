@@ -30,6 +30,7 @@ const SIGN_FILE_NAME: &str = "result_sign.json";
 pub fn dispatch(parsed: &Parsed, globals: &Globals) -> Result<Option<ExitCode>, Failure> {
     match parsed.operation.as_str() {
         "verify-query-results" => verify_query_results(parsed, globals).map(Some),
+        "validate-logs" => crate::cloudtrail_validate::run(parsed, globals).map(Some),
         _ => Ok(None),
     }
 }
@@ -261,6 +262,11 @@ fn validate_signature(public_key_base64: &str, sign_file: &Value) -> Result<(), 
     let digest = sha2::Sha256::digest(string_to_sign.as_bytes());
     key.verify(rsa::Pkcs1v15Sign::new::<sha2::Sha256>(), &digest, &signature)
         .map_err(|_| validation_error("Invalid signature in sign file"))
+}
+
+/// Shared with `validate-logs`, which loads the same kind of PKCS#1 key.
+pub(crate) fn base64_decode_public(text: &str) -> Option<Vec<u8>> {
+    base64_decode(text)
 }
 
 fn base64_decode(text: &str) -> Option<Vec<u8>> {

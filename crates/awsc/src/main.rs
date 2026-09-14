@@ -14,6 +14,7 @@ mod args;
 mod catalogue;
 mod cloudfront;
 mod cloudtrail;
+mod cloudtrail_validate;
 mod codeartifact;
 mod codedeploy;
 mod color;

@@ -30,6 +30,7 @@ use std::process::ExitCode;
 /// catches a new arm that forgets to add its entry.
 pub(crate) const IMPLEMENTED: &[(&str, &str, &str)] = &[
     ("cloudfront", "sign", "Sign a URL for CloudFront private content, with a canned or a custom policy."),
+    ("cloudtrail", "validate-logs", "Verify the digest chain and log hashes for a trail over a period."),
     ("cloudtrail", "verify-query-results", "Check exported query results against CloudTrail's signature."),
     ("codeartifact", "login", "Point npm, pip, twine, nuget, dotnet or swift at a CodeArtifact repository."),
     ("codecommit", "credential-helper", "Answer git's credential protocol on stdin with a SigV4-derived password."),
