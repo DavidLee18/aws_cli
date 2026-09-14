@@ -18,6 +18,7 @@ mod client;
 mod configure;
 mod errorformat;
 mod custom;
+mod datapipeline;
 mod help;
 mod dispatch;
 mod logs_tail;

@@ -543,7 +543,7 @@ views of one service. Deferred to the customization phase.
 
 ## Custom commands (first tranche)
 
-Eleven custom commands are now implemented, each verified by byte-diffing our stdout/stderr
+Thirteen custom commands are now implemented, each verified by byte-diffing our stdout/stderr
 and exit code against the reference. `scripts/compare-custom-commands.sh` reproduces the
 comparison; it pins our clock to the reference's via `AWSC_FIXED_TIME`, because presigned
 URLs embed a timestamp and would otherwise never compare equal.
@@ -560,6 +560,8 @@ URLs embed a timestamp and would otherwise never compare equal.
 | `dsql generate-db-connect-auth-token` (+ `-admin-`) | shares the presign path already byte-diffed for `rds`/`eks` |
 | `dlm create-default-role` | all four paths driven against an IAM stand-in |
 | `gamelift get-game-session-log` | driven against a GameLift stand-in (rpcv2Cbor) plus a file server |
+| `datapipeline create-default-roles` | 13-call IAM sequence driven against a stand-in |
+| `datapipeline list-runs` | column widths and pagination driven against a stand-in |
 
 Facts worth recording, because each contradicts a reasonable assumption:
 
@@ -593,6 +595,16 @@ Facts worth recording, because each contradicts a reasonable assumption:
   global `--endpoint-url` applies to it, and the presigned download that follows is
   deliberately unsigned — the URL carries its own signature and attaching credentials
   would leak them to wherever it points.
+- **`datapipeline list-runs` prints something different depending on whether `--output`
+  was *passed*, not on what it resolved to.** With no `--output` it uses a layout of its
+  own (two lines per run, `%-50.50s` columns that truncate as well as pad); with any
+  `--output` it uses the ordinary formatter. `--output json` and no flag at all are
+  therefore completely different output, and the parser has to remember that the flag was
+  given — the resolved default is not enough to tell them apart.
+- **`datapipeline list-runs` defaults to the last four days.** With neither `--start-interval`
+  nor `--schedule-interval`, the query window is `now-4d .. now`, so an old pipeline looks
+  empty rather than erroring. Its `--status` validator also accepts `shutting_down`, which
+  its own help text omits.
 - **`codecommit credential-helper` is not SigV4.** The canonical request uses the literal
   method `GIT`, an empty canonical query, and an *empty payload-hash field* rather than a
   SHA-256; the timestamp inside the string-to-sign carries no trailing `Z`. The `Z` is
@@ -694,9 +706,9 @@ socialmessaging's 30 `*whatsapp*` calls).
 
 Auditing all 103 against the binary (2026-09-13): **12 were implemented here, 37 already
 work as ordinary modelled operations, 50 were genuinely missing, and 4 belong to
-`agent-toolkit`, a service absent from our catalogue entirely.** Four more landed on
-2026-09-14 — `dsql`'s two token commands, `dlm create-default-role` and
-`gamelift get-game-session-log` — leaving 50. So the help page filters its "not implemented" list
+`agent-toolkit`, a service absent from our catalogue entirely.** Six more landed on 2026-09-14 — `dsql`'s two token
+commands, `dlm create-default-role`, `gamelift get-game-session-log` and
+`datapipeline`'s two — leaving 48. So the help page filters its "not implemented" list
 by whether the name resolves in the command table — without that it told readers that 37
 working commands, every WhatsApp call among them, did not work. And the wording of both the
 error and the help section says "no service model describes it" rather than "hand-written",

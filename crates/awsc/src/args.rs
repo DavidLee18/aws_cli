@@ -50,6 +50,10 @@ pub struct Parsed {
     pub profile: Option<String>,
     pub endpoint_url: Option<String>,
     pub output: Format,
+    /// Was `--output` actually passed? `datapipeline list-runs` prints a layout of its own
+    /// when it was not, and the ordinary formatter when it was — so the default value is
+    /// not enough to tell them apart.
+    pub output_given: bool,
     pub debug: bool,
     /// `--no-paginate`; auto-pagination is on by default for paginated operations.
     pub no_paginate: bool,
@@ -148,6 +152,7 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
         profile: None,
         endpoint_url: None,
         output: Format::Json,
+        output_given: false,
         debug: false,
         no_paginate: false,
         max_items: None,
@@ -226,6 +231,7 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
                 let v = take_value()?;
                 parsed.output = Format::parse(&v)
                     .ok_or_else(|| format!("invalid --output `{v}`"))?;
+                parsed.output_given = true;
             }
             "--debug" => parsed.debug = true,
             // Pagination controls are injected into every paginated operation, so they

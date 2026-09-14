@@ -32,6 +32,8 @@ pub(crate) const IMPLEMENTED: &[(&str, &str, &str)] = &[
     ("cloudfront", "sign", "Sign a URL for CloudFront private content, with a canned or a custom policy."),
     ("codecommit", "credential-helper", "Answer git's credential protocol on stdin with a SigV4-derived password."),
     ("configservice", "get-status", "Print the status of the configuration recorders and delivery channels."),
+    ("datapipeline", "create-default-roles", "Create the IAM roles and instance profile Data Pipeline uses."),
+    ("datapipeline", "list-runs", "List a pipeline's runs, filtered by status or time window."),
     ("dlm", "create-default-role", "Create the IAM role Data Lifecycle Manager uses, if it does not exist."),
     ("dsql", "generate-db-connect-admin-auth-token", "Print a signed token for connecting to a DSQL cluster as admin."),
     ("dsql", "generate-db-connect-auth-token", "Print a signed token for connecting to a DSQL cluster."),
@@ -74,6 +76,11 @@ pub fn dispatch(parsed: &Parsed) -> Result<Option<ExitCode>, Failure> {
         ("cloudfront", "sign") => crate::cloudfront::sign(parsed)?,
         ("configservice", "subscribe") => configservice_subscribe(parsed, &globals)?,
         ("dlm", "create-default-role") => dlm_create_default_role(parsed, &globals)?,
+        // Two commands, so the service gets its own module and its own match.
+        ("datapipeline", _) => match crate::datapipeline::dispatch(parsed, &globals)? {
+            Some(code) => code,
+            None => return Ok(None),
+        },
         ("gamelift", "get-game-session-log") => gamelift_get_log(parsed, &globals)?,
         ("logs", "tail") => crate::logs_tail::run(parsed, &globals)?,
         // `sso login`/`logout` are custom commands on a modelled service: neither is an
@@ -896,7 +903,7 @@ fn codecommit_region(host: &str) -> Option<&str> {
 }
 
 /// The region, honouring the profile's `region` key as botocore's precedence does.
-fn resolve_region(globals: &Globals) -> Option<String> {
+pub(crate) fn resolve_region(globals: &Globals) -> Option<String> {
     let profile_region =
         awsc_runtime::credentials::profile::profile_region(globals.profile.as_deref());
     awsc_runtime::endpoint::resolve_region(globals.region.as_deref(), profile_region.as_deref())
