@@ -854,6 +854,7 @@ impl<'a> Client<'a> {
                 ),
             );
             failure.service_error_code = Some(code);
+            failure.http_status = Some(response.status);
                 failure.service_error_message = Some(message);
             return Err(failure);
         }
@@ -1008,6 +1009,7 @@ impl<'a> Client<'a> {
                 ),
             );
             failure.service_error_code = Some(code);
+            failure.http_status = Some(response.status);
                 failure.service_error_message = Some(message);
             return Err(failure);
         }

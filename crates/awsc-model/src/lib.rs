@@ -16,6 +16,7 @@ pub mod paginators;
 pub mod protocol_metadata;
 pub mod service_names;
 pub mod surface_overlays;
+pub mod waiters;
 pub mod shape;
 pub mod shape_id;
 

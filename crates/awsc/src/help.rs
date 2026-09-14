@@ -120,6 +120,14 @@ fn service_page(service: &str) -> Result<String, crate::Failure> {
     let implemented: Vec<&str> =
         custom.iter().filter(|name| crate::is_implemented(&cli_service, name)).copied().collect();
     names.extend(&implemented);
+    // `wait <name>` is a command per waiter, and 381 of them exist. They are not in the
+    // model-derived table, so a help page without them lists a service as having no way
+    // to wait for anything.
+    let waits: Vec<String> = awsc_model::waiters::names(&cli_service)
+        .into_iter()
+        .map(|waiter| format!("wait {waiter}"))
+        .collect();
+    names.extend(waits.iter().map(String::as_str));
     names.sort_unstable();
     out.push_str("OPERATIONS\n");
     out.push_str(&columns(&names));

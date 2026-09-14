@@ -409,10 +409,39 @@ every operation — they are **not** global args. Paginated operations additiona
 `--starting-token` / `--max-items` / `--page-size`
 (`customizations/paginate.py:78-231`). Now derived from `smithy.api#paginated`.
 
-### `wait` subcommands ✅ fixed
+### `wait` subcommands ✅ fixed — surface AND behaviour
 
 `customizations/waiters.py:25-44` injects a `wait` command per waiter, named
-`xform_name(waiter_name, '-')`. Derived from `smithy.waiters#waitable`.
+`xform_name(waiter_name, '-')`.
+
+The surface was derived long ago; **the binary implemented none of them until
+2026-09-14**, so all 381 waiters across 71 services reported `Found invalid choice
+'wait'`. They now run (`crates/awsc/src/wait.rs`).
+
+**The definitions come from botocore, not from Smithy**, even though the vendored models
+carry `smithy.waiters#waitable` traits with the same acceptors. Smithy specifies
+exponential backoff between `minDelay` and `maxDelay` and **no attempt limit**; botocore
+polls `maxAttempts` times at a fixed `delay` and then fails. A waiter derived from the
+Smithy trait would look right and never time out, so `scripts/extract-waiters.py` vendors
+botocore's `waiters-2.json` into `data/waiters.json`, joined to CLI names through
+`metadata.serviceId` — the same key `service-names.json` already uses, because the
+directory names disagree (`codedeploy` → `deploy`, `config` → `configservice`).
+
+Four behaviours worth keeping straight:
+
+- The **first attempt is immediate** and the delay is paid *between* attempts, so a
+  resource that is already ready returns without waiting.
+- **An error is not necessarily a failure.** `error` acceptors are how "not there yet" and
+  "it is gone" are spelled; an error that matches no acceptor is what actually fails.
+  `"expected": true` on an error matcher means *any* error, and `false` matches a
+  successful response.
+- **`pathAll` over an empty list is false**, not vacuously true — a fleet with no
+  instances is not a fleet of running instances.
+- A terminal failure state exits **255**, not 254: botocore raises `WaiterError` rather
+  than reporting the service's own error.
+
+Also new: `Failure` now carries the HTTP status, because 40 of these waiters have `status`
+acceptors and a waiter that cannot see the status cannot tell "gone" from "broken".
 
 ### Resource lifecycle operations ✅ fixed (found by the full sweep)
 

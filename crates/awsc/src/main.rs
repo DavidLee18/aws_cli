@@ -27,6 +27,7 @@ mod paginate;
 mod s3;
 mod servicecatalog;
 mod sso;
+mod wait;
 mod yaml;
 mod exit;
 
@@ -75,6 +76,11 @@ pub struct Failure {
     /// `configservice subscribe` treats a `404` from `HeadBucket` as "create it" and
     /// anything else as "it exists".
     pub service_error_code: Option<String>,
+    /// The HTTP status the service replied with, when this came from a response.
+    ///
+    /// Only `wait` reads it: 40 of botocore's waiters have `status` acceptors, and a
+    /// waiter that cannot see the status cannot tell "gone" from "broken".
+    pub http_status: Option<u16>,
     /// The service's message, unwrapped from the "An error occurred ... when calling"
     /// line, for the structured error record `--cli-error-format` renders.
     pub service_error_message: Option<String>,
@@ -88,6 +94,7 @@ impl Failure {
             raw: false,
             preamble: None,
             service_error_code: None,
+            http_status: None,
             service_error_message: None,
         }
     }
@@ -116,6 +123,7 @@ impl Failure {
             raw: true,
             preamble: None,
             service_error_code: None,
+            http_status: None,
             service_error_message: None,
         }
     }
@@ -266,6 +274,36 @@ fn run() -> Result<ExitCode, Failure> {
 
     // An unknown operation and a removed one are reported identically, since argparse
     // cannot tell the difference between a command that never existed and one v2 deleted.
+    // `wait <name>` polls an operation rather than naming one. The waiter's operation is
+    // what binds the arguments, so it is resolved here and the loop runs at the end.
+    let waiter = if parsed.operation == "wait" {
+        let name = parsed.positionals.first().cloned().unwrap_or_default();
+        let available = awsc_model::waiters::names(&cli_service);
+        if name.is_empty() {
+            // Bare `wait` names no waiter. argparse reports the missing positional and
+            // the usage block; the list is what the reader actually needs.
+            return Err(Failure::after_usage(awsc_runtime::RuntimeError::ParamValidation(
+                format!(
+                    "the following arguments are required: subcommand\n\nValid choices:\n{}",
+                    available
+                        .iter()
+                        .map(|name| format!("  * {name}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ),
+            )));
+        }
+        let Some(waiter) = awsc_model::waiters::get(&cli_service, &name) else {
+            return Err(invalid_choice("subcommand", &name, available.into_iter()));
+        };
+        // The name is consumed: it is not a parameter of the polled operation.
+        parsed.positionals.remove(0);
+        parsed.operation = waiter.operation.clone();
+        Some((waiter, name))
+    } else {
+        None
+    };
+
     let unknown = || unknown_operation(&parsed.operation, &table);
     let wire_name = table.resolve(&parsed.operation).ok_or_else(unknown)?;
     let (op_id, op) = model.operation(wire_name).map_err(|_| unknown())?;
@@ -574,6 +612,11 @@ fn run() -> Result<ExitCode, Failure> {
             return Err(failure);
         }
         return Ok(exit::code(exit::SUCCESS));
+    }
+
+    // A waiter polls instead of printing: same client, same bound input, a loop around it.
+    if let Some((waiter, waiter_name)) = waiter {
+        return wait::run(&client, waiter, &waiter_name, input.as_ref());
     }
 
     let value = paginate::run(&paginate::Settings {
