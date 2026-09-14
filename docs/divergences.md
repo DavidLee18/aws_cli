@@ -618,7 +618,7 @@ URLs embed a timestamp and would otherwise never compare equal.
 | `emr ssh` / `socks` / `get` / `put` | every command line, against a stand-in cluster and fake `ssh`/`scp` |
 | `cloudtrail verify-query-results` | a real openssl-signed export, plus both tamper paths |
 | `deploy register` / `deregister` | both call sequences and the 0600 config file, against stand-ins |
-| `deploy install` / `uninstall` | pure logic unit-tested; the unsupported-system and argument paths driven for real. **Not driven end to end** — see below |
+| `deploy install` / `uninstall` | both driven end to end on Ubuntu 22.04 as root, in an `ubuntu:22.04` container against an S3 stand-in |
 | `deploy push` | the uploaded bundle read back by Python's own `zipfile`, CRCs and all |
 | `ec2-instance-connect open-tunnel` | both modes end-to-end against an EC2 stand-in and a TLS WebSocket echo server; frame and handshake vectors from RFC 6455 |
 | `ec2-instance-connect ssh` | every connection-type branch and all eight refusals against stand-ins and a fake `ssh`; the generated key read back by `ssh-keygen -y` |
@@ -949,12 +949,17 @@ Facts worth recording, because each contradicts a reasonable assumption:
   require root, and they **refuse to run on an EC2 instance**, detected by the instance
   metadata endpoint answering within one second.
 
-  **These two were not driven end to end.** Doing so means an Ubuntu or RHEL host, as
-  root, with the CodeDeploy agent actually installed and removed; there is no stand-in for
-  that. What *is* verified: the distribution detection, the per-system config paths and
-  installer names, and the `--agent-installer` S3 parsing are unit-tested, and the
-  unsupported-system and argument-validation paths were run for real. The command
-  sequencing is a direct port of `systems.py`. Stated here rather than left implied.
+  **Both were driven end to end**, on Ubuntu 22.04 as root: the binary was cross-compiled
+  for `aarch64-unknown-linux-gnu` with `cargo zigbuild` and run in an `ubuntu:22.04`
+  container against an S3 stand-in serving a fake installer. Verified there: the default
+  installer location is right (the stand-in logged
+  `GET /aws-codedeploy-us-east-1/latest/install`); a `--agent-installer s3://b/releases/install-1.2`
+  is fetched from that key and saved under *the key's* file name, not the system default;
+  the downloaded file lands mode `755` and is executed as `./install auto` with
+  `AWS_REGION` and the credentials in its environment, `AWS_SESSION_TOKEN` present only
+  when there is one; a second install without `--override-config` refuses and changes
+  nothing; `uninstall` removes the config file; and a non-root user is refused. The RHEL
+  paths and the whole of Windows are still untested — no host for either.
 
   Three things worth knowing:
 
@@ -963,7 +968,15 @@ Facts worth recording, because each contradicts a reasonable assumption:
     `str` — which raises `TypeError` in Python 3. So in the reference, stopping an agent
     that is *not installed* crashes rather than being tolerated, and Windows'
     `"Running" not in output` check raises every time. Reproducing a `TypeError` would be
-    absurd, so the comparison is done on decoded text, which is what the code means.
+    absurd, so the comparison is done on decoded text, which is what the code means. This
+    is not hypothetical: on Ubuntu 22.04 `service codedeploy-agent stop` prints exactly
+    `codedeploy-agent: unrecognized service` and exits 1, which is the path in question,
+    and `uninstall` completes cleanly here.
+  - **The reference's Ubuntu install cannot work on any supported Ubuntu.** It runs
+    `apt-get -y install ruby2.0`, and that package has not existed since Ubuntu 16.04 —
+    confirmed on 22.04, where apt answers `E: Unable to locate package ruby2.0` and the
+    command exits 255. Reproduced rather than modernised: guessing at a replacement
+    package would install something the reference never would.
   - **RHEL 8 and later are not recognised**, by the reference or by this. The check is for
     the literal `Red Hat Enterprise Linux Server`, and `/etc/redhat-release` dropped
     `Server` after RHEL 7 — so a modern RHEL host gets the unsupported-system error.

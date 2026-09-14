@@ -960,7 +960,8 @@ fn install_agent(
                 return Err(Failure::new(
                     exit::GENERAL_ERROR,
                     format!(
-                        "Command '['./{installer}', 'auto']' returned non-zero exit status {}.",
+                        "Command '{}' returned non-zero exit status {}.",
+                        python_list_repr(&[&format!("./{installer}"), "auto"]),
                         status.code().unwrap_or(1)
                     ),
                 ));
@@ -1029,11 +1030,21 @@ fn run(command: &[&str]) -> Result<(), Failure> {
     Err(Failure::new(
         exit::GENERAL_ERROR,
         format!(
-            "Command '{:?}' returned non-zero exit status {}.",
-            command,
+            "Command '{}' returned non-zero exit status {}.",
+            // Python's list repr, which is what `subprocess.check_call` puts in the
+            // CalledProcessError this stands in for.
+            python_list_repr(command),
             status.code().unwrap_or(1)
         ),
     ))
+}
+
+/// `['a', 'b']` — Python's repr of a list of strings, single quotes and all.
+fn python_list_repr(words: &[&str]) -> String {
+    format!(
+        "[{}]",
+        words.iter().map(|word| format!("'{word}'")).collect::<Vec<_>>().join(", ")
+    )
 }
 
 fn capture(command: &[&str]) -> Result<(String, String), Failure> {
