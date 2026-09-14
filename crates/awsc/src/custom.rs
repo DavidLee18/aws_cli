@@ -39,6 +39,8 @@ pub(crate) const IMPLEMENTED: &[(&str, &str, &str)] = &[
     ("dsql", "generate-db-connect-admin-auth-token", "Print a signed token for connecting to a DSQL cluster as admin."),
     ("dsql", "generate-db-connect-auth-token", "Print a signed token for connecting to a DSQL cluster."),
     ("ecs", "deploy", "Register a task definition and roll it out through CodeDeploy."),
+    ("emr", "add-steps", "Add steps to a running cluster."),
+    ("emr", "install-applications", "Install Hive or Pig on a running AMI-based cluster."),
     ("emr", "modify-cluster-attributes", "Set a cluster's visibility, termination protection, auto-terminate or node replacement."),
     ("emr", "terminate-clusters", "Terminate one or more clusters."),
     ("emr-containers", "create-role-associations", "Associate an IAM role with the EKS service accounts EMR runs pods under."),

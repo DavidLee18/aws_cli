@@ -22,6 +22,7 @@ pub fn dispatch(parsed: &Parsed, globals: &Globals) -> Result<Option<ExitCode>, 
         "terminate-clusters" => terminate_clusters(parsed, globals).map(Some),
         "modify-cluster-attributes" => modify_cluster_attributes(parsed, globals).map(Some),
         "add-steps" => add_steps(parsed, globals).map(Some),
+        "install-applications" => install_applications(parsed, globals).map(Some),
         _ => Ok(None),
     }
 }
@@ -72,15 +73,171 @@ fn add_steps(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> {
     render(&response, parsed)
 }
 
-/// One `--steps` token: JSON if it starts like JSON, shorthand otherwise.
-fn parse_step(token: &str) -> Result<Value, Failure> {
+/// Applications the reference knows about at all.
+const APPLICATIONS: &[&str] =
+    &["HIVE", "PIG", "HBASE", "GANGLIA", "IMPALA", "SPARK", "MAPR", "MAPR_M3", "MAPR_M5", "MAPR_M7"];
+
+/// The two that can be added to a cluster that is already running.
+const INSTALLABLE: &[&str] = &["HIVE", "PIG"];
+
+/// `aws emr install-applications --cluster-id j-1 --applications Name=Hive`.
+///
+/// Only Hive and Pig, and only on an **AMI-based** cluster: the whole command is a
+/// leftover from EMR 2.x/3.x, where installing an application meant running a script
+/// step. A release-based cluster is refused outright, because there is nothing sensible
+/// to translate the request into.
+fn install_applications(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> {
+    let args = crate::custom::take_args(parsed, &["--cluster-id", "--applications"])?;
+    let Some(Some(cluster_id)) = args.get("--cluster-id").copied() else {
+        return Err(crate::custom::missing_required(&["--cluster-id"]));
+    };
+    let tokens = crate::custom::take_list(parsed, "--applications");
+    if tokens.is_empty() {
+        return Err(crate::custom::missing_required(&["--applications"]));
+    }
+    let applications: Vec<Value> =
+        tokens.iter().map(|token| parse_shorthand(token, "--applications")).collect::<Result<_, _>>()?;
+    check_installable(&applications)?;
+
+    let (model, globals) = load(globals)?;
+    let client = emr_client(&model, &globals)?;
+    let region = globals.region.clone().unwrap_or_default();
+
+    // The release check is the reference's, and it happens before anything is built.
+    if let Some(release) = client
+        .call("describe-cluster", Some(&json!({ "ClusterId": cluster_id })))?
+        .get("Cluster")
+        .and_then(|cluster| cluster.get("ReleaseLabel"))
+        .and_then(Value::as_str)
+    {
+        return Err(Failure::new(
+            exit::PARAM_VALIDATION,
+            awsc_runtime::RuntimeError::ParamValidation(format!(
+                "install-applications is not supported with '{release}' release."
+            )),
+        ));
+    }
+
+    let steps = install_steps(&applications, &region);
+    let response = client.call(
+        "add-job-flow-steps",
+        Some(&json!({ "JobFlowId": cluster_id, "Steps": steps })),
+    )?;
+    render(&response, parsed)
+}
+
+/// Every application must be one the reference knows, and one that can be installed on a
+/// running cluster — the two messages differ, and so does what the user should do next.
+fn check_installable(applications: &[Value]) -> Result<(), Failure> {
+    for application in applications {
+        let name = application.get("Name").and_then(Value::as_str).unwrap_or_default();
+        let upper = name.to_uppercase();
+        let message = if APPLICATIONS.contains(&upper.as_str()) {
+            if INSTALLABLE.contains(&upper.as_str()) {
+                continue;
+            }
+            format!(
+                "{name} cannot be installed on a running cluster. 'Name' should be one of \
+                 the following: {}",
+                INSTALLABLE.join(", ")
+            )
+        } else {
+            format!(
+                "Unknown application: {name}. 'Name' should be one of the following: {}",
+                APPLICATIONS.join(", ")
+            )
+        };
+        return Err(Failure::new(
+            exit::PARAM_VALIDATION,
+            awsc_runtime::RuntimeError::ParamValidation(message),
+        ));
+    }
+    Ok(())
+}
+
+/// The steps that install Hive or Pig, in the order the applications were given.
+///
+/// Hive contributes a second step when its `Args` carry a `--hive-site` path — and that
+/// one is `CANCEL_AND_WAIT` where the install itself is `TERMINATE_CLUSTER`, because a
+/// missing site configuration is recoverable and a missing Hive is not.
+fn install_steps(applications: &[Value], region: &str) -> Vec<Value> {
+    let mut steps = Vec::new();
+    for application in applications {
+        let name = application.get("Name").and_then(Value::as_str).unwrap_or_default();
+        let args = string_list(application.get("Args"));
+        match name.to_uppercase().as_str() {
+            "HIVE" => {
+                steps.push(install_step(
+                    "Install Hive",
+                    "TERMINATE_CLUSTER",
+                    region,
+                    vec![
+                        s3_link(region, "/libs/hive/hive-script"),
+                        "--install-hive".to_string(),
+                        "--base-path".to_string(),
+                        s3_link(region, "/libs/hive"),
+                        "--hive-versions".to_string(),
+                        "latest".to_string(),
+                    ],
+                ));
+                if let Some(path) = args.iter().find(|arg| arg.contains("--hive-site")) {
+                    // `--hive-site=s3://...`: the value is the whole argument, split off
+                    // after the `=`.
+                    let path = path.split_once('=').map(|(_, v)| v).unwrap_or(path);
+                    steps.push(install_step(
+                        "Install Hive Site Configuration",
+                        "CANCEL_AND_WAIT",
+                        region,
+                        vec![
+                            s3_link(region, "/libs/hive/hive-script"),
+                            "--base-path".to_string(),
+                            // Note: the reference builds this one with **no region**, so
+                            // it always points at us-east-1. Reproduced deliberately.
+                            s3_link("us-east-1", "/libs/hive"),
+                            "--install-hive-site".to_string(),
+                            path.to_string(),
+                            "--hive-versions".to_string(),
+                            "latest".to_string(),
+                        ],
+                    ));
+                }
+            }
+            "PIG" => steps.push(install_step(
+                "Install Pig",
+                "TERMINATE_CLUSTER",
+                region,
+                vec![
+                    s3_link(region, "/libs/pig/pig-script"),
+                    "--install-pig".to_string(),
+                    "--base-path".to_string(),
+                    s3_link(region, "/libs/pig"),
+                    "--pig-versions".to_string(),
+                    "latest".to_string(),
+                ],
+            )),
+            _ => {}
+        }
+    }
+    steps
+}
+
+fn install_step(name: &str, on_failure: &str, region: &str, args: Vec<String>) -> Value {
+    json!({
+        "Name": name,
+        "ActionOnFailure": on_failure,
+        "HadoopJarStep": { "Jar": script_runner(region), "Args": args },
+    })
+}
+
+/// One shorthand-or-JSON token, named for the error message.
+fn parse_shorthand(token: &str, flag: &str) -> Result<Value, Failure> {
     let trimmed = token.trim_start();
     if trimmed.starts_with('{') || trimmed.starts_with('[') {
         return serde_json::from_str(token).map_err(|e| {
             Failure::new(
                 exit::PARAM_VALIDATION,
                 awsc_runtime::RuntimeError::ParamValidation(format!(
-                    "Error parsing parameter '--steps': Invalid JSON: {e}\nJSON received: {token}"
+                    "Error parsing parameter '{flag}': Invalid JSON: {e}\nJSON received: {token}"
                 )),
             )
         });
@@ -89,10 +246,15 @@ fn parse_step(token: &str) -> Result<Value, Failure> {
         Failure::new(
             exit::PARAM_VALIDATION,
             awsc_runtime::RuntimeError::ParamValidation(format!(
-                "Error parsing parameter '--steps': {e}"
+                "Error parsing parameter '{flag}': {e}"
             )),
         )
     })
+}
+
+/// One `--steps` token: JSON if it starts like JSON, shorthand otherwise.
+fn parse_step(token: &str) -> Result<Value, Failure> {
+    parse_shorthand(token, "--steps")
 }
 
 /// The regional bucket an AMI-based cluster fetches its jars from.
@@ -590,6 +752,55 @@ mod tests {
         assert!(build_step(&no_args, None, "us-east-1").is_err());
         let unknown: Value = serde_json::from_str(r#"{"Type": "Nope"}"#).expect("step");
         assert!(build_step(&unknown, None, "us-east-1").is_err());
+    }
+
+    #[test]
+    fn hive_installs_with_a_second_step_only_for_a_site_path() {
+        let plain: Vec<Value> = vec![json!({"Name": "Hive"})];
+        let steps = install_steps(&plain, "eu-west-1");
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0]["Name"], "Install Hive");
+        assert_eq!(steps[0]["ActionOnFailure"], "TERMINATE_CLUSTER");
+        assert_eq!(
+            steps[0]["HadoopJarStep"]["Jar"],
+            "s3://eu-west-1.elasticmapreduce/libs/script-runner/script-runner.jar"
+        );
+
+        let with_site: Vec<Value> =
+            vec![json!({"Name": "Hive", "Args": ["--hive-site=s3://conf/hive-site.xml"]})];
+        let steps = install_steps(&with_site, "eu-west-1");
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[1]["Name"], "Install Hive Site Configuration");
+        // Recoverable, so it waits rather than killing the cluster.
+        assert_eq!(steps[1]["ActionOnFailure"], "CANCEL_AND_WAIT");
+        let args = steps[1]["HadoopJarStep"]["Args"].as_array().expect("args");
+        assert!(args.contains(&json!("s3://conf/hive-site.xml")));
+        // The reference builds this base path with no region, so it is always us-east-1
+        // even on a eu-west-1 cluster. Reproduced rather than corrected.
+        assert!(args.contains(&json!("s3://us-east-1.elasticmapreduce/libs/hive")));
+    }
+
+    #[test]
+    fn pig_installs_with_its_own_script() {
+        let steps = install_steps(&[json!({"Name": "PIG"})], "us-east-1");
+        assert_eq!(steps[0]["Name"], "Install Pig");
+        assert_eq!(
+            steps[0]["HadoopJarStep"]["Args"][0],
+            "s3://us-east-1.elasticmapreduce/libs/pig/pig-script"
+        );
+    }
+
+    /// A known application that cannot be added to a running cluster gets a different
+    /// message from one the reference has never heard of.
+    #[test]
+    fn the_two_rejection_messages_differ() {
+        let hbase = check_installable(&[json!({"Name": "HBase"})]).expect_err("refuses");
+        assert!(hbase.message().contains("cannot be installed on a running cluster"), "{}", hbase.message());
+
+        let nope = check_installable(&[json!({"Name": "Nope"})]).expect_err("refuses");
+        assert!(nope.message().contains("Unknown application: Nope"), "{}", nope.message());
+
+        assert!(check_installable(&[json!({"Name": "hive"}), json!({"Name": "PIG"})]).is_ok());
     }
 
     #[test]

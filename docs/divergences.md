@@ -586,7 +586,7 @@ views of one service. Deferred to the customization phase.
 
 ## Custom commands (first tranche)
 
-Twenty-two custom commands are now implemented, each verified by byte-diffing our stdout/stderr
+Twenty-three custom commands are now implemented, each verified by byte-diffing our stdout/stderr
 and exit code against the reference. `scripts/compare-custom-commands.sh` reproduces the
 comparison; it pins our clock to the reference's via `AWSC_FIXED_TIME`, because presigned
 URLs embed a timestamp and would otherwise never compare equal.
@@ -612,6 +612,7 @@ URLs embed a timestamp and would otherwise never compare equal.
 | `codeartifact login` | all six tools dry-run against a stand-in; npm run for real against a fake `npm` |
 | `emr terminate-clusters` / `modify-cluster-attributes` | call order and the inverted member against a stand-in |
 | `emr add-steps` | all six step types, both cluster generations, against a stand-in |
+| `emr install-applications` | both cluster generations and both rejection messages, against a stand-in |
 
 Facts worth recording, because each contradicts a reasonable assumption:
 
@@ -721,6 +722,17 @@ Facts worth recording, because each contradicts a reasonable assumption:
   `--steps Type=Hive,Args=[a] Type=Pig,Args=[b]` is two documents; joining them with a
   space makes one malformed one, which is why `custom::take_list` reads the values back out
   of `extras` rather than from the space-joined `parameters`.
+- **`emr install-applications` is a 2.x/3.x command and says so.** It installs Hive or Pig
+  by adding *script steps*, which is how EMR worked before release labels, so a
+  release-based cluster is refused outright rather than translated. Its two rejection
+  messages differ on purpose: a known application that cannot be added to a running cluster
+  ("HBase cannot be installed on a running cluster") is a different problem from one the
+  reference has never heard of ("Unknown application: Nope"), and the user's next move is
+  different too. The Hive site-configuration step is `CANCEL_AND_WAIT` where the install
+  itself is `TERMINATE_CLUSTER` — a missing site config is recoverable, a missing Hive is
+  not. **And its `--base-path` is built with no region**, so it points at `us-east-1` even
+  on a `eu-west-1` cluster; that is the reference's bug and it is reproduced rather than
+  corrected, because a "fixed" path would fetch something the reference never fetches.
 - **`codecommit credential-helper` is not SigV4.** The canonical request uses the literal
   method `GIT`, an empty canonical query, and an *empty payload-hash field* rather than a
   SHA-256; the timestamp inside the string-to-sign carries no trailing `Z`. The `Z` is
@@ -833,7 +845,7 @@ work as ordinary modelled operations, 50 were genuinely missing, and 4 belong to
 `agent-toolkit`, a service absent from our catalogue entirely.** Twelve more landed on 2026-09-14 — `dsql`'s two
 token commands, `dlm create-default-role`, `gamelift get-game-session-log`,
 `datapipeline`'s two, `servicecatalog generate`'s two, `emr-containers`' three and
-`ecs deploy`, `codeartifact login` and three of `emr`'s fourteen — leaving 38. So the help page filters its "not implemented" list
+`ecs deploy`, `codeartifact login` and four of `emr`'s fourteen — leaving 37. So the help page filters its "not implemented" list
 by whether the name resolves in the command table — without that it told readers that 37
 working commands, every WhatsApp call among them, did not work. And the wording of both the
 error and the help section says "no service model describes it" rather than "hand-written",
