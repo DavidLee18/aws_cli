@@ -44,6 +44,7 @@ pub(crate) const IMPLEMENTED: &[(&str, &str, &str)] = &[
     ("dsql", "generate-db-connect-auth-token", "Print a signed token for connecting to a DSQL cluster."),
     ("ec2-instance-connect", "ssh", "Push a throwaway key and SSH in, directly or through an endpoint."),
     ("ec2-instance-connect", "open-tunnel", "Open a websocket tunnel to an instance through an EC2 Instance Connect Endpoint."),
+    ("ecs", "monitor-express-gateway-service", "Watch an Express Gateway service's resources as they are created."),
     ("ecs", "deploy", "Register a task definition and roll it out through CodeDeploy."),
     ("emr", "get", "Copy a file off the master node with scp."),
     ("emr", "put", "Copy a file onto the master node with scp."),
@@ -126,7 +127,10 @@ pub fn dispatch(parsed: &Parsed) -> Result<Option<ExitCode>, Failure> {
         },
         ("ecs", _) => match crate::ecs::dispatch(parsed, &globals)? {
             Some(code) => code,
-            None => return Ok(None),
+            None => match crate::ecs_express::dispatch(parsed, &globals)? {
+                Some(code) => code,
+                None => return Ok(None),
+            },
         },
         ("emr", _) => match crate::emr::dispatch(parsed, &globals)? {
             Some(code) => code,

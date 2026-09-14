@@ -1,0 +1,664 @@
+{
+ "tz_offset_seconds": 32400,
+ "render": [
+  {
+   "name": "leaf_full",
+   "tree": {
+    "kind": "leaf",
+    "type": "LoadBalancer",
+    "id": "arn:lb/1",
+    "status": "PROVISIONING",
+    "updated_at": "2026-09-14T10:00:00Z",
+    "reason": "creating",
+    "info": "note"
+   },
+   "stream_plain": "[TS] LoadBalancer arn:lb/1 [PROVISIONING]\n  Reason: creating\n  Last Updated At: 2026-09-14 10:00:00Z\n  Info: note",
+   "stream_color": "[TS] \u001b[36mLoadBalancer\u001b[0m \u001b[35marn:lb/1\u001b[0m [\u001b[35mPROVISIONING\u001b[0m]\n  Reason: creating\n  Last Updated At: 2026-09-14 10:00:00Z\n  Info: note",
+   "is_terminal": false,
+   "status_plain": "LoadBalancer: * arn:lb/1 - PROVISIONING\n Reason: creating\n Last updated at: 2026-09-14T19:00:00Z\n note\n",
+   "status_color": "\u001b[36mLoadBalancer\u001b[0m: \u001b[35m* \u001b[0m\u001b[35marn:lb/1\u001b[0m - \u001b[35mPROVISIONING\u001b[0m\n Reason: creating\n Last updated at: 2026-09-14T19:00:00Z\n note\n",
+   "status_depth2": "  LoadBalancer: * arn:lb/1 - PROVISIONING\n   Reason: creating\n   Last updated at: 2026-09-14T19:00:00Z\n   note\n"
+  },
+  {
+   "name": "leaf_active",
+   "tree": {
+    "kind": "leaf",
+    "type": "TargetGroup",
+    "id": "arn:tg/1",
+    "status": "ACTIVE"
+   },
+   "stream_plain": "[TS] TargetGroup arn:tg/1 [ACTIVE]",
+   "stream_color": "[TS] \u001b[36mTargetGroup\u001b[0m \u001b[32marn:tg/1\u001b[0m [\u001b[32mACTIVE\u001b[0m]",
+   "is_terminal": true,
+   "status_plain": "TargetGroup: \u2713 arn:tg/1 - ACTIVE\n",
+   "status_color": "\u001b[36mTargetGroup\u001b[0m: \u001b[32m\u2713 \u001b[0m\u001b[32marn:tg/1\u001b[0m - \u001b[32mACTIVE\u001b[0m\n",
+   "status_depth2": "  TargetGroup: \u2713 arn:tg/1 - ACTIVE\n"
+  },
+  {
+   "name": "leaf_failed",
+   "tree": {
+    "kind": "leaf",
+    "type": "Rule",
+    "id": "arn:rule/1",
+    "status": "FAILED",
+    "reason": "boom"
+   },
+   "stream_plain": "[TS] Rule arn:rule/1 [FAILED]\n  Reason: boom",
+   "stream_color": "[TS] \u001b[36mRule\u001b[0m \u001b[31marn:rule/1\u001b[0m [\u001b[31mFAILED\u001b[0m]\n  Reason: boom",
+   "is_terminal": true,
+   "status_plain": "Rule: X arn:rule/1 - FAILED\n Reason: boom\n",
+   "status_color": "\u001b[36mRule\u001b[0m: \u001b[31mX \u001b[0m\u001b[31marn:rule/1\u001b[0m - \u001b[31mFAILED\u001b[0m\n Reason: boom\n",
+   "status_depth2": "  Rule: X arn:rule/1 - FAILED\n   Reason: boom\n"
+  },
+  {
+   "name": "leaf_deleted",
+   "tree": {
+    "kind": "leaf",
+    "type": "Listener",
+    "id": "arn:l/1",
+    "status": "DELETED"
+   },
+   "stream_plain": "[TS] Listener arn:l/1 [DELETED]",
+   "stream_color": "[TS] \u001b[36mListener\u001b[0m \u001b[33marn:l/1\u001b[0m [\u001b[33mDELETED\u001b[0m]",
+   "is_terminal": true,
+   "status_plain": "Listener: \u2014 arn:l/1 - DELETED\n",
+   "status_color": "\u001b[36mListener\u001b[0m: \u001b[33m\u2014 \u001b[0m\u001b[33marn:l/1\u001b[0m - \u001b[33mDELETED\u001b[0m\n",
+   "status_depth2": "  Listener: \u2014 arn:l/1 - DELETED\n"
+  },
+  {
+   "name": "leaf_rollback_failed",
+   "tree": {
+    "kind": "leaf",
+    "type": "X",
+    "id": "x",
+    "status": "ROLLBACK_FAILED"
+   },
+   "stream_plain": "[TS] X x [ROLLBACK_FAILED]",
+   "stream_color": "[TS] \u001b[36mX\u001b[0m \u001b[35mx\u001b[0m [\u001b[35mROLLBACK_FAILED\u001b[0m]",
+   "is_terminal": false,
+   "status_plain": "X: X x - ROLLBACK_FAILED\n",
+   "status_color": "\u001b[36mX\u001b[0m: \u001b[31mX \u001b[0m\u001b[35mx\u001b[0m - \u001b[35mROLLBACK_FAILED\u001b[0m\n",
+   "status_depth2": "  X: X x - ROLLBACK_FAILED\n"
+  },
+  {
+   "name": "leaf_stopped",
+   "tree": {
+    "kind": "leaf",
+    "type": "X",
+    "id": "x",
+    "status": "STOPPED"
+   },
+   "stream_plain": "[TS] X x [STOPPED]",
+   "stream_color": "[TS] \u001b[36mX\u001b[0m \u001b[35mx\u001b[0m [\u001b[35mSTOPPED\u001b[0m]",
+   "is_terminal": false,
+   "status_plain": "X: \u2014 x - STOPPED\n",
+   "status_color": "\u001b[36mX\u001b[0m: \u001b[33m\u2014 \u001b[0m\u001b[35mx\u001b[0m - \u001b[35mSTOPPED\u001b[0m\n",
+   "status_depth2": "  X: \u2014 x - STOPPED\n"
+  },
+  {
+   "name": "leaf_rollback_ok",
+   "tree": {
+    "kind": "leaf",
+    "type": "X",
+    "id": "x",
+    "status": "ROLLBACK_SUCCESSFUL"
+   },
+   "stream_plain": "[TS] X x [ROLLBACK_SUCCESSFUL]",
+   "stream_color": "[TS] \u001b[36mX\u001b[0m \u001b[35mx\u001b[0m [\u001b[35mROLLBACK_SUCCESSFUL\u001b[0m]",
+   "is_terminal": false,
+   "status_plain": "X: \u2014 x - ROLLBACK_SUCCESSFUL\n",
+   "status_color": "\u001b[36mX\u001b[0m: \u001b[33m\u2014 \u001b[0m\u001b[35mx\u001b[0m - \u001b[35mROLLBACK_SUCCESSFUL\u001b[0m\n",
+   "status_depth2": "  X: \u2014 x - ROLLBACK_SUCCESSFUL\n"
+  },
+  {
+   "name": "leaf_successful",
+   "tree": {
+    "kind": "leaf",
+    "type": "X",
+    "id": "x",
+    "status": "SUCCESSFUL"
+   },
+   "stream_plain": "[TS] X x [SUCCESSFUL]",
+   "stream_color": "[TS] \u001b[36mX\u001b[0m \u001b[32mx\u001b[0m [\u001b[32mSUCCESSFUL\u001b[0m]",
+   "is_terminal": false,
+   "status_plain": "X: \u2713 x - SUCCESSFUL\n",
+   "status_color": "\u001b[36mX\u001b[0m: \u001b[32m\u2713 \u001b[0m\u001b[32mx\u001b[0m - \u001b[32mSUCCESSFUL\u001b[0m\n",
+   "status_depth2": "  X: \u2713 x - SUCCESSFUL\n"
+  },
+  {
+   "name": "leaf_no_status",
+   "tree": {
+    "kind": "leaf",
+    "type": "Cluster",
+    "id": "arn:cluster/1"
+   },
+   "stream_plain": "[TS] Cluster arn:cluster/1",
+   "stream_color": "[TS] \u001b[36mCluster\u001b[0m \u001b[32marn:cluster/1\u001b[0m",
+   "is_terminal": false,
+   "status_plain": "Cluster: \u2713 arn:cluster/1 \n",
+   "status_color": "\u001b[36mCluster\u001b[0m: \u001b[32m\u2713 \u001b[0m\u001b[32marn:cluster/1\u001b[0m \n",
+   "status_depth2": "  Cluster: \u2713 arn:cluster/1 \n"
+  },
+  {
+   "name": "leaf_no_id",
+   "tree": {
+    "kind": "leaf",
+    "type": "Cluster"
+   },
+   "stream_plain": "[TS] Cluster",
+   "stream_color": "[TS] \u001b[36mCluster\u001b[0m",
+   "is_terminal": false,
+   "status_plain": "Cluster \u2713 \n",
+   "status_color": "\u001b[36mCluster\u001b[0m \u001b[32m\u2713 \u001b[0m\n",
+   "status_depth2": "  Cluster \u2713 \n"
+  },
+  {
+   "name": "leaf_nothing",
+   "tree": {
+    "kind": "leaf"
+   },
+   "stream_plain": "[TS] Unknown Resource",
+   "stream_color": "[TS] \u001b[36mUnknown Resource\u001b[0m",
+   "is_terminal": false,
+   "status_error": "can only concatenate str (not \"NoneType\") to str"
+  },
+  {
+   "name": "group_empty",
+   "tree": {
+    "kind": "group",
+    "type": "LogGroups"
+   },
+   "stream_plain": "",
+   "stream_color": "",
+   "is_terminal": true,
+   "status_plain": "LogGroups\n <empty>",
+   "status_color": "\u001b[36mLogGroups\u001b[0m\n <empty>",
+   "status_depth2": "  LogGroups\n   <empty>"
+  },
+  {
+   "name": "group_untyped_empty",
+   "tree": {
+    "kind": "group"
+   },
+   "stream_plain": "",
+   "stream_color": "",
+   "is_terminal": true,
+   "status_plain": "",
+   "status_color": "",
+   "status_depth2": ""
+  },
+  {
+   "name": "group_plain",
+   "tree": {
+    "kind": "group",
+    "type": "LogGroups",
+    "children": [
+     {
+      "kind": "leaf",
+      "type": "LogGroup",
+      "id": "lg-1",
+      "status": "ACTIVE"
+     },
+     {
+      "kind": "leaf",
+      "type": "LogGroup",
+      "id": "lg-2",
+      "status": "PROVISIONING"
+     }
+    ]
+   },
+   "stream_plain": "[TS] LogGroup lg-1 [ACTIVE]\n[TS] LogGroup lg-2 [PROVISIONING]",
+   "stream_color": "[TS] \u001b[36mLogGroup\u001b[0m \u001b[32mlg-1\u001b[0m [\u001b[32mACTIVE\u001b[0m]\n[TS] \u001b[36mLogGroup\u001b[0m \u001b[35mlg-2\u001b[0m [\u001b[35mPROVISIONING\u001b[0m]",
+   "is_terminal": false,
+   "status_plain": "LogGroups\n\n LogGroup: \u2713 lg-1 - ACTIVE\n\n LogGroup: * lg-2 - PROVISIONING\n",
+   "status_color": "\u001b[36mLogGroups\u001b[0m\n\n \u001b[36mLogGroup\u001b[0m: \u001b[32m\u2713 \u001b[0m\u001b[32mlg-1\u001b[0m - \u001b[32mACTIVE\u001b[0m\n\n \u001b[36mLogGroup\u001b[0m: \u001b[35m* \u001b[0m\u001b[35mlg-2\u001b[0m - \u001b[35mPROVISIONING\u001b[0m\n",
+   "status_depth2": "  LogGroups\n\n   LogGroup: \u2713 lg-1 - ACTIVE\n\n   LogGroup: * lg-2 - PROVISIONING\n"
+  },
+  {
+   "name": "group_with_id_no_status",
+   "tree": {
+    "kind": "group",
+    "type": "IngressPath",
+    "id": "https://x",
+    "children": [
+     {
+      "kind": "leaf",
+      "type": "LoadBalancer",
+      "id": "lb",
+      "status": "ACTIVE"
+     }
+    ]
+   },
+   "stream_plain": "[TS] LoadBalancer lb [ACTIVE]",
+   "stream_color": "[TS] \u001b[36mLoadBalancer\u001b[0m \u001b[32mlb\u001b[0m [\u001b[32mACTIVE\u001b[0m]",
+   "is_terminal": true,
+   "status_plain": "IngressPath: https://x\n\n LoadBalancer: \u2713 lb - ACTIVE\n",
+   "status_color": "\u001b[36mIngressPath\u001b[0m: https://x\n\n \u001b[36mLoadBalancer\u001b[0m: \u001b[32m\u2713 \u001b[0m\u001b[32mlb\u001b[0m - \u001b[32mACTIVE\u001b[0m\n",
+   "status_depth2": "  IngressPath: https://x\n\n   LoadBalancer: \u2713 lb - ACTIVE\n"
+  },
+  {
+   "name": "group_with_id_and_status",
+   "tree": {
+    "kind": "group",
+    "type": "Deployment",
+    "id": "arn:dep/1",
+    "status": "IN_PROGRESS",
+    "reason": "rolling",
+    "children": [
+     {
+      "kind": "leaf",
+      "type": "TaskDefinition",
+      "id": "td:1"
+     }
+    ]
+   },
+   "stream_plain": "[TS] TaskDefinition td:1",
+   "stream_color": "[TS] \u001b[36mTaskDefinition\u001b[0m \u001b[32mtd:1\u001b[0m",
+   "is_terminal": false,
+   "status_plain": "Deployment: * arn:dep/1 - IN_PROGRESS\n Reason: rolling\n\n TaskDefinition: \u2713 td:1 \n",
+   "status_color": "\u001b[36mDeployment\u001b[0m: \u001b[35m* \u001b[0m\u001b[35marn:dep/1\u001b[0m - \u001b[35mIN_PROGRESS\u001b[0m\n Reason: rolling\n\n \u001b[36mTaskDefinition\u001b[0m: \u001b[32m\u2713 \u001b[0m\u001b[32mtd:1\u001b[0m \n",
+   "status_depth2": "  Deployment: * arn:dep/1 - IN_PROGRESS\n   Reason: rolling\n\n   TaskDefinition: \u2713 td:1 \n"
+  },
+  {
+   "name": "group_status_no_id",
+   "tree": {
+    "kind": "group",
+    "type": "Deployment",
+    "status": "SUCCESSFUL",
+    "reason": "ok",
+    "children": [
+     {
+      "kind": "leaf",
+      "type": "A",
+      "id": "a"
+     }
+    ]
+   },
+   "stream_plain": "[TS] A a",
+   "stream_color": "[TS] \u001b[36mA\u001b[0m \u001b[32ma\u001b[0m",
+   "is_terminal": false,
+   "status_plain": "Deployment \u2713 - SUCCESSFUL\n Reason: ok\n\n A: \u2713 a \n",
+   "status_color": "\u001b[36mDeployment\u001b[0m \u001b[32m\u2713 \u001b[0m- \u001b[32mSUCCESSFUL\u001b[0m\n Reason: ok\n\n \u001b[36mA\u001b[0m: \u001b[32m\u2713 \u001b[0m\u001b[32ma\u001b[0m \n",
+   "status_depth2": "  Deployment \u2713 - SUCCESSFUL\n   Reason: ok\n\n   A: \u2713 a \n"
+  },
+  {
+   "name": "group_nested",
+   "tree": {
+    "kind": "group",
+    "children": [
+     {
+      "kind": "leaf",
+      "type": "Cluster",
+      "id": "c1"
+     },
+     {
+      "kind": "group",
+      "type": "IngressPaths",
+      "children": [
+       {
+        "kind": "group",
+        "type": "IngressPath",
+        "id": "https://a",
+        "children": [
+         {
+          "kind": "leaf",
+          "type": "LoadBalancer",
+          "id": "lb-a",
+          "status": "PROVISIONING",
+          "updated_at": "2026-01-02T03:04:05Z"
+         },
+         {
+          "kind": "leaf",
+          "type": "TargetGroup",
+          "id": "tg-a",
+          "status": "ACTIVE"
+         }
+        ]
+       },
+       {
+        "kind": "group",
+        "type": "IngressPath",
+        "id": "https://b"
+       }
+      ]
+     },
+     {
+      "kind": "group",
+      "type": "AutoScalingConfiguration",
+      "children": []
+     }
+    ]
+   },
+   "stream_plain": "[TS] Cluster c1\n[TS] LoadBalancer lb-a [PROVISIONING]\n  Last Updated At: 2026-01-02 03:04:05Z\n[TS] TargetGroup tg-a [ACTIVE]",
+   "stream_color": "[TS] \u001b[36mCluster\u001b[0m \u001b[32mc1\u001b[0m\n[TS] \u001b[36mLoadBalancer\u001b[0m \u001b[35mlb-a\u001b[0m [\u001b[35mPROVISIONING\u001b[0m]\n  Last Updated At: 2026-01-02 03:04:05Z\n[TS] \u001b[36mTargetGroup\u001b[0m \u001b[32mtg-a\u001b[0m [\u001b[32mACTIVE\u001b[0m]",
+   "is_terminal": false,
+   "status_plain": "Cluster: \u2713 c1 \n\nIngressPaths\n\n IngressPath: https://a\n\n  LoadBalancer: * lb-a - PROVISIONING\n   Last updated at: 2026-01-02T12:04:05Z\n\n  TargetGroup: \u2713 tg-a - ACTIVE\n\n IngressPath: https://b\n  <empty>\nAutoScalingConfiguration\n <empty>",
+   "status_color": "\u001b[36mCluster\u001b[0m: \u001b[32m\u2713 \u001b[0m\u001b[32mc1\u001b[0m \n\n\u001b[36mIngressPaths\u001b[0m\n\n \u001b[36mIngressPath\u001b[0m: https://a\n\n  \u001b[36mLoadBalancer\u001b[0m: \u001b[35m* \u001b[0m\u001b[35mlb-a\u001b[0m - \u001b[35mPROVISIONING\u001b[0m\n   Last updated at: 2026-01-02T12:04:05Z\n\n  \u001b[36mTargetGroup\u001b[0m: \u001b[32m\u2713 \u001b[0m\u001b[32mtg-a\u001b[0m - \u001b[32mACTIVE\u001b[0m\n\n \u001b[36mIngressPath\u001b[0m: https://b\n  <empty>\n\u001b[36mAutoScalingConfiguration\u001b[0m\n <empty>",
+   "status_depth2": "  Cluster: \u2713 c1 \n\n  IngressPaths\n\n   IngressPath: https://a\n\n    LoadBalancer: * lb-a - PROVISIONING\n     Last updated at: 2026-01-02T12:04:05Z\n\n    TargetGroup: \u2713 tg-a - ACTIVE\n\n   IngressPath: https://b\n    <empty>\n  AutoScalingConfiguration\n   <empty>"
+  },
+  {
+   "name": "group_duplicate_keys",
+   "tree": {
+    "kind": "group",
+    "type": "Dupes",
+    "children": [
+     {
+      "kind": "leaf",
+      "type": "A",
+      "id": "1",
+      "status": "ACTIVE"
+     },
+     {
+      "kind": "leaf",
+      "type": "A",
+      "id": "1",
+      "status": "FAILED"
+     },
+     {
+      "kind": "leaf",
+      "type": "B",
+      "id": "2"
+     }
+    ]
+   },
+   "stream_plain": "[TS] A 1 [FAILED]\n[TS] B 2",
+   "stream_color": "[TS] \u001b[36mA\u001b[0m \u001b[31m1\u001b[0m [\u001b[31mFAILED\u001b[0m]\n[TS] \u001b[36mB\u001b[0m \u001b[32m2\u001b[0m",
+   "is_terminal": false,
+   "status_plain": "Dupes\n\n A: X 1 - FAILED\n\n A: X 1 - FAILED\n\n B: \u2713 2 \n",
+   "status_color": "\u001b[36mDupes\u001b[0m\n\n \u001b[36mA\u001b[0m: \u001b[31mX \u001b[0m\u001b[31m1\u001b[0m - \u001b[31mFAILED\u001b[0m\n\n \u001b[36mA\u001b[0m: \u001b[31mX \u001b[0m\u001b[31m1\u001b[0m - \u001b[31mFAILED\u001b[0m\n\n \u001b[36mB\u001b[0m: \u001b[32m\u2713 \u001b[0m\u001b[32m2\u001b[0m \n",
+   "status_depth2": "  Dupes\n\n   A: X 1 - FAILED\n\n   A: X 1 - FAILED\n\n   B: \u2713 2 \n"
+  }
+ ],
+ "combine": [
+  {
+   "name": "combine_disjoint",
+   "left": {
+    "kind": "group",
+    "children": [
+     {
+      "kind": "leaf",
+      "type": "A",
+      "id": "1",
+      "status": "ACTIVE"
+     }
+    ]
+   },
+   "right": {
+    "kind": "group",
+    "children": [
+     {
+      "kind": "leaf",
+      "type": "B",
+      "id": "2",
+      "status": "ACTIVE"
+     }
+    ]
+   },
+   "status_plain": "A: \u2713 1 - ACTIVE\n\nB: \u2713 2 - ACTIVE\n"
+  },
+  {
+   "name": "combine_same_key_newer_wins",
+   "left": {
+    "kind": "group",
+    "children": [
+     {
+      "kind": "leaf",
+      "type": "A",
+      "id": "1",
+      "status": "OLD",
+      "updated_at": "2026-01-01T00:00:00Z"
+     }
+    ]
+   },
+   "right": {
+    "kind": "group",
+    "children": [
+     {
+      "kind": "leaf",
+      "type": "A",
+      "id": "1",
+      "status": "NEW",
+      "updated_at": "2026-02-01T00:00:00Z"
+     }
+    ]
+   },
+   "status_plain": "A: * 1 - NEW\n Last updated at: 2026-02-01T09:00:00Z\n"
+  },
+  {
+   "name": "combine_drops_unidentified_of_same_type",
+   "left": {
+    "kind": "group",
+    "children": [
+     {
+      "kind": "leaf",
+      "type": "A"
+     },
+     {
+      "kind": "leaf",
+      "type": "B",
+      "id": "b"
+     }
+    ]
+   },
+   "right": {
+    "kind": "group",
+    "children": [
+     {
+      "kind": "leaf",
+      "type": "A",
+      "id": "a"
+     }
+    ]
+   },
+   "status_plain": "A: \u2713 a \n\nB: \u2713 b \n"
+  },
+  {
+   "name": "combine_regroups_by_type",
+   "left": {
+    "kind": "group",
+    "children": [
+     {
+      "kind": "leaf",
+      "type": "A",
+      "id": "1"
+     },
+     {
+      "kind": "leaf",
+      "type": "B",
+      "id": "1"
+     }
+    ]
+   },
+   "right": {
+    "kind": "group",
+    "children": [
+     {
+      "kind": "leaf",
+      "type": "A",
+      "id": "2"
+     },
+     {
+      "kind": "leaf",
+      "type": "B",
+      "id": "2"
+     }
+    ]
+   },
+   "status_plain": "A: \u2713 1 \n\nA: \u2713 2 \n\nB: \u2713 1 \n\nB: \u2713 2 \n"
+  },
+  {
+   "name": "combine_nested_groups",
+   "left": {
+    "kind": "group",
+    "children": [
+     {
+      "kind": "group",
+      "type": "G",
+      "children": [
+       {
+        "kind": "leaf",
+        "type": "A",
+        "id": "1"
+       }
+      ]
+     }
+    ]
+   },
+   "right": {
+    "kind": "group",
+    "children": [
+     {
+      "kind": "group",
+      "type": "G",
+      "children": [
+       {
+        "kind": "leaf",
+        "type": "A",
+        "id": "2"
+       }
+      ]
+     }
+    ]
+   },
+   "status_plain": "G\n\n A: \u2713 1 \n\n A: \u2713 2 \n"
+  }
+ ],
+ "compare": [
+  {
+   "name": "compare_added_and_removed",
+   "left": {
+    "kind": "group",
+    "children": [
+     {
+      "kind": "leaf",
+      "type": "A",
+      "id": "1"
+     },
+     {
+      "kind": "leaf",
+      "type": "B",
+      "id": "2"
+     }
+    ]
+   },
+   "right": {
+    "kind": "group",
+    "children": [
+     {
+      "kind": "leaf",
+      "type": "A",
+      "id": "1"
+     },
+     {
+      "kind": "leaf",
+      "type": "C",
+      "id": "3"
+     }
+    ]
+   },
+   "unique_left": "B: \u2713 2 \n",
+   "unique_right": "C: \u2713 3 \n"
+  },
+  {
+   "name": "compare_unidentified_suppresses_other",
+   "left": {
+    "kind": "group",
+    "children": [
+     {
+      "kind": "leaf",
+      "type": "A"
+     }
+    ]
+   },
+   "right": {
+    "kind": "group",
+    "children": [
+     {
+      "kind": "leaf",
+      "type": "A",
+      "id": "1"
+     },
+     {
+      "kind": "leaf",
+      "type": "B",
+      "id": "2"
+     }
+    ]
+   },
+   "unique_left": "A \u2713 \n",
+   "unique_right": "B: \u2713 2 \n"
+  },
+  {
+   "name": "compare_nested",
+   "left": {
+    "kind": "group",
+    "children": [
+     {
+      "kind": "group",
+      "type": "G",
+      "children": [
+       {
+        "kind": "leaf",
+        "type": "A",
+        "id": "1"
+       },
+       {
+        "kind": "leaf",
+        "type": "A",
+        "id": "2"
+       }
+      ]
+     }
+    ]
+   },
+   "right": {
+    "kind": "group",
+    "children": [
+     {
+      "kind": "group",
+      "type": "G",
+      "children": [
+       {
+        "kind": "leaf",
+        "type": "A",
+        "id": "2"
+       },
+       {
+        "kind": "leaf",
+        "type": "A",
+        "id": "3"
+       }
+      ]
+     }
+    ]
+   },
+   "unique_left": "G\n\n A: \u2713 1 \n",
+   "unique_right": "G\n\n A: \u2713 3 \n"
+  },
+  {
+   "name": "compare_identical",
+   "left": {
+    "kind": "group",
+    "children": [
+     {
+      "kind": "leaf",
+      "type": "A",
+      "id": "1"
+     }
+    ]
+   },
+   "right": {
+    "kind": "group",
+    "children": [
+     {
+      "kind": "leaf",
+      "type": "A",
+      "id": "1"
+     }
+    ]
+   },
+   "unique_left": "",
+   "unique_right": ""
+  }
+ ]
+}

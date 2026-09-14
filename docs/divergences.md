@@ -586,7 +586,7 @@ views of one service. Deferred to the customization phase.
 
 ## Custom commands (first tranche)
 
-Forty custom commands are now implemented, each verified by byte-diffing our stdout/stderr
+Forty-one custom commands are now implemented, each verified by byte-diffing our stdout/stderr
 and exit code against the reference. `scripts/compare-custom-commands.sh` reproduces the
 comparison; it pins our clock to the reference's via `AWSC_FIXED_TIME`, because presigned
 URLs embed a timestamp and would otherwise never compare equal.
@@ -622,6 +622,7 @@ URLs embed a timestamp and would otherwise never compare equal.
 | `ec2-instance-connect open-tunnel` | both modes end-to-end against an EC2 stand-in and a TLS WebSocket echo server; frame and handshake vectors from RFC 6455 |
 | `ec2-instance-connect ssh` | every connection-type branch and all eight refusals against stand-ins and a fake `ssh`; the generated key read back by `ssh-keygen -y` |
 | `lightsail push-container-image` | the plugin's document byte-for-byte, and all three failure paths, against a fake `lightsailctl` |
+| `ecs monitor-express-gateway-service` | 28 rendering, combine and diff cases against the reference's own classes; both view modes and both display modes driven against a stand-in |
 | `gamelift upload-build` | three calls against a GameLift stand-in; the upload signed with GameLift's own credentials, bundle read back by `zipfile` |
 
 Facts worth recording, because each contradicts a reasonable assumption:
@@ -897,6 +898,48 @@ Facts worth recording, because each contradicts a reasonable assumption:
   (`aws-cli-rs/<version>`) rather than claiming to be an `awscli` 2.x. The field exists to
   tell the plugin which CLI invoked it, and this is not that CLI; misreporting it would
   hide a real incompatibility rather than avoid one.
+
+- **`ecs monitor-express-gateway-service` was ported against the reference's own
+  classes.** `managedresource.py` and `managedresourcegroup.py` are pure Python, so
+  `scripts/extract-ecs-express-cases.py` runs them unmodified — against stub `colorama`
+  and `dateutil` modules — and records what they render. `tests/golden/ecs-express-cases.json`
+  holds 28 cases covering every status colour, nesting shape, combine and set-diff, and
+  the Rust is compared against the reference's output rather than against a reading of
+  its source. Three things that corpus pinned down, all of which a hand-port would have
+  got wrong:
+
+  - **A duplicate key renders twice, both times showing the *last* value.** A group keeps
+    a Python `list` of keys alongside a `dict` of resources, so the repeat survives in
+    the order while the value is deduped.
+  - **Combining two trees regroups the children by resource type**, in order of each
+    type's first appearance — it does not preserve the interleaved input order. And where
+    a type has both identified and unidentified members the unidentified ones are dropped,
+    since those are the placeholder a revision emits before the resource exists.
+  - **The DEPLOYMENT diff is asymmetric on purpose.** A type this side has *without* an
+    identifier suppresses every key of that type on the other side: an unidentified entry
+    means "this type exists but is not resolved yet", so reporting the other side's
+    resolved ones as disassociating would be wrong.
+
+  **A reference bug reproduced rather than fixed:** the nested view renders the
+  `Last updated at:` line in **local time** under a `Z` suffix, because the reference
+  calls `datetime.fromtimestamp()` with no timezone there while the stream view passes
+  `tz=timezone.utc` and is correct. The corpus is generated under `TZ=Asia/Seoul` so this
+  is visible rather than hidden, and it records the offset it was generated at so the
+  test still passes elsewhere.
+
+  **Two divergences**, both deliberate:
+  - **The interactive display is ours.** The reference builds it with `prompt_toolkit`;
+    this draws the same thing — a framed scrollable viewport with a spinner and status
+    line, `up`/`down` to scroll, `q` to quit — directly with ANSI escapes and raw mode.
+    The behaviour and the status line's wording match; the exact borders do not, and on a
+    non-Unix terminal interactive mode is unavailable and reports the reference's own
+    "requires a TTY" message.
+  - **An absent timestamp loses a `combine` instead of raising.** The reference tests only
+    the *other* side for `None`, so a `None` on this side against a real timestamp raises
+    `TypeError`.
+
+  Worth knowing: **monitoring failures exit 1**, not 254 or 255 — the reference *returns*
+  1 from `_run_main` for both a bad display mode and a monitoring error.
 
 - **`gamelift upload-build` uploads with credentials that are not the caller's.**
   `request-upload-credentials` returns temporary credentials *and* a bucket and key that

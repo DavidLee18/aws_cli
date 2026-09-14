@@ -25,6 +25,7 @@ mod datapipeline;
 mod help;
 mod ec2instanceconnect;
 mod ecs;
+mod ecs_express;
 mod emr;
 mod emrcontainers;
 mod gamelift;
