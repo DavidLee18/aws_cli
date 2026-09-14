@@ -32,6 +32,10 @@ pub(crate) const IMPLEMENTED: &[(&str, &str, &str)] = &[
     ("cloudfront", "sign", "Sign a URL for CloudFront private content, with a canned or a custom policy."),
     ("codecommit", "credential-helper", "Answer git's credential protocol on stdin with a SigV4-derived password."),
     ("configservice", "get-status", "Print the status of the configuration recorders and delivery channels."),
+    ("dlm", "create-default-role", "Create the IAM role Data Lifecycle Manager uses, if it does not exist."),
+    ("dsql", "generate-db-connect-admin-auth-token", "Print a signed token for connecting to a DSQL cluster as admin."),
+    ("dsql", "generate-db-connect-auth-token", "Print a signed token for connecting to a DSQL cluster."),
+    ("gamelift", "get-game-session-log", "Download a game session's compressed log archive to a file."),
     ("configservice", "subscribe", "Create the S3 bucket and SNS topic if needed, then start recording."),
     ("ecr", "get-login-password", "Print the password for `docker login` against a private registry."),
     ("ecr-public", "get-login-password", "Print the password for `docker login` against the public registry."),
@@ -58,11 +62,19 @@ pub fn dispatch(parsed: &Parsed) -> Result<Option<ExitCode>, Failure> {
         ("ecr-public", "get-login-password") => get_login_password(parsed, &globals, true)?,
         ("configservice", "get-status") => configservice_get_status(parsed, &globals)?,
         ("rds", "generate-db-auth-token") => generate_db_auth_token(parsed, &globals)?,
+        ("dsql", "generate-db-connect-auth-token") => {
+            dsql_auth_token(parsed, &globals, "DbConnect")?
+        }
+        ("dsql", "generate-db-connect-admin-auth-token") => {
+            dsql_auth_token(parsed, &globals, "DbConnectAdmin")?
+        }
         ("codecommit", "credential-helper") => codecommit_credential_helper(parsed, &globals)?,
         ("eks", "get-token") => eks_get_token(parsed, &globals)?,
         // Signs locally: no credentials, no region, no request.
         ("cloudfront", "sign") => crate::cloudfront::sign(parsed)?,
         ("configservice", "subscribe") => configservice_subscribe(parsed, &globals)?,
+        ("dlm", "create-default-role") => dlm_create_default_role(parsed, &globals)?,
+        ("gamelift", "get-game-session-log") => gamelift_get_log(parsed, &globals)?,
         ("logs", "tail") => crate::logs_tail::run(parsed, &globals)?,
         // `sso login`/`logout` are custom commands on a modelled service: neither is an
         // operation on it, so both are handled before the model lookup.
@@ -329,6 +341,253 @@ fn generate_db_auth_token(parsed: &Parsed, globals: &Globals) -> Result<ExitCode
     );
 
     println!("{hostname}:{port}/?{query}");
+    Ok(exit::code(exit::SUCCESS))
+}
+
+/// The partition an AWS-managed policy ARN carries, from the region name.
+///
+/// `customizations/utils.py:get_policy_arn_suffix` reads the prefix rather than consulting
+/// the partition table, so an unknown region falls into `aws` — and a managed policy ARN
+/// built for the wrong partition simply does not exist, which the caller reports as "the
+/// managed policy does not exist" rather than as a bad region.
+fn policy_partition(region: &str) -> &'static str {
+    let region = region.to_ascii_lowercase();
+    if region.starts_with("cn-") {
+        "aws-cn"
+    } else if region.starts_with("us-gov") {
+        "aws-us-gov"
+    } else {
+        "aws"
+    }
+}
+
+/// `aws gamelift get-game-session-log`.
+///
+/// Asks GameLift for a presigned URL and downloads it to `--save-as`. The download is a
+/// plain unsigned GET: the URL already carries its own signature, so sending credentials
+/// with it would be both pointless and a leak.
+fn gamelift_get_log(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> {
+    let args = take_args(parsed, &["--game-session-id", "--save-as"])?;
+    let missing: Vec<&str> = ["--game-session-id", "--save-as"]
+        .into_iter()
+        .filter(|flag| !args.contains_key(flag))
+        .collect();
+    if !missing.is_empty() {
+        return Err(missing_required(&missing));
+    }
+    let value = |flag: &str| args.get(flag).copied().flatten().unwrap_or_default();
+    let session_id = value("--game-session-id");
+    let save_as = value("--save-as");
+
+    let region = resolve_region(globals)
+        .ok_or_else(|| Failure::new(exit::CONFIGURATION, awsc_runtime::RuntimeError::NoRegion))?;
+    // `globals` itself, not `for_other_service`: gamelift IS the service the user named,
+    // so a `--endpoint-url` they passed is meant for this call.
+    let other = Globals { region: Some(region), ..globals.clone() };
+    let model =
+        crate::load_model("gamelift").map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
+    let client = Client::new(&model, &other)?;
+    let response = client.call(
+        "get-game-session-log-url",
+        Some(&serde_json::json!({ "GameSessionId": session_id })),
+    )?;
+    let url = response
+        .get("PreSignedUrl")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| Failure::new(exit::GENERAL_ERROR, "'PreSignedUrl'"))?;
+
+    // `\r`, not `\n`: the success line that follows overwrites it.
+    print!("Downloading log archive for game session {session_id}...\r");
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+
+    let response = ureq::get(url)
+        .call()
+        .map_err(|e| Failure::new(exit::GENERAL_ERROR, format!("<urlopen error {e}>")))?;
+    let mut body = response.into_reader();
+    let mut file = std::fs::File::create(save_as)
+        .map_err(|e| Failure::new(exit::GENERAL_ERROR, format!("{save_as}: {e}")))?;
+    std::io::copy(&mut body, &mut file)
+        .map_err(|e| Failure::new(exit::GENERAL_ERROR, format!("{save_as}: {e}")))?;
+
+    println!(
+        "Successfully downloaded log archive for game session {session_id} to {save_as}"
+    );
+    Ok(exit::code(exit::SUCCESS))
+}
+
+/// `aws dlm create-default-role`.
+///
+/// Creates `AWSDataLifecycleManagerDefaultRole` (or the `-ForAMIManagement` variant) and
+/// attaches the matching AWS-managed policy.
+///
+/// **It is a no-op that prints nothing in two cases**, which looks like a failure and is
+/// not: when the role already exists, and when the managed policy does not exist in this
+/// partition. The reference returns `None` for both and its display step skips `None`, so
+/// a second run of a successful command produces no output at all.
+fn dlm_create_default_role(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> {
+    let args = take_args(parsed, &["--iam-endpoint", "--resource-type"])?;
+    let resource_type = args.get("--resource-type").copied().flatten().unwrap_or("snapshot");
+    let (role_name, policy_name) = match resource_type {
+        "snapshot" => (
+            "AWSDataLifecycleManagerDefaultRole",
+            "AWSDataLifecycleManagerServiceRole",
+        ),
+        "image" => (
+            "AWSDataLifecycleManagerDefaultRoleForAMIManagement",
+            "AWSDataLifecycleManagerServiceRoleForAMIManagement",
+        ),
+        other => {
+            return Err(Failure::after_usage(awsc_runtime::RuntimeError::ParamValidation(
+                format!(
+                    "argument --resource-type: Invalid choice, valid choices are:\n\n\
+                     snapshot                                 | image\n\nGot: {other}"
+                ),
+            )))
+        }
+    };
+
+    let region = resolve_region(globals)
+        .ok_or_else(|| Failure::new(exit::CONFIGURATION, awsc_runtime::RuntimeError::NoRegion))?;
+    let mut other = Globals { region: Some(region.clone()), ..globals.for_other_service() };
+    // `--iam-endpoint` overrides only the IAM calls, which is the whole point of having a
+    // separate flag from the global `--endpoint-url`.
+    if let Some(endpoint) = args.get("--iam-endpoint").copied().flatten() {
+        other.endpoint_url = Some(endpoint.to_string());
+    }
+    let iam_model = crate::load_model("iam").map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
+    let iam = Client::new(&iam_model, &other)?;
+
+    // `NoSuchEntity` means absent; anything else is a real failure and must not be read
+    // as "does not exist", which would try to create a role the caller cannot see.
+    let absent = |failure: &Failure| {
+        failure.service_error_code.as_deref() == Some("NoSuchEntity")
+    };
+    match iam.call("get-role", Some(&serde_json::json!({ "RoleName": role_name }))) {
+        Ok(_) => return Ok(exit::code(exit::SUCCESS)),
+        Err(failure) if absent(&failure) => {}
+        Err(failure) => return Err(failure),
+    }
+
+    let policy_arn =
+        format!("arn:{}:iam::aws:policy/service-role/{policy_name}", policy_partition(&region));
+
+    let policy = match iam.call("get-policy", Some(&serde_json::json!({ "PolicyArn": policy_arn }))) {
+        Ok(response) => response,
+        Err(failure) if absent(&failure) => return Ok(exit::code(exit::SUCCESS)),
+        Err(failure) => return Err(failure),
+    };
+
+    let trust_policy = serde_json::json!({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Sid": "",
+            "Effect": "Allow",
+            "Principal": { "Service": "dlm.amazonaws.com" },
+            "Action": "sts:AssumeRole"
+        }]
+    });
+    let created = iam.call(
+        "create-role",
+        Some(&serde_json::json!({
+            "RoleName": role_name,
+            // The document travels as a JSON *string*, not as a nested object.
+            "AssumeRolePolicyDocument": serde_json::to_string(&trust_policy)
+                .expect("a literal document serializes"),
+        })),
+    )?;
+    iam.call(
+        "attach-role-policy",
+        Some(&serde_json::json!({ "PolicyArn": policy_arn, "RoleName": role_name })),
+    )?;
+
+    let version_id = policy
+        .get("Policy")
+        .and_then(|p| p.get("DefaultVersionId"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let document = iam
+        .call(
+            "get-policy-version",
+            Some(&serde_json::json!({ "PolicyArn": policy_arn, "VersionId": version_id })),
+        )?
+        .get("PolicyVersion")
+        .and_then(|v| v.get("Document"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Object(Default::default()));
+
+    // `{'RolePolicy': document}` first, then the create-role response merged over it.
+    let mut result = serde_json::Map::new();
+    result.insert("RolePolicy".to_string(), document);
+    if let Some(fields) = created.as_object() {
+        for (key, value) in fields {
+            if key != "ResponseMetadata" {
+                result.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    let value = serde_json::Value::Object(result);
+    match awsc_output::render_named("create_role", &value, parsed.output) {
+        Ok(Some(text)) => print!("{text}"),
+        Ok(None) => {}
+        Err(e) => return Err(Failure::new(exit::GENERAL_ERROR, e)),
+    }
+    Ok(exit::code(exit::SUCCESS))
+}
+
+/// `aws dsql generate-db-connect-auth-token` and its `-admin-` twin.
+///
+/// A presigned `GET https://<hostname>/?Action=DbConnect` signed for `dsql`, with the
+/// `https://` prefix sliced back off — `botocore/signers.py:_dsql_generate_db_auth_token`
+/// builds a URL only to return everything after the scheme, because what the caller wants
+/// is a Postgres password, not a URL.
+///
+/// The two commands differ only in the action, and the action is what the cluster
+/// authorizes against: `DbConnectAdmin` is the superuser. Getting them the wrong way round
+/// would hand out more access than was asked for, so the caller names it explicitly rather
+/// than this deriving it from the command name.
+fn dsql_auth_token(parsed: &Parsed, globals: &Globals, action: &str) -> Result<ExitCode, Failure> {
+    let args = take_args(parsed, &["--hostname", "--expires-in"])?;
+    if !args.contains_key("--hostname") {
+        return Err(missing_required(&["--hostname"]));
+    }
+    let hostname = args.get("--hostname").copied().flatten().unwrap_or_default();
+
+    // `'default': 900` on the argument, so an absent flag is 900 seconds rather than no
+    // expiry at all.
+    let expires: u32 = match args.get("--expires-in").copied().flatten() {
+        None => 900,
+        Some(text) => text.parse().map_err(|_| {
+            Failure::new(
+                exit::GENERAL_ERROR,
+                format!("invalid literal for int() with base 10: '{text}'"),
+            )
+        })?,
+    };
+
+    let region = resolve_region(globals)
+        .ok_or_else(|| Failure::new(exit::CONFIGURATION, awsc_runtime::RuntimeError::NoRegion))?;
+    let creds = resolve_credentials(globals, &region)?;
+
+    let ctx = awsc_runtime::sigv4::SigningContext {
+        credentials: &creds,
+        region: &region,
+        service: "dsql",
+        timestamp: &awsc_runtime::sigv4::format_timestamp(crate::now_unix()),
+    };
+    let query = awsc_runtime::presign::presign(
+        &ctx,
+        &awsc_runtime::presign::PresignRequest {
+            method: "GET",
+            host: hostname,
+            path: "/",
+            params: vec![("Action".into(), action.into())],
+            extra_signed_headers: Vec::new(),
+            expires,
+            payload: awsc_runtime::presign::Payload::EmptyBody,
+        },
+    );
+    println!("{hostname}/?{query}");
     Ok(exit::code(exit::SUCCESS))
 }
 
@@ -820,6 +1079,44 @@ fn array<'a>(value: &'a Value, key: &str) -> &'a [Value] {
 
 fn string<'a>(value: &'a Value, key: &str) -> &'a str {
     value.get(key).and_then(Value::as_str).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod custom_command_tests {
+    use super::*;
+
+    #[test]
+    fn managed_policy_arns_follow_the_partition() {
+        assert_eq!(policy_partition("us-east-1"), "aws");
+        assert_eq!(policy_partition("cn-north-1"), "aws-cn");
+        assert_eq!(policy_partition("us-gov-west-1"), "aws-us-gov");
+        // Case-insensitive, and an unknown region is the commercial partition.
+        assert_eq!(policy_partition("CN-NORTH-1"), "aws-cn");
+        assert_eq!(policy_partition("moon-base-1"), "aws");
+    }
+
+    /// Every entry in `IMPLEMENTED` must name a command the reference actually has, or
+    /// the help page and the unported-command error will disagree with the surface data.
+    #[test]
+    fn every_implemented_command_exists_in_the_reference() {
+        let surface = awsc_model::surface_overlays::custom_surface();
+        for (service, command, summary) in IMPLEMENTED {
+            // `sso logout` is ours to keep: the reference has it as a command but the
+            // surface extractor does not record it, so it is exempt from this check.
+            if (*service, *command) == ("sso", "logout") {
+                continue;
+            }
+            let commands = surface
+                .custom_commands
+                .get(*service)
+                .unwrap_or_else(|| panic!("{service} has no custom commands in the surface data"));
+            assert!(
+                commands.keys().any(|name| name.split_whitespace().next() == Some(command)),
+                "{service} {command} is not in the reference's surface"
+            );
+            assert!(!summary.is_empty(), "{service} {command} has no summary");
+        }
+    }
 }
 
 #[cfg(test)]

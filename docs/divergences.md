@@ -543,7 +543,7 @@ views of one service. Deferred to the customization phase.
 
 ## Custom commands (first tranche)
 
-Seven custom commands are now implemented, each verified by byte-diffing our stdout/stderr
+Eleven custom commands are now implemented, each verified by byte-diffing our stdout/stderr
 and exit code against the reference. `scripts/compare-custom-commands.sh` reproduces the
 comparison; it pins our clock to the reference's via `AWSC_FIXED_TIME`, because presigned
 URLs embed a timestamp and would otherwise never compare equal.
@@ -557,6 +557,9 @@ URLs embed a timestamp and would otherwise never compare equal.
 | `eks get-token` | presigned URL byte-identical; document byte-identical in json/text/yaml/query |
 | `configservice get-status` | format strings ported from `getstatus.py`; needs a live account to diff |
 | `cloudfront sign` | canned and custom policies verified against `openssl dgst -sha1 -verify` |
+| `dsql generate-db-connect-auth-token` (+ `-admin-`) | shares the presign path already byte-diffed for `rds`/`eks` |
+| `dlm create-default-role` | all four paths driven against an IAM stand-in |
+| `gamelift get-game-session-log` | driven against a GameLift stand-in (rpcv2Cbor) plus a file server |
 
 Facts worth recording, because each contradicts a reasonable assumption:
 
@@ -579,6 +582,17 @@ Facts worth recording, because each contradicts a reasonable assumption:
   `IpAddress`, `DateGreaterThan` — because a reordered document is a different signature.
   Both forms were checked by recomputing the policy and verifying the signature with
   `openssl dgst -sha1 -verify`, which is an oracle independent of this code.
+- **`dlm create-default-role` prints nothing twice over, and both are success.** It returns
+  `None` when the role already exists *and* when the managed policy is absent from the
+  partition, and the reference's display step skips `None` — so a second run of a command
+  that worked produces no output at all. Reporting either as an error would be a
+  divergence; so would printing an empty document.
+- **`--iam-endpoint` is not `--endpoint-url`.** `dlm create-default-role` takes its own
+  flag because the global one would also redirect the service call. `gamelift
+  get-game-session-log` is the opposite case: gamelift *is* the service named, so the
+  global `--endpoint-url` applies to it, and the presigned download that follows is
+  deliberately unsigned — the URL carries its own signature and attaching credentials
+  would leak them to wherever it points.
 - **`codecommit credential-helper` is not SigV4.** The canonical request uses the literal
   method `GIT`, an empty canonical query, and an *empty payload-hash field* rather than a
   SHA-256; the timestamp inside the string-to-sign carries no trailing `Z`. The `Z` is
@@ -678,9 +692,11 @@ models** (`s3api get-bucket-lifecycle`, the deprecated form of
 seeded `_xform_cache` (`mturk list-hits-...`, storagegateway's `*-iscsi-*`,
 socialmessaging's 30 `*whatsapp*` calls).
 
-Auditing all 103 against the binary: **12 are implemented here, 37 already work as ordinary
-modelled operations, 50 are genuinely missing, and 4 belong to `agent-toolkit`, a service
-absent from our catalogue entirely.** So the help page filters its "not implemented" list
+Auditing all 103 against the binary (2026-09-13): **12 were implemented here, 37 already
+work as ordinary modelled operations, 50 were genuinely missing, and 4 belong to
+`agent-toolkit`, a service absent from our catalogue entirely.** Four more landed on
+2026-09-14 — `dsql`'s two token commands, `dlm create-default-role` and
+`gamelift get-game-session-log` — leaving 50. So the help page filters its "not implemented" list
 by whether the name resolves in the command table — without that it told readers that 37
 working commands, every WhatsApp call among them, did not work. And the wording of both the
 error and the help section says "no service model describes it" rather than "hand-written",
