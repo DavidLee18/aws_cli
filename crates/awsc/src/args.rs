@@ -219,6 +219,20 @@ pub fn parse(argv: &[String]) -> Result<Outcome, String> {
                     parsed.operation,
                 )));
             }
+            // `aws ec2 wait instance-running help` is the same request one level down:
+            // `wait` takes the waiter name as a positional, so the guard above does not
+            // see an empty list. Without this the waiter *runs* — a poll loop against the
+            // real API for someone who asked to read about it.
+            if arg == "help"
+                && parsed.operation == "wait"
+                && parsed.positionals.len() == 1
+                && !owns_its_arguments
+            {
+                return Ok(Outcome::Help(crate::help::Request::Waiter(
+                    parsed.service,
+                    parsed.positionals.remove(0),
+                )));
+            }
             // Held rather than rejected here: a custom command may declare subcommands.
             // The modeled path rejects any that are left over.
             parsed.positionals.push(arg.clone());
@@ -1239,6 +1253,28 @@ mod tests {
         // A path that happens to be spelled `help` is a path, not a request for the page.
         assert!(matches!(
             parse(&argv(&["s3", "ls", "help"])).unwrap(),
+            Outcome::Run(_)
+        ));
+    }
+
+    /// `wait` is two levels of subcommand, so a trailing `help` has to be caught at both.
+    /// Getting this wrong is not a missing page: the waiter *runs*, polling the real API
+    /// for someone who asked to read about it.
+    #[test]
+    fn a_trailing_help_is_caught_at_both_wait_levels() {
+        assert!(matches!(
+            parse(&argv(&["ec2", "wait", "help"])).unwrap(),
+            Outcome::Help(crate::help::Request::Operation(service, operation))
+                if service == "ec2" && operation == "wait"
+        ));
+        assert!(matches!(
+            parse(&argv(&["ec2", "wait", "instance-running", "help"])).unwrap(),
+            Outcome::Help(crate::help::Request::Waiter(service, waiter))
+                if service == "ec2" && waiter == "instance-running"
+        ));
+        // A waiter name alone is still a command to run, not a help request.
+        assert!(matches!(
+            parse(&argv(&["ec2", "wait", "instance-running"])).unwrap(),
             Outcome::Run(_)
         ));
     }

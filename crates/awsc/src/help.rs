@@ -28,6 +28,8 @@ pub enum Request {
     Service(String),
     /// `awsc <service> <operation> help`
     Operation(String, String),
+    /// `<service> wait <name> help` — one waiter rather than one operation.
+    Waiter(String, String),
 }
 
 /// Print the requested page. Always exit 0, as the reference's help does.
@@ -36,6 +38,7 @@ pub fn show(request: Request) -> Result<ExitCode, crate::Failure> {
         Request::TopLevel => top_level(),
         Request::Service(service) => service_page(&service)?,
         Request::Operation(service, operation) => operation_page(&service, &operation)?,
+        Request::Waiter(service, waiter) => waiter_page(&service, &waiter)?,
     };
     print!("{page}");
     Ok(crate::exit::code(crate::exit::SUCCESS))
@@ -159,11 +162,89 @@ fn service_page(service: &str) -> Result<String, crate::Failure> {
     Ok(out)
 }
 
+/// `awsc <service> wait <name> help`: what one waiter polls, and how patiently.
+fn waiter_page(service: &str, name: &str) -> Result<String, crate::Failure> {
+    let model = crate::load_model(service).map_err(|_| crate::unknown_service(service))?;
+    let cli_service = model
+        .cli_service_name()
+        .map_err(|e| crate::Failure::new(crate::exit::GENERAL_ERROR, e))?;
+    let Some(waiter) = awsc_model::waiters::get(&cli_service, name) else {
+        return Err(crate::invalid_choice(
+            "subcommand",
+            name,
+            awsc_model::waiters::names(&cli_service),
+        ));
+    };
+    let operation = waiter.operation.clone();
+    let mut out = format!("NAME\n    {name}\n\n");
+    out.push_str(&section(
+        "DESCRIPTION",
+        &format!(
+            "Polls `{operation}` until the resource reaches the state this waiter names, \
+             or until it gives up.",
+        ),
+    ));
+    out.push_str(&format!(
+        "SYNOPSIS\n    awsc {cli_service} wait {name} [parameters]\n\n"
+    ));
+    out.push_str(&section(
+        "POLLING",
+        &format!(
+            "Every {} seconds, at most {} times.",
+            waiter.delay, waiter.max_attempts
+        ),
+    ));
+    out.push_str(&section(
+        "PARAMETERS",
+        &format!(
+            "The same as `{operation}`. Run `awsc {cli_service} {operation} help` for them.",
+        ),
+    ));
+    Ok(out)
+}
+
+/// `awsc <service> wait help`: the waiters this service has.
+fn wait_page(cli_service: &str) -> String {
+    let names = awsc_model::waiters::names(cli_service);
+    let mut out = String::from("NAME\n    wait\n\n");
+    out.push_str(&section(
+        "DESCRIPTION",
+        "Poll an operation until a condition holds. Each subcommand below is one waiter: \
+         it repeats a describe call on a fixed schedule and returns once the resource \
+         reaches the state the waiter names, or fails when it gives up.",
+    ));
+    out.push_str(&format!("SYNOPSIS\n    awsc {cli_service} wait <subcommand> [parameters]\n\n"));
+    if names.is_empty() {
+        out.push_str("AVAILABLE WAITERS\n    This service has no waiters.\n");
+        return out;
+    }
+    out.push_str("AVAILABLE WAITERS\n");
+    for name in &names {
+        out.push_str(&format!("    {name}\n"));
+    }
+    out.push('\n');
+    out.push_str(&section(
+        "SEE ALSO",
+        &format!(
+            "A waiter takes the same parameters as the operation it polls. Run \
+             `awsc {cli_service} <operation> help` for those.",
+        ),
+    ));
+    out
+}
+
 fn operation_page(service: &str, operation: &str) -> Result<String, crate::Failure> {
     let model = crate::load_model(service).map_err(|_| crate::unknown_service(service))?;
     let cli_service = model
         .cli_service_name()
         .map_err(|e| crate::Failure::new(crate::exit::GENERAL_ERROR, e))?;
+
+    // `wait` is not an operation: it is a family of them, one per waiter. Without this
+    // the discovery path reports `Found invalid choice 'wait'` — the very error the
+    // waiters exist to stop — on the one command a reader would try to find them with.
+    if operation == "wait" {
+        return Ok(wait_page(&cli_service));
+    }
 
     // A custom command has no model to describe, so its help is the argument list the
     // surface data records for it.
