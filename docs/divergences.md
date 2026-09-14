@@ -586,7 +586,7 @@ views of one service. Deferred to the customization phase.
 
 ## Custom commands (first tranche)
 
-Thirty-seven custom commands are now implemented, each verified by byte-diffing our stdout/stderr
+Thirty-eight custom commands are now implemented, each verified by byte-diffing our stdout/stderr
 and exit code against the reference. `scripts/compare-custom-commands.sh` reproduces the
 comparison; it pins our clock to the reference's via `AWSC_FIXED_TIME`, because presigned
 URLs embed a timestamp and would otherwise never compare equal.
@@ -619,6 +619,7 @@ URLs embed a timestamp and would otherwise never compare equal.
 | `cloudtrail verify-query-results` | a real openssl-signed export, plus both tamper paths |
 | `deploy register` / `deregister` | both call sequences and the 0600 config file, against stand-ins |
 | `deploy push` | the uploaded bundle read back by Python's own `zipfile`, CRCs and all |
+| `ec2-instance-connect open-tunnel` | both modes end-to-end against an EC2 stand-in and a TLS WebSocket echo server; frame and handshake vectors from RFC 6455 |
 | `gamelift upload-build` | three calls against a GameLift stand-in; the upload signed with GameLift's own credentials, bundle read back by `zipfile` |
 
 Facts worth recording, because each contradicts a reasonable assumption:
@@ -802,6 +803,43 @@ Facts worth recording, because each contradicts a reasonable assumption:
   **One divergence**: Python passes `allowZip64=True` and would keep going past 4 GiB
   where this refuses, explicitly and before the upload starts rather than at the far end
   of one.
+- **`ec2-instance-connect open-tunnel` needed a WebSocket client**
+  (`crates/awsc/src/websocket.rs`). The reference gets one from `awscrt`, an event-driven
+  C library; the runtime's HTTP client is async hyper and cannot hand back the raw stream
+  a tunnel needs, so this is a synchronous RFC 6455 client: the `Upgrade` handshake with
+  the `Sec-WebSocket-Accept` check, **client-to-server masking** (servers close the
+  connection over a missing mask), binary and continuation frames, `close`, and `ping`
+  answered with `pong`. The handshake proof and the masked-frame layout are pinned to
+  RFC 6455's own examples in sections 1.3 and 5.7 — the only way to know they are right
+  without a server.
+
+  Three things about the command itself contradict a reasonable assumption:
+
+  - **A fresh URL is signed per connection.** The tunnel URL is a presigned SigV4 URL for
+    `ec2-instance-connect` with a 60-second expiry, so a listener that stayed up for an
+    hour could not reuse the first one. Verified: two connections to one listener carried
+    different `X-Amz-Date` and `X-Amz-Signature` values.
+  - **The endpoint is discovered, not configured.** Given only an instance id, the command
+    reads the instance's VPC and subnet, lists the endpoints in that VPC, and prefers one
+    in the *same subnet* — falling back to any endpoint in the VPC. A same-subnet endpoint
+    avoids a cross-AZ hop for every byte.
+  - **`--endpoint-url` does not reach the EC2 calls**, and never reaches the tunnel, whose
+    host comes from the endpoint record rather than from a ruleset. For the same reason
+    `use_fips_endpoint` is read here directly (`AWS_USE_FIPS_ENDPOINT`, then the profile
+    key) rather than coming from the endpoint resolver, which does not implement it: the
+    FIPS choice is between the record's `DnsName` and its `FipsDnsName`, and asking for
+    FIPS where there is no `FipsDnsName` is a configuration error (253), not a silent
+    fallback.
+
+  **Two divergences**, both deliberate:
+  - The reference builds the tunnel's TLS context from awscrt's defaults and so ignores
+    `--no-verify-ssl` and `--ca-bundle`. Ours honours both. It costs nothing and is what
+    makes the command testable against a stand-in.
+  - **On local EOF this half-closes instead of spinning.** The reference's stdin reader
+    sees `b''` at EOF, does not treat it as closed, and sends empty frames in a tight
+    loop. Ours sends a close frame and keeps reading until the server closes, so the last
+    reply of a session is not truncated.
+
 - **`gamelift upload-build` uploads with credentials that are not the caller's.**
   `request-upload-credentials` returns temporary credentials *and* a bucket and key that
   belong to GameLift, so the S3 client is built normally and then has its credentials

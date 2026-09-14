@@ -40,6 +40,13 @@ sha2 = { version = "0.10", features = ["oid"] }
 rsa = { version = "0.9", features = ["sha1"] }
 sha1 = "0.10"
 base64ct = { version = "1", features = ["alloc"] }
+# `ec2-instance-connect open-tunnel` only. The tunnel is a WebSocket over TLS, which is
+# neither HTTP request/response nor async, so it cannot go through the runtime's hyper
+# client -- it needs a plain synchronous TLS stream it can frame itself. Both crates are
+# already in the tree under `hyper-rustls`; naming them here adds no new download.
+rustls = { workspace = true }
+rustls-native-certs = "0.8"
+rustls-pemfile = { workspace = true }
 quick-xml = { workspace = true }
 serde = { workspace = true }
 
