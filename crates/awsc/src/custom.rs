@@ -37,6 +37,7 @@ pub(crate) const IMPLEMENTED: &[(&str, &str, &str)] = &[
     ("dlm", "create-default-role", "Create the IAM role Data Lifecycle Manager uses, if it does not exist."),
     ("dsql", "generate-db-connect-admin-auth-token", "Print a signed token for connecting to a DSQL cluster as admin."),
     ("dsql", "generate-db-connect-auth-token", "Print a signed token for connecting to a DSQL cluster."),
+    ("ecs", "deploy", "Register a task definition and roll it out through CodeDeploy."),
     ("emr-containers", "create-role-associations", "Associate an IAM role with the EKS service accounts EMR runs pods under."),
     ("emr-containers", "delete-role-associations", "Remove the pod identity associations for an IAM role."),
     ("emr-containers", "update-role-trust-policy", "Add the EMR on EKS web-identity statement to a role's trust policy."),
@@ -82,6 +83,10 @@ pub fn dispatch(parsed: &Parsed) -> Result<Option<ExitCode>, Failure> {
         ("dlm", "create-default-role") => dlm_create_default_role(parsed, &globals)?,
         // Two commands each, so these get their own modules and their own matches.
         ("datapipeline", _) => match crate::datapipeline::dispatch(parsed, &globals)? {
+            Some(code) => code,
+            None => return Ok(None),
+        },
+        ("ecs", _) => match crate::ecs::dispatch(parsed, &globals)? {
             Some(code) => code,
             None => return Ok(None),
         },

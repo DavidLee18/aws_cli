@@ -38,6 +38,22 @@ pub fn run(
     waiter_name: &str,
     input: Option<&Value>,
 ) -> Result<ExitCode, Failure> {
+    run_with(client, waiter, waiter_name, input, waiter.delay, waiter.max_attempts)
+}
+
+/// The same loop with the delay and attempt cap overridden.
+///
+/// botocore lets a caller pass `WaiterConfig`, and `ecs deploy` does: its cap comes from
+/// the deployment group's configured wait rather than from the waiter definition, so a
+/// group told to wait an hour is not cut off after the waiter's default thirty minutes.
+pub fn run_with(
+    client: &Client<'_>,
+    waiter: &Waiter,
+    waiter_name: &str,
+    input: Option<&Value>,
+    delay: u64,
+    max_attempts: u64,
+) -> Result<ExitCode, Failure> {
     let mut attempt = 0u64;
     loop {
         attempt += 1;
@@ -74,7 +90,7 @@ pub fn run(
             return Err(failure);
         }
 
-        if attempt >= waiter.max_attempts {
+        if attempt >= max_attempts {
             return Err(Failure::new(
                 exit::GENERAL_ERROR,
                 format!(
@@ -83,7 +99,7 @@ pub fn run(
                 ),
             ));
         }
-        std::thread::sleep(std::time::Duration::from_secs(waiter.delay));
+        std::thread::sleep(std::time::Duration::from_secs(delay));
     }
 }
 

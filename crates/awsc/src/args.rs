@@ -802,6 +802,11 @@ pub fn expand_paramfile(value: &str) -> Result<String, String> {
     })
 }
 
+/// `~` and `$VAR` expansion, for a command that opens a path of its own.
+pub fn shellexpand_public(path: &str) -> String {
+    shellexpand(path)
+}
+
 /// `~` and `$VAR` expansion, as the reference applies before opening.
 fn shellexpand(path: &str) -> String {
     let expanded = match path.strip_prefix("~/") {

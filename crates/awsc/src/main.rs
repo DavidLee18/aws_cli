@@ -20,6 +20,7 @@ mod errorformat;
 mod custom;
 mod datapipeline;
 mod help;
+mod ecs;
 mod emrcontainers;
 mod dispatch;
 mod logs_tail;

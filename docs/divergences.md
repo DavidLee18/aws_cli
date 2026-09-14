@@ -586,7 +586,7 @@ views of one service. Deferred to the customization phase.
 
 ## Custom commands (first tranche)
 
-Seventeen custom commands are now implemented, each verified by byte-diffing our stdout/stderr
+Eighteen custom commands are now implemented, each verified by byte-diffing our stdout/stderr
 and exit code against the reference. `scripts/compare-custom-commands.sh` reproduces the
 comparison; it pins our clock to the reference's via `AWSC_FIXED_TIME`, because presigned
 URLs embed a timestamp and would otherwise never compare equal.
@@ -608,6 +608,7 @@ URLs embed a timestamp and would otherwise never compare equal.
 | `servicecatalog generate product` / `provisioning-artifact` | upload + create driven against a stand-in |
 | `emr-containers update-role-trust-policy` | dry-run, update and already-present paths against a stand-in |
 | `emr-containers create-role-associations` / `delete-role-associations` | every association type against a stand-in |
+| `ecs deploy` | six calls across ECS and CodeDeploy driven against a stand-in, appspec hash recomputed |
 
 Facts worth recording, because each contradicts a reasonable assumption:
 
@@ -673,6 +674,18 @@ Facts worth recording, because each contradicts a reasonable assumption:
   --dry-run` uses `indent=2` and the association commands use `indent=4`. Also note the
   singular in `emr-container-sa-spark-livy`, which is spelled that way in the reference —
   "correcting" it would name an account Livy does not present.
+- **`ecs deploy` hashes what it sends, not what it read.** The appspec is re-serialised
+  after the task-definition ARN is spliced in, and the revision's `sha256` is over those
+  bytes — hashing the original file would fail every deployment. That serialisation is
+  `json.dumps` with its **default separators**, which put a space after `,` and `:`;
+  serde_json's compact form omits both, so this is one of the few places the port needs a
+  Python-shaped JSON writer. The splice itself is by case-insensitive key lookup
+  (`resources` / `properties` / `taskDefinition`), and writes back the spelling the file
+  used rather than a normalised one.
+- **`ecs deploy`'s wait is not the waiter's.** It is the deployment group's
+  `waitTimeInMinutes` plus its `terminationWaitTimeInMinutes` plus ten, clamped to
+  [30, 360], passed as a `WaiterConfig` override — so a group configured to wait an hour
+  is not cut off after the waiter's own default.
 - **`codecommit credential-helper` is not SigV4.** The canonical request uses the literal
   method `GIT`, an empty canonical query, and an *empty payload-hash field* rather than a
   SHA-256; the timestamp inside the string-to-sign carries no trailing `Z`. The `Z` is
@@ -774,10 +787,10 @@ socialmessaging's 30 `*whatsapp*` calls).
 
 Auditing all 103 against the binary (2026-09-13): **12 were implemented here, 37 already
 work as ordinary modelled operations, 50 were genuinely missing, and 4 belong to
-`agent-toolkit`, a service absent from our catalogue entirely.** Eleven more landed on 2026-09-14 — `dsql`'s two
+`agent-toolkit`, a service absent from our catalogue entirely.** Twelve more landed on 2026-09-14 — `dsql`'s two
 token commands, `dlm create-default-role`, `gamelift get-game-session-log`,
-`datapipeline`'s two, `servicecatalog generate`'s two and `emr-containers`' three —
-leaving 43. So the help page filters its "not implemented" list
+`datapipeline`'s two, `servicecatalog generate`'s two, `emr-containers`' three and
+`ecs deploy` — leaving 42. So the help page filters its "not implemented" list
 by whether the name resolves in the command table — without that it told readers that 37
 working commands, every WhatsApp call among them, did not work. And the wording of both the
 error and the help section says "no service model describes it" rather than "hand-written",
