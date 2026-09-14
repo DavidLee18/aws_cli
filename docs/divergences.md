@@ -586,7 +586,7 @@ views of one service. Deferred to the customization phase.
 
 ## Custom commands (first tranche)
 
-Nineteen custom commands are now implemented, each verified by byte-diffing our stdout/stderr
+Twenty-one custom commands are now implemented, each verified by byte-diffing our stdout/stderr
 and exit code against the reference. `scripts/compare-custom-commands.sh` reproduces the
 comparison; it pins our clock to the reference's via `AWSC_FIXED_TIME`, because presigned
 URLs embed a timestamp and would otherwise never compare equal.
@@ -610,6 +610,7 @@ URLs embed a timestamp and would otherwise never compare equal.
 | `emr-containers create-role-associations` / `delete-role-associations` | every association type against a stand-in |
 | `ecs deploy` | six calls across ECS and CodeDeploy driven against a stand-in, appspec hash recomputed |
 | `codeartifact login` | all six tools dry-run against a stand-in; npm run for real against a fake `npm` |
+| `emr terminate-clusters` / `modify-cluster-attributes` | call order and the inverted member against a stand-in |
 
 Facts worth recording, because each contradicts a reasonable assumption:
 
@@ -702,6 +703,12 @@ Facts worth recording, because each contradicts a reasonable assumption:
   swaps its positional between the two forms (`add source <url> --name <name>` versus
   `update source <name> --source <url>`), and appends `--store-password-in-clear-text`
   everywhere but Windows, where encryption is available.
+- **`emr modify-cluster-attributes` makes one request per attribute, and can half-succeed.**
+  Four attributes, four Set* operations, sent in a fixed order — so a command that sets two
+  and fails on the second leaves the first applied. `--auto-terminate` is the one place the
+  flag and the member are **opposites**: it sets `KeepJobFlowAliveWhenNoSteps` to *false*,
+  because the flag says "shut down when idle" and the member says "stay alive". Getting
+  that backwards keeps a cluster running and costs money quietly.
 - **`codecommit credential-helper` is not SigV4.** The canonical request uses the literal
   method `GIT`, an empty canonical query, and an *empty payload-hash field* rather than a
   SHA-256; the timestamp inside the string-to-sign carries no trailing `Z`. The `Z` is
@@ -791,6 +798,14 @@ exist, so the reader goes hunting for a typo in a name that is perfectly correct
 | the AWS CLI has it, we have not ported it | named as an unported custom command, pointing at `awsc <service> help` |
 | a customization *argument* we have not ported | named as such, rather than demanding the argument the customization replaces |
 
+**A list-valued flag on a custom command was silently truncated until 2026-09-14.**
+`take_args` skipped exactly one token after a flag, because every custom command until then
+took single-valued flags. `emr terminate-clusters --cluster-ids j-1 j-2` reported
+`Unknown options: j-2`, and — worse, because it was silent — `servicecatalog generate
+--tags a b` sent only the first tag. `extras` holds flags and their values and nothing
+else (positionals are kept apart), so every non-flag token after an accepted flag belongs
+to it, which is what it now assumes.
+
 **`custom_commands` in the surface data is not a list of hand-written commands**, which is
 easy to assume from the name and wrong in a way that leaks into user-facing text. It holds
 four different things (see `scripts/extract-custom-surface.py`): true `BasicCommand` trees
@@ -806,7 +821,7 @@ work as ordinary modelled operations, 50 were genuinely missing, and 4 belong to
 `agent-toolkit`, a service absent from our catalogue entirely.** Twelve more landed on 2026-09-14 — `dsql`'s two
 token commands, `dlm create-default-role`, `gamelift get-game-session-log`,
 `datapipeline`'s two, `servicecatalog generate`'s two, `emr-containers`' three and
-`ecs deploy` and `codeartifact login` — leaving 41. So the help page filters its "not implemented" list
+`ecs deploy`, `codeartifact login` and two of `emr`'s fourteen — leaving 39. So the help page filters its "not implemented" list
 by whether the name resolves in the command table — without that it told readers that 37
 working commands, every WhatsApp call among them, did not work. And the wording of both the
 error and the help section says "no service model describes it" rather than "hand-written",

@@ -39,6 +39,8 @@ pub(crate) const IMPLEMENTED: &[(&str, &str, &str)] = &[
     ("dsql", "generate-db-connect-admin-auth-token", "Print a signed token for connecting to a DSQL cluster as admin."),
     ("dsql", "generate-db-connect-auth-token", "Print a signed token for connecting to a DSQL cluster."),
     ("ecs", "deploy", "Register a task definition and roll it out through CodeDeploy."),
+    ("emr", "modify-cluster-attributes", "Set a cluster's visibility, termination protection, auto-terminate or node replacement."),
+    ("emr", "terminate-clusters", "Terminate one or more clusters."),
     ("emr-containers", "create-role-associations", "Associate an IAM role with the EKS service accounts EMR runs pods under."),
     ("emr-containers", "delete-role-associations", "Remove the pod identity associations for an IAM role."),
     ("emr-containers", "update-role-trust-policy", "Add the EMR on EKS web-identity statement to a role's trust policy."),
@@ -92,6 +94,10 @@ pub fn dispatch(parsed: &Parsed) -> Result<Option<ExitCode>, Failure> {
             None => return Ok(None),
         },
         ("ecs", _) => match crate::ecs::dispatch(parsed, &globals)? {
+            Some(code) => code,
+            None => return Ok(None),
+        },
+        ("emr", _) => match crate::emr::dispatch(parsed, &globals)? {
             Some(code) => code,
             None => return Ok(None),
         },
@@ -170,11 +176,17 @@ pub(crate) fn take_args<'a>(
 ) -> Result<BTreeMap<&'a str, Option<&'a str>>, Failure> {
     let mut out = BTreeMap::new();
     let mut leftover: Vec<String> = Vec::new();
-    let mut skip_next = false;
+    // `extras` holds flags and the values that followed them, nothing else — positionals
+    // are kept apart. So every non-flag token after an accepted flag belongs to it, which
+    // is what makes a list-valued flag (`--cluster-ids j-1 j-2`) work: skipping only one
+    // token reported the rest as unknown options.
+    let mut skipping_values = false;
     for token in &parsed.extras {
-        if skip_next {
-            skip_next = false;
-            continue;
+        if skipping_values {
+            if !token.starts_with("--") {
+                continue;
+            }
+            skipping_values = false;
         }
         let (name, inline) = match token.split_once('=') {
             Some((n, v)) => (n, Some(v)),
@@ -186,12 +198,12 @@ pub(crate) fn take_args<'a>(
         }
         let value = match inline {
             Some(v) => Some(v),
-            // `parameters` already resolved whether a following token was consumed as
-            // this flag's value; reuse that decision so the two stay in step.
+            // `parameters` already resolved which following tokens were consumed as this
+            // flag's value, joined with spaces; reuse that so the two stay in step.
             None => parsed.parameters.get(name).and_then(|v| v.as_deref()),
         };
         if inline.is_none() && value.is_some() {
-            skip_next = true;
+            skipping_values = true;
         }
         out.insert(name, value);
     }
@@ -1122,6 +1134,31 @@ mod custom_command_tests {
         // Case-insensitive, and an unknown region is the commercial partition.
         assert_eq!(policy_partition("CN-NORTH-1"), "aws-cn");
         assert_eq!(policy_partition("moon-base-1"), "aws");
+    }
+
+    /// A list-valued flag on a custom command keeps every value.
+    ///
+    /// `take_args` used to skip exactly one token after a flag, so
+    /// `--cluster-ids j-1 j-2` reported `Unknown options: j-2` — and the same bug silently
+    /// truncated `servicecatalog generate --tags`.
+    #[test]
+    fn a_list_valued_flag_consumes_all_its_values() {
+        let mut parsed = crate::args::parse(&[
+            "emr".to_string(),
+            "terminate-clusters".to_string(),
+            "--cluster-ids".to_string(),
+            "j-1".to_string(),
+            "j-2".to_string(),
+        ])
+        .and_then(|outcome| match outcome {
+            crate::args::Outcome::Run(parsed) => Ok(parsed),
+            _ => Err("expected a runnable command".to_string()),
+        })
+        .expect("parses");
+        parsed.service = "emr".to_string();
+
+        let args = take_args(&parsed, &["--cluster-ids"]).expect("no unknown options");
+        assert_eq!(args.get("--cluster-ids").copied().flatten(), Some("j-1 j-2"));
     }
 
     /// Every entry in `IMPLEMENTED` must name a command the reference actually has, or

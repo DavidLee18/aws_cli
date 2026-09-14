@@ -22,6 +22,7 @@ mod custom;
 mod datapipeline;
 mod help;
 mod ecs;
+mod emr;
 mod emrcontainers;
 mod dispatch;
 mod logs_tail;
