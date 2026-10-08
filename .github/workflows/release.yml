@@ -76,8 +76,13 @@ jobs:
           # set on EVERY row rather than only the new one -- an absent key is null, and
           # null compares equal to false in a GitHub expression, so a `!= false` test
           # skipped the smoke test on all five targets at once and still went green.
+          #
+          # x86_64 Linux is built on Ubuntu 22.04 so the binary requires glibc 2.35, not
+          # whatever ubuntu-latest currently ships (24.04 is 2.39). Do not switch this
+          # row back to ubuntu-latest: the glibc-max step below is the tripwire.
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
+            glibc_max: "2.35"
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
           - target: aarch64-apple-darwin
@@ -100,7 +105,7 @@ jobs:
       # everywhere and NASM on Windows.
       - name: Install cmake (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y cmake
+        run: sudo apt-get update && sudo apt-get install -y cmake binutils
       - name: Install cmake (macOS)
         if: runner.os == 'macOS'
         run: brew list cmake >/dev/null 2>&1 || brew install cmake
@@ -110,6 +115,34 @@ jobs:
 
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }} --bin awsc
+
+      # Fail the job if the binary names a GLIBC symbol newer than the cap. Building on
+      # ubuntu-22.04 is what keeps the requirement at 2.35; this check is what notices
+      # if the runner image is bumped and the binary silently stops running on 22.04.
+      - name: Check glibc requirement
+        if: matrix.glibc_max
+        run: |
+          bin="target/${{ matrix.target }}/release/awsc"
+          vers=$(objdump -T "$bin" | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' | sed 's/^GLIBC_//' | sort -u)
+          echo "GLIBC symbols used:"
+          echo "$vers" | sort -t. -k1,1n -k2,2n -k3,3n
+          highest=$(echo "$vers" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+          echo "highest: ${highest:-none} (cap ${{ matrix.glibc_max }})"
+          python3 - "$highest" "${{ matrix.glibc_max }}" <<'PY'
+          import sys
+          highest, cap = sys.argv[1], sys.argv[2]
+          if not highest:
+              sys.exit("binary has no GLIBC_* symbols; is it static?")
+          def parts(v):
+              return tuple(int(x) for x in v.split("."))
+          hi, ceiling = parts(highest), parts(cap)
+          n = max(len(hi), len(ceiling))
+          hi += (0,) * (n - len(hi))
+          ceiling += (0,) * (n - len(ceiling))
+          if hi > ceiling:
+              sys.exit(f"binary requires glibc {highest}, cap is {cap}")
+          print("ok")
+          PY
 
       - uses: actions/download-artifact@v4
         with:
