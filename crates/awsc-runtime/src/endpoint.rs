@@ -155,9 +155,6 @@ pub fn resolve(
         .and_then(|s| s.traits.get("smithy.rules#endpointRuleSet").cloned())
         .ok_or(EndpointError::NoRuleSet)?;
 
-    let ruleset: RuleSet = serde_json::from_value(ruleset_json)
-        .map_err(|e| EndpointError::Malformed(e.to_string()))?;
-
     // With no region configured, substitute the service's global pseudo-region if it has
     // one (`sts` -> `aws-global`), else report NoRegion — exactly botocore's rule at
     // regions.py:274-281. Doing this BEFORE evaluation matters: the ruleset itself has
@@ -169,6 +166,30 @@ pub fn resolve(
             Some(pseudo) => Some(pseudo.to_string()),
             None => return Err(EndpointError::NoRegion),
         },
+    };
+    let mut params = params.clone();
+    params.region = region;
+    resolve_from_ruleset(&ruleset_json, &default_signing_name(model), &params)
+}
+
+/// Resolve from an already-extracted ruleset.
+///
+/// S3 region redirects re-resolve from worker threads. The service [`Model`] cannot
+/// cross a thread — its shape store is not `Sync` — so the caller keeps the ruleset
+/// JSON, which can.
+///
+/// `params.region` must already be set. The no-region pseudo-region substitution lives
+/// in [`resolve`], because it needs the model.
+pub fn resolve_from_ruleset(
+    ruleset_json: &serde_json::Value,
+    default_signing_name: &str,
+    params: &EndpointParams,
+) -> Result<Endpoint, EndpointError> {
+    let ruleset: RuleSet = serde_json::from_value(ruleset_json.clone())
+        .map_err(|e| EndpointError::Malformed(e.to_string()))?;
+    let region = match &params.region {
+        Some(region) if !region.is_empty() => Some(region.clone()),
+        _ => return Err(EndpointError::NoRegion),
     };
 
     let mut values: BTreeMap<String, Value> = BTreeMap::new();
@@ -212,7 +233,7 @@ pub fn resolve(
     let signing_region = resolved.signing_region.or(region).unwrap_or_default();
     let signing_name = resolved
         .signing_name
-        .unwrap_or_else(|| default_signing_name(model));
+        .unwrap_or_else(|| default_signing_name.to_string());
 
     Ok(Endpoint {
         url: ensure_trailing_slash(&resolved.url),

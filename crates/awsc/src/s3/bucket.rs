@@ -40,7 +40,10 @@ pub fn mb(parsed: &Parsed, globals: &Globals) -> Result<ExitCode, Failure> {
 
     let model =
         crate::load_model("s3api").map_err(|e| Failure::new(exit::PARAM_VALIDATION, e))?;
-    let client = Client::for_bucket(&model, globals, Some(&bucket))?;
+    let mut client = Client::for_bucket(&model, globals, Some(&bucket))?;
+    // The region in the constraint is the one the user asked for. Following a redirect
+    // would create the bucket somewhere else and report success.
+    client.without_region_redirect();
     let region = client.endpoint.signing_region.clone();
 
     // us-east-1 must NOT carry a LocationConstraint; S3 rejects it there.

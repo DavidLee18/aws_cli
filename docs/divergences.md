@@ -1798,6 +1798,29 @@ loop, which is a lot of machinery for the ordering of an error message nobody pa
 
 ---
 
+## S3 region redirects
+
+A bucket lives in one region. Sending `ListObjectsV2` at another region's endpoint comes
+back as **301** with `x-amz-bucket-region`, not as an error. Treating that as success
+parsed the redirect document as an empty listing, so `s3 ls` printed nothing and exited 0.
+
+The reference's `S3RegionRedirectorv2` resends immediately, signed for the region the
+response named, and remembers it for the rest of the process. That is what `s3` and
+`s3api` do now: 301/302/307, `PermanentRedirect`, `AuthorizationHeaderMalformed` (the
+region is in the body), a HEAD 400 that carries the header, and
+`IllegalLocationConstraintException`. `CreateBucket` is not retargeted — following that
+one would create the bucket somewhere the user did not ask for. A region that is not a
+DNS label is not followed. `--endpoint-url` is kept across the re-resolve, so a stand-in
+is not abandoned for the real service.
+
+The HeadBucket fallback the reference uses when a redirect names no region at all is not
+implemented. Those responses are returned as they are. Event-stream operations
+(`SelectObjectContent` and the rest of that path) are not retargeted either: that path
+does not retry, and a redirect would have to replay a stream the caller may already have
+started reading.
+
+---
+
 ## The remaining `s3` transfer flags
 
 `--metadata`, `--metadata-directive`, `--cache-control`, `--content-disposition`,

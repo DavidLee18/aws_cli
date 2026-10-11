@@ -9,6 +9,7 @@ pub mod conn;
 pub mod delete;
 pub mod pool;
 pub mod progress;
+pub mod redirect;
 pub mod sync;
 pub mod transfer;
 pub mod list;

@@ -24,6 +24,12 @@ pub struct Conn {
     pub transport: http::Transport,
     pub debug: bool,
     pub no_sign_request: bool,
+    /// The bucket the endpoint was resolved for, and the ruleset a redirect re-resolves
+    /// with. The ruleset rather than the model: the model is not `Sync`, and transfers
+    /// share one `Conn` across threads.
+    bucket: Option<String>,
+    endpoint_url: Option<String>,
+    ruleset: Option<std::sync::Arc<serde_json::Value>>,
     /// Report every *retried* response on stderr, from `AWSC_RETRY_TRACE`.
     ///
     /// The pool only learns about throttling once the retry budget is exhausted, so a
@@ -47,7 +53,18 @@ impl Conn {
             debug: globals.debug,
             no_sign_request: globals.no_sign_request,
             retry_trace: std::env::var_os("AWSC_RETRY_TRACE").is_some(),
+            bucket: client.endpoint_bucket().map(str::to_string),
+            endpoint_url: client.endpoint_url().map(str::to_string),
+            ruleset: client.s3_ruleset().cloned(),
         }
+    }
+
+    fn endpoint_for_attempt(&self) -> Endpoint {
+        super::redirect::prepare(
+            self.bucket.as_deref(),
+            self.endpoint_url.as_deref(),
+            &self.endpoint,
+        )
     }
 
     /// Issue one request, retried in place. Safe to call from many threads at once.
@@ -83,6 +100,7 @@ impl Conn {
         let invocation_id = retry::new_invocation_id();
         let max_attempts = policy.max_attempts;
         let mut attempt: u32 = 1;
+        let mut followed = false;
 
         loop {
             let mut extra_headers = headers.to_vec();
@@ -90,7 +108,7 @@ impl Conn {
 
             let request = http::PreparedRequest {
                 method: method.to_string(),
-                endpoint: self.endpoint.clone(),
+                endpoint: self.endpoint_for_attempt(),
                 path: path.to_string(),
                 query: query.to_string(),
                 content_type: None,
@@ -109,6 +127,29 @@ impl Conn {
             }
 
             let sent = http::send(&request, &signed, &transport);
+            if !followed {
+                if let Ok(response) = &sent {
+                    if super::redirect::note(
+                        self.ruleset.as_deref(),
+                        response,
+                        &request.endpoint.signing_region,
+                        self.bucket.as_deref(),
+                        self.endpoint_url.as_deref(),
+                        method,
+                    ) {
+                        if self.debug {
+                            let bucket = self.bucket.as_deref().unwrap_or_default();
+                            eprintln!("s3: bucket {bucket} is in another region; resending there");
+                        }
+                        // The failed attempt's bytes never landed.
+                        if let Some(watch) = &watch {
+                            watch.restart();
+                        }
+                        followed = true;
+                        continue;
+                    }
+                }
+            }
             let delay = match &sent {
                 Err(e) => {
                     let message = e.to_string();

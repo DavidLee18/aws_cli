@@ -17,6 +17,7 @@ use awsc_protocol::eventstream;
 use awsc_runtime::{credentials, endpoint, http, retry, sigv4};
 use serde_json::Value;
 use std::cell::RefCell;
+use std::sync::Arc;
 
 /// The global arguments a client needs, independent of which command is running.
 ///
@@ -147,6 +148,17 @@ fn merge_in_model_order(
     Value::Object(out)
 }
 
+/// The S3 ruleset, or nothing for every other service. Cloned once, then shared with
+/// each `Conn` by `Arc` so a redirect can re-resolve off the thread that owns the model.
+fn s3_ruleset(model: &Model, signing_name: &str) -> Option<Arc<serde_json::Value>> {
+    if signing_name != "s3" {
+        return None;
+    }
+    model.service().ok().and_then(|service| {
+        service.traits.get("smithy.rules#endpointRuleSet").cloned().map(Arc::new)
+    })
+}
+
 pub struct Client<'a> {
     pub model: &'a Model,
     pub protocol: Protocol,
@@ -156,6 +168,14 @@ pub struct Client<'a> {
     retry: RefCell<retry::RetryPolicy>,
     debug: bool,
     no_sign_request: bool,
+    /// `--endpoint-url`, kept so a region redirect re-resolves against the same override
+    /// instead of leaving the stand-in for the real service.
+    endpoint_url: Option<String>,
+    /// The S3 endpoint ruleset, when this client is S3. Kept apart from the model so a
+    /// transfer thread can re-resolve a region without sharing the model.
+    s3_ruleset: Option<Arc<serde_json::Value>>,
+    /// `CreateBucket` sets this false. Every other S3 call follows a region redirect.
+    follow_redirects: bool,
     /// The bucket handed to the endpoint ruleset, if any.
     ///
     /// When it is set the endpoint has already accounted for the bucket — in the host
@@ -261,7 +281,7 @@ impl<'a> Client<'a> {
         // A ruleset that rejects the inputs, or a missing region, is a configuration
         // problem (253). The ruleset's own wording beats anything we would substitute.
         let endpoint_bucket = ep_params.bucket.clone();
-        let ep = endpoint::resolve(&model, &ep_params).map_err(|e| match e {
+        let ep = endpoint::resolve(model, &ep_params).map_err(|e| match e {
             endpoint::EndpointError::Rules(_) | endpoint::EndpointError::NoRegion => {
                 Failure::new(exit::CONFIGURATION, e)
             }
@@ -281,6 +301,7 @@ impl<'a> Client<'a> {
                 };
                 Failure::new(code, e)
             })?;
+        let s3_ruleset = s3_ruleset(model, &ep.signing_name);
 
         Ok(Client {
             model,
@@ -297,8 +318,63 @@ impl<'a> Client<'a> {
             retry: RefCell::new(retry::RetryPolicy::from_environment()),
             debug: globals.debug,
             no_sign_request: globals.no_sign_request,
+            endpoint_url: globals.endpoint_url.clone(),
+            s3_ruleset,
+            follow_redirects: true,
             endpoint_bucket,
         })
+    }
+
+    /// Do not follow an S3 region redirect. `s3 mb` uses this: retargeting
+    /// `CreateBucket` would create the bucket in a region the user did not name.
+    pub(crate) fn without_region_redirect(&mut self) {
+        self.follow_redirects = false;
+    }
+
+    pub(crate) fn endpoint_bucket(&self) -> Option<&str> {
+        self.endpoint_bucket.as_deref()
+    }
+
+    pub(crate) fn endpoint_url(&self) -> Option<&str> {
+        self.endpoint_url.as_deref()
+    }
+
+    pub(crate) fn s3_ruleset(&self) -> Option<&std::sync::Arc<serde_json::Value>> {
+        self.s3_ruleset.as_ref()
+    }
+
+    /// The endpoint for this attempt. A region learned from an earlier redirect replaces
+    /// the one the client was built with, so the rest of a transfer does not pay the
+    /// redirect on every object.
+    fn endpoint_for_attempt(&self) -> endpoint::Endpoint {
+        if !self.follow_redirects {
+            return self.endpoint.clone();
+        }
+        crate::s3::redirect::prepare(
+            self.endpoint_bucket.as_deref(),
+            self.endpoint_url.as_deref(),
+            &self.endpoint,
+        )
+    }
+
+    /// Record a region redirect and say whether the caller should resend immediately.
+    fn note_s3_redirect(&self, response: &http::Response, attempt_region: &str, method: &str) -> bool {
+        if !self.follow_redirects || self.endpoint.signing_name != "s3" {
+            return false;
+        }
+        let followed = crate::s3::redirect::note(
+            self.s3_ruleset.as_deref(),
+            response,
+            attempt_region,
+            self.endpoint_bucket.as_deref(),
+            self.endpoint_url.as_deref(),
+            method,
+        );
+        if followed && self.debug {
+            let bucket = self.endpoint_bucket.as_deref().unwrap_or_default();
+            eprintln!("s3: bucket {bucket} is in another region; resending there");
+        }
+        followed
     }
 
     /// Call an operation by its CLI name (`get-authorization-token`), returning the
@@ -355,13 +431,14 @@ impl<'a> Client<'a> {
         let max_attempts = self.retry.borrow().max_attempts;
         let mut attempt: u32 = 1;
 
+        let mut followed = false;
         loop {
             let mut extra_headers = headers.to_vec();
             extra_headers.extend(retry::retry_headers(&invocation_id, attempt, max_attempts));
 
             let request = http::PreparedRequest {
                 method: method.to_string(),
-                endpoint: self.endpoint.clone(),
+                endpoint: self.endpoint_for_attempt(),
                 path: path.to_string(),
                 query: query.to_string(),
                 content_type: None,
@@ -382,6 +459,16 @@ impl<'a> Client<'a> {
             }
 
             let sent = http::send(&request, &signed, &self.transport);
+            // A 301 is not a failure and not a retry. Resend once, signed for the region
+            // the response named, before the status is classified.
+            if !followed {
+                if let Ok(response) = &sent {
+                    if self.note_s3_redirect(response, &request.endpoint.signing_region, method) {
+                        followed = true;
+                        continue;
+                    }
+                }
+            }
             let delay = match &sent {
                 Err(e) => {
                     let message = e.to_string();
@@ -922,6 +1009,7 @@ impl<'a> Client<'a> {
         let invocation_id = retry::new_invocation_id();
         let max_attempts = self.retry.borrow().max_attempts;
         let mut attempt: u32 = 1;
+        let mut followed = false;
 
         let response = loop {
             let mut extra_headers = wire.headers.clone();
@@ -929,7 +1017,7 @@ impl<'a> Client<'a> {
 
             let request = http::PreparedRequest {
                 method: wire.method.clone(),
-                endpoint: self.endpoint.clone(),
+                endpoint: self.endpoint_for_attempt(),
                 path: self.operation_path(&wire.path),
                 query: wire.query.clone(),
                 content_type: wire.content_type.clone(),
@@ -957,6 +1045,17 @@ impl<'a> Client<'a> {
             }
 
             let sent = http::send(&request, &headers, &self.transport);
+            // Same redirect as `send_raw`. `CreateBucket` is the one operation that must
+            // not be retargeted: the constraint error is the request, not the addressing.
+            if !followed && operation_wire_name != "CreateBucket" {
+                if let Ok(response) = &sent {
+                    if self.note_s3_redirect(response, &request.endpoint.signing_region, &request.method)
+                    {
+                        followed = true;
+                        continue;
+                    }
+                }
+            }
 
             // Classify this attempt, then ask the policy whether to go again.
             let outcome_delay = match &sent {
