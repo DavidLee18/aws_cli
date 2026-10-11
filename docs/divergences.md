@@ -1821,6 +1821,20 @@ started reading.
 
 ---
 
+## Idempotency tokens
+
+`CreateSecret`, `PutSecretValue`, `UpdateSecret` and `RotateSecret` take a
+`ClientRequestToken`. It is not a required CLI flag: the model marks it
+`smithy.api#idempotencyToken`, and the reference fills a UUID when the caller
+leaves it out. The service still requires the value on the wire, so omitting it
+used to fail at Secrets Manager and the caller had to invent one.
+
+Every top-level member with that trait is now filled the same way, once per
+call. A retry resends the document, so it repeats the token. A value the caller
+passed is left alone.
+
+---
+
 ## The remaining `s3` transfer flags
 
 `--metadata`, `--metadata-directive`, `--cache-control`, `--content-disposition`,

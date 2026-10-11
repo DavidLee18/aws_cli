@@ -44,6 +44,72 @@ fn requires_request_checksum(op: &OperationShape) -> bool {
         .unwrap_or(false)
 }
 
+/// Copy `input`, filling any idempotency-token member the caller left out.
+///
+/// Returns `None` when nothing was missing, so the caller's document is serialized
+/// unchanged. botocore's `generate_idempotent_uuid` does the same: a top-level member
+/// carrying `smithy.api#idempotencyToken` (on the member, or on the shape it targets)
+/// becomes `uuid4()` when the input does not name it. Secrets Manager's
+/// `ClientRequestToken` is one of these. The service requires the value on the wire,
+/// and the reference CLI generates it.
+fn fill_idempotency_tokens(
+    model: &Model,
+    input_shape: Option<&StructureShape>,
+    input: Option<&Value>,
+) -> Result<Option<Value>, ProtocolError> {
+    let Some(shape) = input_shape else { return Ok(None) };
+    // A non-object is the serializer's error to report. Inventing a token beside it
+    // would hide that.
+    let present = match input {
+        Some(Value::Object(map)) => Some(map),
+        Some(_) => return Ok(None),
+        None => None,
+    };
+    let missing: Vec<&str> = shape
+        .members
+        .iter()
+        .filter(|(name, member)| {
+            is_idempotency_token(model, member) && present.is_none_or(|map| !map.contains_key(*name))
+        })
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if missing.is_empty() {
+        return Ok(None);
+    }
+    let mut object = input.cloned().unwrap_or_else(|| Value::Object(Default::default()));
+    let Some(map) = object.as_object_mut() else { return Ok(None) };
+    for name in missing {
+        map.insert(name.to_string(), Value::String(uuid_v4()?));
+    }
+    Ok(Some(object))
+}
+
+/// The trait lives on the member in most models and on the target string in a few.
+/// botocore merges the two before it looks, so either place counts.
+fn is_idempotency_token(model: &Model, member: &awsc_model::shape::Member) -> bool {
+    member.traits.has("smithy.api#idempotencyToken")
+        || model
+            .shape(&member.target)
+            .is_some_and(|shape| shape.traits().has("smithy.api#idempotencyToken"))
+}
+
+/// `str(uuid.uuid4())`: 36 lowercase hex characters, hyphens, version 4, RFC 4122 variant.
+fn uuid_v4() -> Result<String, ProtocolError> {
+    use aws_lc_rs::rand::{SecureRandom, SystemRandom};
+    let mut bytes = [0u8; 16];
+    SystemRandom::new().fill(&mut bytes).map_err(|_| ProtocolError::Random)?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Ok(format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3],
+        bytes[4], bytes[5],
+        bytes[6], bytes[7],
+        bytes[8], bytes[9],
+        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+    ))
+}
+
 /// Attach `Content-MD5` when the operation demands a checksum.
 ///
 /// Only for a body already in memory: a streaming payload would have to be read twice,
@@ -70,6 +136,12 @@ pub fn serialize(
     input: Option<&Value>,
 ) -> Result<WireRequest, ProtocolError> {
     let api_version = model.service().map(|s| s.version.clone()).unwrap_or_default();
+
+    // One token for the whole call, including its retries: the wire document is built
+    // once, here, and every attempt resends it. A fresh token per attempt would make
+    // the retry a different request.
+    let generated = fill_idempotency_tokens(model, input_shape, input)?;
+    let input = generated.as_ref().or(input);
 
     let mut wire = serialize_for_protocol(
         model,
@@ -427,5 +499,110 @@ pub fn parse_error(
             None => fallback(),
         },
         _ => fallback(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    const MODEL: &str = r#"{
+      "smithy": "2.0",
+      "shapes": {
+        "com.x#S": {"type": "service", "version": "2017-10-17",
+          "operations": [
+            {"target": "com.x#CreateSecret"},
+            {"target": "com.x#PutThing"}
+          ],
+          "traits": {"aws.protocols#awsJson1_1": {}}},
+        "com.x#Str": {"type": "string"},
+        "com.x#Token": {"type": "string", "traits": {"smithy.api#idempotencyToken": {}}},
+        "com.x#CreateSecret": {"type": "operation",
+          "input": {"target": "com.x#CreateSecretRequest"}},
+        "com.x#CreateSecretRequest": {"type": "structure", "members": {
+          "Name": {"target": "com.x#Str", "traits": {"smithy.api#required": {}}},
+          "ClientRequestToken": {"target": "com.x#Str",
+            "traits": {"smithy.api#idempotencyToken": {}}},
+          "SecretString": {"target": "com.x#Str"}
+        }},
+        "com.x#PutThing": {"type": "operation",
+          "input": {"target": "com.x#PutThingRequest"}},
+        "com.x#PutThingRequest": {"type": "structure", "members": {
+          "ClientToken": {"target": "com.x#Token"}
+        }}
+      }
+    }"#;
+
+    fn model() -> Model {
+        Model::from_json(MODEL.as_bytes()).expect("model")
+    }
+
+    /// The body `serialize` would send for `operation` and `input`.
+    fn body(operation: &str, input: Option<&Value>) -> Value {
+        let model = model();
+        let (id, op) = model.operation(operation).expect("operation");
+        let input_shape = model.operation_input(op).expect("input shape");
+        let wire = serialize(&model, model.protocol().unwrap(), id.name(), op, input_shape, input)
+            .expect("serialize");
+        serde_json::from_slice(wire.body.as_bytes().expect("body")).expect("json")
+    }
+
+    fn is_uuid_v4(value: &str) -> bool {
+        let bytes = value.as_bytes();
+        if bytes.len() != 36 {
+            return false;
+        }
+        let hex = |i: usize| bytes[i].is_ascii_hexdigit();
+        let hyphen = |i: usize| bytes[i] == b'-';
+        (0..8).all(hex)
+            && hyphen(8)
+            && (9..13).all(hex)
+            && hyphen(13)
+            && bytes[14] == b'4'
+            && (15..18).all(hex)
+            && hyphen(18)
+            && matches!(bytes[19], b'8' | b'9' | b'a' | b'b')
+            && (20..23).all(hex)
+            && hyphen(23)
+            && (24..36).all(hex)
+    }
+
+    #[test]
+    fn a_missing_client_request_token_is_a_uuid() {
+        let document = body("create-secret", Some(&json!({"Name": "app", "SecretString": "value"})));
+        let token = document["ClientRequestToken"].as_str().expect("token");
+        assert!(is_uuid_v4(token), "{token}");
+        assert_eq!(document["Name"], "app");
+        assert_eq!(document["SecretString"], "value");
+    }
+
+    #[test]
+    fn an_omitted_document_still_gets_a_token() {
+        let document = body("create-secret", None);
+        assert!(is_uuid_v4(document["ClientRequestToken"].as_str().unwrap_or("")));
+    }
+
+    #[test]
+    fn a_caller_supplied_token_is_kept() {
+        let document = body(
+            "create-secret",
+            Some(&json!({"Name": "app", "ClientRequestToken": "already-chosen-by-the-caller-ok"})),
+        );
+        assert_eq!(document["ClientRequestToken"], "already-chosen-by-the-caller-ok");
+    }
+
+    #[test]
+    fn each_call_gets_its_own_token() {
+        let first = body("create-secret", None);
+        let second = body("create-secret", None);
+        assert_ne!(first["ClientRequestToken"], second["ClientRequestToken"]);
+    }
+
+    /// A few models put the trait on the string shape rather than on the member.
+    #[test]
+    fn a_token_trait_on_the_target_shape_counts() {
+        let document = body("put-thing", None);
+        assert!(is_uuid_v4(document["ClientToken"].as_str().unwrap_or("")));
     }
 }

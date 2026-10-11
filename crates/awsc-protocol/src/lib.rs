@@ -31,4 +31,6 @@ pub enum ProtocolError {
     Xml(String),
     #[error("{0} is not implemented yet")]
     Unsupported(String),
+    #[error("could not generate an idempotency token")]
+    Random,
 }
