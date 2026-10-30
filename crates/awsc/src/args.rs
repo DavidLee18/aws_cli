@@ -868,6 +868,33 @@ fn bind_value(
         return Ok(Value::String(raw.to_string()));
     }
 
+    // Scalars stay scalars. The reference (`awscli/argprocess.py::_unpack_cli_arg`)
+    // json-decodes only document shapes and complex shapes. A string whose text is a
+    // JSON document — IAM `AssumeRolePolicyDocument` / `PolicyDocument`, bucket
+    // policies, event patterns, template bodies — is still a string on the wire,
+    // including the exact bytes of a `file://` paramfile. Parsing it into an object is
+    // what validation reports as `type: <class 'dict'>, valid types: <class 'str'>`.
+    if matches!(
+        shape,
+        Some(
+            Shape::String(_)
+                | Shape::Enum(_)
+                | Shape::IntEnum(_)
+                | Shape::Boolean(_)
+                | Shape::Byte(_)
+                | Shape::Short(_)
+                | Shape::Integer(_)
+                | Shape::Long(_)
+                | Shape::Float(_)
+                | Shape::Double(_)
+                | Shape::BigInteger(_)
+                | Shape::BigDecimal(_)
+                | Shape::Timestamp(_)
+        )
+    ) {
+        return Ok(coerce_scalar(model, target, raw));
+    }
+
     // A value that looks like JSON disables shorthand ENTIRELY for this argument — and
     // there is no fallback if the JSON then fails to parse.
     let looks_like_json = raw.trim_start().starts_with('[') || raw.trim_start().starts_with('{');
@@ -1283,6 +1310,304 @@ mod tests {
     fn rejects_bad_output_and_missing_subcommand() {
         assert!(parse(&argv(&["sts"])).is_err());
         assert!(parse(&argv(&["sts", "get-caller-identity", "--output", "xml"])).is_err());
+    }
+
+    /// IAM policy documents are strings that contain JSON. The reference keeps the text
+    /// the user passed — inline or from `file://` — and validation rejects a dict.
+    ///
+    /// `awscli/argprocess.py::_unpack_cli_arg` JSON-decodes only document shapes and
+    /// complex shapes. A string is a scalar, so `{...}` is not parsed into an object.
+    fn iam_model() -> Model {
+        awsc_model::Model::from_json(
+            br#"{"smithy":"2.0","shapes":{
+              "com.amazonaws.iam#IAM":{"type":"service","version":"2010-05-08",
+                "operations":[
+                  {"target":"com.amazonaws.iam#CreateRole"},
+                  {"target":"com.amazonaws.iam#PutRolePolicy"},
+                  {"target":"com.amazonaws.iam#CreatePolicy"}
+                ],
+                "traits":{"aws.protocols#awsQuery":{},
+                  "aws.api#service":{"sdkId":"IAM","arnNamespace":"iam"}}},
+              "com.amazonaws.iam#policyDocumentType":{"type":"string",
+                "traits":{"smithy.api#length":{"min":1,"max":131072}}},
+              "com.amazonaws.iam#roleNameType":{"type":"string"},
+              "com.amazonaws.iam#policyNameType":{"type":"string"},
+              "com.amazonaws.iam#Tag":{"type":"structure","members":{
+                "Key":{"target":"com.amazonaws.iam#roleNameType"},
+                "Value":{"target":"com.amazonaws.iam#roleNameType"}}},
+              "com.amazonaws.iam#tagListType":{"type":"list",
+                "member":{"target":"com.amazonaws.iam#Tag"}},
+              "com.amazonaws.iam#CreateRole":{"type":"operation",
+                "input":{"target":"com.amazonaws.iam#CreateRoleRequest"}},
+              "com.amazonaws.iam#CreateRoleRequest":{"type":"structure","members":{
+                "RoleName":{"target":"com.amazonaws.iam#roleNameType",
+                  "traits":{"smithy.api#required":{}}},
+                "AssumeRolePolicyDocument":{"target":"com.amazonaws.iam#policyDocumentType",
+                  "traits":{"smithy.api#required":{}}},
+                "Tags":{"target":"com.amazonaws.iam#tagListType"}}},
+              "com.amazonaws.iam#PutRolePolicy":{"type":"operation",
+                "input":{"target":"com.amazonaws.iam#PutRolePolicyRequest"}},
+              "com.amazonaws.iam#PutRolePolicyRequest":{"type":"structure","members":{
+                "RoleName":{"target":"com.amazonaws.iam#roleNameType",
+                  "traits":{"smithy.api#required":{}}},
+                "PolicyName":{"target":"com.amazonaws.iam#policyNameType",
+                  "traits":{"smithy.api#required":{}}},
+                "PolicyDocument":{"target":"com.amazonaws.iam#policyDocumentType",
+                  "traits":{"smithy.api#required":{}}}}},
+              "com.amazonaws.iam#CreatePolicy":{"type":"operation",
+                "input":{"target":"com.amazonaws.iam#CreatePolicyRequest"}},
+              "com.amazonaws.iam#CreatePolicyRequest":{"type":"structure","members":{
+                "PolicyName":{"target":"com.amazonaws.iam#policyNameType",
+                  "traits":{"smithy.api#required":{}}},
+                "PolicyDocument":{"target":"com.amazonaws.iam#policyDocumentType",
+                  "traits":{"smithy.api#required":{}}}}},
+              "com.amazonaws.iam#Doc":{"type":"document"},
+              "com.amazonaws.iam#PutDoc":{"type":"operation",
+                "input":{"target":"com.amazonaws.iam#PutDocRequest"}},
+              "com.amazonaws.iam#PutDocRequest":{"type":"structure","members":{
+                "Payload":{"target":"com.amazonaws.iam#Doc"}}}
+            }}"#,
+        )
+        .expect("iam fixture")
+    }
+
+    fn iam_input(operation: &str, args: &[(&str, &str)]) -> (Model, StructureShape, Value) {
+        let model = iam_model();
+        let (_id, op) = model.operation(operation).expect("operation");
+        let shape = model.operation_input(op).expect("input").expect("shape").clone();
+        let parameters: BTreeMap<String, Option<String>> = args
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), Some((*v).to_string())))
+            .collect();
+        let built = build_input_named(
+            &model,
+            Some(&shape),
+            &parameters,
+            "iam",
+            operation,
+            BinaryFormat::Base64,
+        )
+        .expect("binds")
+        .expect("input");
+        (model, shape, built)
+    }
+
+    /// Percent-decode one form field from an `awsQuery` body.
+    fn form_field(body: &str, key: &str) -> String {
+        let raw = body
+            .split('&')
+            .find_map(|pair| pair.strip_prefix(&format!("{key}=")))
+            .unwrap_or_else(|| panic!("{key} missing from {body}"));
+        let bytes = raw.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).expect("hex");
+                out.push(u8::from_str_radix(hex, 16).expect("byte"));
+                i += 3;
+            } else {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+        String::from_utf8(out).expect("utf-8")
+    }
+
+    /// The bound value, the validation report, and the query-protocol field must all be
+    /// the original string. An object that happens to display as similar JSON is still
+    /// the bug: validation refuses it before anything is sent.
+    fn assert_string_param(
+        operation: &str,
+        wire_action: &str,
+        member: &str,
+        flag: &str,
+        argument: &str,
+        expected: &str,
+        extras: &[(&str, &str)],
+    ) {
+        let mut args = vec![(flag, argument)];
+        args.extend_from_slice(extras);
+        let (model, shape, built) = iam_input(operation, &args);
+        let value = &built[member];
+        assert!(
+            value.is_string(),
+            "{operation} {flag} must stay a string, got {value}"
+        );
+        assert_eq!(
+            value.as_str(),
+            Some(expected),
+            "{operation} {flag} must keep the original text"
+        );
+
+        let validation = awsc_protocol::validate::validate(&model, Some(&shape), Some(&built));
+        assert!(
+            validation.is_empty(),
+            "{operation} {flag} failed validation:\n{}",
+            validation.report()
+        );
+
+        let body = awsc_protocol::query::serialize(
+            &model,
+            wire_action,
+            "2010-05-08",
+            Some(&shape),
+            Some(&built),
+        )
+        .expect("serialize");
+        assert!(body.contains(&format!("Action={wire_action}")));
+        assert_eq!(
+            form_field(&body, member),
+            expected,
+            "{operation} sent {member} as something other than the original string"
+        );
+    }
+
+    const TRUST: &str = "{ \"Version\": \"2012-10-17\", \"Statement\": [ { \"Effect\": \"Allow\", \"Principal\": { \"Service\": \"ec2.amazonaws.com\" }, \"Action\": \"sts:AssumeRole\" } ] }";
+    const POLICY: &str = "{ \"Version\": \"2012-10-17\", \"Statement\": [ { \"Effect\": \"Allow\", \"Action\": \"s3:ListBucket\", \"Resource\": \"*\" } ] }";
+
+    /// A string that merely starts with `{` is still text. The reference does not try
+    /// to parse it, so a typo is the service's problem rather than `Invalid JSON`.
+    #[test]
+    fn a_string_argument_that_is_not_json_is_kept_verbatim() {
+        assert_string_param(
+            "create-role",
+            "CreateRole",
+            "AssumeRolePolicyDocument",
+            "--assume-role-policy-document",
+            "{not-json",
+            "{not-json",
+            &[("--role-name", "app")],
+        );
+    }
+
+    #[test]
+    fn create_role_keeps_inline_assume_role_policy_document_a_string() {
+        assert_string_param(
+            "create-role",
+            "CreateRole",
+            "AssumeRolePolicyDocument",
+            "--assume-role-policy-document",
+            TRUST,
+            TRUST,
+            &[("--role-name", "app")],
+        );
+    }
+
+    #[test]
+    fn create_role_keeps_file_assume_role_policy_document_a_string() {
+        let path = std::env::temp_dir().join("awsc-assume-role-policy.json");
+        let text = format!("{TRUST}\n");
+        std::fs::write(&path, &text).expect("write policy");
+        let flag = format!("file://{}", path.display());
+        assert_string_param(
+            "create-role",
+            "CreateRole",
+            "AssumeRolePolicyDocument",
+            "--assume-role-policy-document",
+            &flag,
+            &text,
+            &[("--role-name", "app")],
+        );
+    }
+
+    #[test]
+    fn put_role_policy_keeps_inline_policy_document_a_string() {
+        assert_string_param(
+            "put-role-policy",
+            "PutRolePolicy",
+            "PolicyDocument",
+            "--policy-document",
+            POLICY,
+            POLICY,
+            &[("--role-name", "app"), ("--policy-name", "read")],
+        );
+    }
+
+    #[test]
+    fn put_role_policy_keeps_file_policy_document_a_string() {
+        let path = std::env::temp_dir().join("awsc-put-role-policy.json");
+        let text = format!("{POLICY}\n");
+        std::fs::write(&path, &text).expect("write policy");
+        let flag = format!("file://{}", path.display());
+        assert_string_param(
+            "put-role-policy",
+            "PutRolePolicy",
+            "PolicyDocument",
+            "--policy-document",
+            &flag,
+            &text,
+            &[("--role-name", "app"), ("--policy-name", "read")],
+        );
+    }
+
+    #[test]
+    fn create_policy_keeps_inline_policy_document_a_string() {
+        assert_string_param(
+            "create-policy",
+            "CreatePolicy",
+            "PolicyDocument",
+            "--policy-document",
+            POLICY,
+            POLICY,
+            &[("--policy-name", "read")],
+        );
+    }
+
+    #[test]
+    fn create_policy_keeps_file_policy_document_a_string() {
+        let path = std::env::temp_dir().join("awsc-create-policy.json");
+        let text = format!("{POLICY}\n");
+        std::fs::write(&path, &text).expect("write policy");
+        let flag = format!("file://{}", path.display());
+        assert_string_param(
+            "create-policy",
+            "CreatePolicy",
+            "PolicyDocument",
+            "--policy-document",
+            &flag,
+            &text,
+            &[("--policy-name", "read")],
+        );
+    }
+
+    /// A real structure still takes JSON. The string exception must not swallow it.
+    #[test]
+    fn a_structure_argument_is_still_parsed_as_json() {
+        let (_model, _shape, built) = iam_input(
+            "create-role",
+            &[
+                ("--role-name", "app"),
+                ("--assume-role-policy-document", "not-json"),
+                ("--tags", r#"[{"Key":"env","Value":"prod"}]"#),
+            ],
+        );
+        assert_eq!(built["Tags"], serde_json::json!([{"Key": "env", "Value": "prod"}]));
+    }
+
+    /// A document shape is an untyped JSON value, so `{...}` is an object.
+    #[test]
+    fn a_document_argument_is_still_parsed_as_json() {
+        let model = iam_model();
+        // PutDoc is not on the service, so look the shape up directly.
+        let id = awsc_model::ShapeId::parse("com.amazonaws.iam#PutDocRequest").unwrap();
+        let shape = match model.shape(&id).unwrap() {
+            Shape::Structure(s) => s.clone(),
+            other => panic!("expected structure, got {other:?}"),
+        };
+        let mut parameters = BTreeMap::new();
+        parameters.insert("--payload".into(), Some(r#"{"a":1}"#.into()));
+        let built = build_input_named(
+            &model,
+            Some(&shape),
+            &parameters,
+            "iam",
+            "put-doc",
+            BinaryFormat::Base64,
+        )
+        .expect("binds")
+        .expect("input");
+        assert_eq!(built["Payload"], serde_json::json!({"a": 1}));
     }
 }
 
